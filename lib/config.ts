@@ -9,13 +9,23 @@ const SIM_MODES: readonly SimMode[] = [
   "offline",
 ];
 
+// Кто выполняет разбор pull request: `simulate` — заглушка (режимы SimMode ниже),
+// `provod` — реальный разбор языковой моделью через OpenAI-совместимый шлюз provod.ai.
+export type Reviewer = "simulate" | "provod";
+
+const REVIEWERS: readonly Reviewer[] = ["simulate", "provod"];
+
 export interface Config {
   appId: string;
   privateKey: string;
   webhookSecret: string;
+  reviewer: Reviewer;
   simMode: SimMode;
   simDelayMs: number;
   simAdminToken: string;
+  provodApiKey?: string;
+  provodModel: string;
+  provodBaseUrl: string;
 }
 
 let cached: Config | null = null;
@@ -44,6 +54,16 @@ function parseSimMode(): SimMode {
   return raw as SimMode;
 }
 
+function parseReviewer(): Reviewer {
+  const raw = process.env.CURATOR_REVIEWER ?? "simulate";
+  if (!REVIEWERS.includes(raw as Reviewer)) {
+    throw new Error(
+      `Invalid CURATOR_REVIEWER "${raw}", expected one of: ${REVIEWERS.join(", ")}`,
+    );
+  }
+  return raw as Reviewer;
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -56,13 +76,25 @@ export function getConfig(): Config {
   if (cached) {
     return cached;
   }
+  const reviewer = parseReviewer();
+  const provodApiKey = process.env.PROVOD_API_KEY;
+  if (reviewer === "provod" && !provodApiKey) {
+    throw new Error(
+      "CURATOR_REVIEWER=provod requires PROVOD_API_KEY to be set",
+    );
+  }
+
   cached = {
     appId: requireEnv("GITHUB_APP_ID"),
     privateKey: loadPrivateKey(),
     webhookSecret: requireEnv("GITHUB_WEBHOOK_SECRET"),
+    reviewer,
     simMode: parseSimMode(),
     simDelayMs: Number(process.env.CURATOR_SIM_DELAY_MS ?? "8000"),
     simAdminToken: requireEnv("SIM_ADMIN_TOKEN"),
+    provodApiKey,
+    provodModel: process.env.PROVOD_MODEL ?? "deepseek/deepseek-v4-pro",
+    provodBaseUrl: process.env.PROVOD_BASE_URL ?? "https://api.provod.ai/v1",
   };
   return cached;
 }

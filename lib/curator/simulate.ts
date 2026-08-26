@@ -1,6 +1,7 @@
 import { getConfig } from "@/lib/config";
 import { CheckConclusion, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
+import { handleProvodPullRequest } from "@/lib/curator/provod-review";
 
 export const SIMULATED_ANSWER =
   "🤖 **AI Curator (симуляция)**\n\n" +
@@ -18,7 +19,7 @@ interface PullRequestPayload {
 export async function handlePullRequest(
   payload: PullRequestPayload,
 ): Promise<void> {
-  const { simMode, simDelayMs } = getConfig();
+  const { reviewer, simMode, simDelayMs } = getConfig();
   const owner = payload.repository.owner.login;
   const repo = payload.repository.name;
   const headSha = payload.pull_request.head.sha;
@@ -27,6 +28,11 @@ export async function handlePullRequest(
 
   if (installationId === undefined) {
     throw new Error("Webhook payload has no installation id");
+  }
+
+  if (reviewer === "provod") {
+    await handleProvodPullRequest({ owner, repo, prNumber, headSha, installationId });
+    return;
   }
 
   if (simMode === "offline") {
