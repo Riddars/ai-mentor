@@ -2,7 +2,7 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { provodChat } from "@/lib/llm/provod";
+import { chat } from "@/lib/llm/chat";
 
 /** Общие координаты pull request, которые нужны на каждом шаге разбора. */
 export interface ReviewParams {
@@ -84,7 +84,7 @@ function buildChangesText(files: PrFile[]): string {
 }
 
 /** Собрать контекст, спросить модель и вернуть готовый комментарий для PR. */
-export async function runProvodReview(params: ReviewParams): Promise<string> {
+export async function runReview(params: ReviewParams): Promise<string> {
   const [files, research] = await Promise.all([
     fetchChangedFiles(params),
     fetchResearchDoc(params),
@@ -98,7 +98,7 @@ export async function runProvodReview(params: ReviewParams): Promise<string> {
     researchBlock +
     `Изменения в pull request #${params.prNumber}:\n\n${buildChangesText(files)}`;
 
-  const answer = await provodChat([
+  const answer = await chat([
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: userPrompt },
   ]);
@@ -107,26 +107,26 @@ export async function runProvodReview(params: ReviewParams): Promise<string> {
 }
 
 /**
- * Точка входа разбора через provod для webhook-обработчика. Обязательную проверку
- * ставим сразу (она блокирует слияние), а сам разбор запускаем в фоне, чтобы не
- * держать ответ на вебхук на время обращения к модели.
+ * Точка входа разбора языковой моделью для webhook-обработчика. Обязательную
+ * проверку ставим сразу (она блокирует слияние), а сам разбор запускаем в фоне,
+ * чтобы не держать ответ на вебхук на время обращения к модели.
  */
-export async function handleProvodPullRequest(params: ReviewParams): Promise<void> {
+export async function handleLlmPullRequest(params: ReviewParams): Promise<void> {
   const checkRunId = await createCheckRun({
     owner: params.owner,
     repo: params.repo,
     headSha: params.headSha,
     installationId: params.installationId,
   });
-  void completeProvodReview(params, checkRunId);
+  void completeReview(params, checkRunId);
 }
 
-async function completeProvodReview(
+async function completeReview(
   params: ReviewParams,
   checkRunId: number,
 ): Promise<void> {
   try {
-    const comment = await runProvodReview(params);
+    const comment = await runReview(params);
     await postIssueComment({
       owner: params.owner,
       repo: params.repo,
@@ -143,7 +143,7 @@ async function completeProvodReview(
       installationId: params.installationId,
     });
   } catch (error) {
-    console.error("[curator] provod review failed:", error);
+    console.error("[curator] llm review failed:", error);
     // Отсутствие ответа не должно превращаться в разрешение: оставляем слияние
     // заблокированным (action_required) и сообщаем об этом в pull request.
     try {
@@ -166,7 +166,7 @@ async function completeProvodReview(
         installationId: params.installationId,
       });
     } catch (reportError) {
-      console.error("[curator] failed to report provod error:", reportError);
+      console.error("[curator] failed to report llm error:", reportError);
     }
   }
 }

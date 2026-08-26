@@ -1,7 +1,7 @@
 import { getConfig } from "@/lib/config";
 import { CheckConclusion, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { handleProvodPullRequest } from "@/lib/curator/provod-review";
+import { handleLlmPullRequest } from "@/lib/curator/review";
 
 export const SIMULATED_ANSWER =
   "🤖 **AI Curator (симуляция)**\n\n" +
@@ -30,8 +30,8 @@ export async function handlePullRequest(
     throw new Error("Webhook payload has no installation id");
   }
 
-  if (reviewer === "provod") {
-    await handleProvodPullRequest({ owner, repo, prNumber, headSha, installationId });
+  if (reviewer === "llm") {
+    await handleLlmPullRequest({ owner, repo, prNumber, headSha, installationId });
     return;
   }
 

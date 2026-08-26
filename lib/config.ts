@@ -10,10 +10,12 @@ const SIM_MODES: readonly SimMode[] = [
 ];
 
 // Кто выполняет разбор pull request: `simulate` — заглушка (режимы SimMode ниже),
-// `provod` — реальный разбор языковой моделью через OpenAI-совместимый шлюз provod.ai.
-export type Reviewer = "simulate" | "provod";
+// `llm` — реальный разбор языковой моделью. Провайдер и модель выбираются
+// переменными LLM_PROVIDER / LLM_MODEL (см. lib/llm/chat.ts); провайдер не
+// зафиксирован — сейчас provod.ai, возможен переход на Claude.
+export type Reviewer = "simulate" | "llm";
 
-const REVIEWERS: readonly Reviewer[] = ["simulate", "provod"];
+const REVIEWERS: readonly Reviewer[] = ["simulate", "llm"];
 
 export interface Config {
   appId: string;
@@ -23,9 +25,6 @@ export interface Config {
   simMode: SimMode;
   simDelayMs: number;
   simAdminToken: string;
-  provodApiKey?: string;
-  provodModel: string;
-  provodBaseUrl: string;
 }
 
 let cached: Config | null = null;
@@ -77,11 +76,8 @@ export function getConfig(): Config {
     return cached;
   }
   const reviewer = parseReviewer();
-  const provodApiKey = process.env.PROVOD_API_KEY;
-  if (reviewer === "provod" && !provodApiKey) {
-    throw new Error(
-      "CURATOR_REVIEWER=provod requires PROVOD_API_KEY to be set",
-    );
+  if (reviewer === "llm" && !process.env.LLM_PROVIDER) {
+    throw new Error("CURATOR_REVIEWER=llm requires LLM_PROVIDER to be set");
   }
 
   cached = {
@@ -92,9 +88,6 @@ export function getConfig(): Config {
     simMode: parseSimMode(),
     simDelayMs: Number(process.env.CURATOR_SIM_DELAY_MS ?? "8000"),
     simAdminToken: requireEnv("SIM_ADMIN_TOKEN"),
-    provodApiKey,
-    provodModel: process.env.PROVOD_MODEL ?? "deepseek/deepseek-v4-pro",
-    provodBaseUrl: process.env.PROVOD_BASE_URL ?? "https://api.provod.ai/v1",
   };
   return cached;
 }
