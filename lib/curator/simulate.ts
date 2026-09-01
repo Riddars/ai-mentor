@@ -13,7 +13,12 @@ interface PullRequestPayload {
   action: string;
   installation?: { id: number };
   repository: { name: string; owner: { login: string } };
-  pull_request: { number: number; head: { sha: string } };
+  pull_request: {
+    number: number;
+    head: { sha: string };
+    user?: { login: string };
+    title?: string;
+  };
 }
 
 export async function handlePullRequest(
@@ -31,7 +36,15 @@ export async function handlePullRequest(
   }
 
   if (reviewer === "llm") {
-    await handleLlmPullRequest({ owner, repo, prNumber, headSha, installationId });
+    await handleLlmPullRequest({
+      owner,
+      repo,
+      prNumber,
+      headSha,
+      installationId,
+      author: payload.pull_request.user?.login ?? null,
+      title: payload.pull_request.title ?? null,
+    });
     return;
   }
 

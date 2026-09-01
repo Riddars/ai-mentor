@@ -25,6 +25,7 @@ export interface Config {
   simMode: SimMode;
   simDelayMs: number;
   simAdminToken: string;
+  databasePath: string;
 }
 
 let cached: Config | null = null;
@@ -88,6 +89,7 @@ export function getConfig(): Config {
     simMode: parseSimMode(),
     simDelayMs: Number(process.env.CURATOR_SIM_DELAY_MS ?? "8000"),
     simAdminToken: requireEnv("SIM_ADMIN_TOKEN"),
+    databasePath: process.env.DATABASE_PATH ?? "./data/curator.db",
   };
   return cached;
 }

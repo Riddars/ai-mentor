@@ -13,6 +13,9 @@
 # testing
 /coverage
 
+# project memory database (stage 3)
+/data
+
 # next.js
 /.next/
 /out/

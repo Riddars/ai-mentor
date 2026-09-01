@@ -3,6 +3,22 @@ import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
 import { chat } from "@/lib/llm/chat";
+import {
+  applyReconciliation,
+  hasSuccessfulCommitAnalysis,
+  loadOpenFindings,
+  loadStudentResponses,
+  recordAnalysis,
+  saveStudentResponse,
+  upsertParticipant,
+  upsertProject,
+  upsertPullRequest,
+  type PriorFinding,
+  type ReconcileResult,
+  type ReconciledFinding,
+  type StatusChange,
+  type StudentResponse,
+} from "@/lib/curator/store";
 
 /** Общие координаты pull request, которые нужны на каждом шаге разбора. */
 export interface ReviewParams {
@@ -11,11 +27,15 @@ export interface ReviewParams {
   prNumber: number;
   headSha: string;
   installationId: number;
+  author?: string | null;
+  title?: string | null;
 }
 
 // Потолок на суммарный объём патчей в промпте: страховка от разового гигантского
 // PR, а не тонкая настройка. Крупнее — обрезаем и честно помечаем это в тексте.
 const MAX_PATCH_CHARS = 50_000;
+
+const COMMENT_MARKER = "🤖 **AI Curator**";
 
 interface PrFile {
   filename: string;
@@ -26,7 +46,8 @@ interface PrFile {
 }
 
 const SYSTEM_PROMPT = `Ты — ИИ-куратор студенческих исследований на стыке химии и машинного обучения.
-Ты разбираешь изменения из pull request в контексте исследовательской задачи проекта.
+Ты разбираешь изменения из pull request в контексте исследовательской задачи проекта и
+ведёшь память находок между проверками одного и того же pull request.
 
 Ищи существенные методические и содержательные ошибки, способные повлиять на выводы работы:
 утечка данных между обучающей и тестовой выборками, некорректное разделение данных,
@@ -34,13 +55,44 @@ const SYSTEM_PROMPT = `Ты — ИИ-куратор студенческих и�
 между описанием проекта и фактической реализацией, ошибки в коде, меняющие результат без
 явного сбоя.
 
-Правила:
+Тебе даются: изменения PR, описание исследования, СПИСОК ПРОШЛЫХ НАХОДОК этого PR (с их id
+и статусом) и ОТВЕТЫ СТУДЕНТА. Твоя задача — сверить прошлые находки с текущим состоянием и
+выдать актуальный список.
+
+Правила разбора:
 - Каждую находку подтверждай конкретным фрагментом кода или данных из изменений. Находку без
   подтверждения не включай.
-- Для каждой находки укажи: в чём проблема, чем она грозит результатам, где обнаружена, как
-  проверить или исправить. Тон наставнический — объясняй, но не переписывай код за студента.
-- Если существенных проблем нет — скажи об этом коротко, без выдумывания замечаний.
-- Отвечай на русском языке, кратким Markdown. Решение по каждой находке остаётся за студентом.`;
+- Прошлые находки сверяй по существу, а не по формулировке. Для каждой прошлой находки reши:
+  - "open" — проблема всё ещё присутствует и не решена;
+  - "closed" — из изменений видно, что она исправлена;
+  - "dismissed" — студент дал объяснение, и оно по существу снимает замечание (прими его);
+  - "reopened" — была закрыта/снята, но снова появилась.
+  В поле prior_id укажи id той прошлой находки, к которой относится статус.
+- Новые находки давай с prior_id: null и статусом "open".
+- Не поднимай заново находку, которую студент уже объяснил и ты счёл объяснение принятым,
+  если не появилось новых оснований.
+- reason — короткое пояснение, почему выбран статус (особенно для closed/dismissed/reopened).
+
+Отвечай СТРОГО одним JSON-объектом, без текста вокруг и без Markdown-ограждения:
+{
+  "summary": "краткое описание проверенных изменений (1-3 предложения, на русском)",
+  "findings": [
+    {
+      "prior_id": <число или null>,
+      "status": "open" | "closed" | "dismissed" | "reopened",
+      "category": "краткая категория",
+      "severity": "high" | "medium" | "low",
+      "title": "короткий заголовок находки",
+      "file": "путь к файлу или null",
+      "lines": "строки/диапазон или null",
+      "evidence": "подтверждающий фрагмент",
+      "impact": "чем грозит результатам",
+      "recommendation": "как проверить или исправить",
+      "reason": "почему выбран этот статус или null"
+    }
+  ]
+}
+Все текстовые поля — на русском. Если существенных проблем нет — верни пустой массив findings.`;
 
 async function fetchChangedFiles(params: ReviewParams): Promise<PrFile[]> {
   const token = await getInstallationToken(params.installationId);
@@ -83,50 +135,266 @@ function buildChangesText(files: PrFile[]): string {
   return out.trim() === "" ? "(нет текстовых изменений)" : out;
 }
 
-/** Собрать контекст, спросить модель и вернуть готовый комментарий для PR. */
-export async function runReview(params: ReviewParams): Promise<string> {
+function buildPriorFindingsText(findings: PriorFinding[]): string {
+  if (findings.length === 0) {
+    return "Прошлых находок по этому pull request нет.";
+  }
+  const lines = findings.map(
+    (f) =>
+      `- id=${f.id} [${f.status}] (${f.category ?? "без категории"}, ${f.severity ?? "?"}) ` +
+      `${f.title}${f.file ? ` — ${f.file}${f.lines ? `:${f.lines}` : ""}` : ""}`,
+  );
+  return `Прошлые находки этого pull request:\n${lines.join("\n")}`;
+}
+
+function buildResponsesText(responses: StudentResponse[]): string {
+  if (responses.length === 0) {
+    return "Ответов студента по этому pull request нет.";
+  }
+  const lines = responses.map(
+    (r) =>
+      `- ${r.login ?? "студент"}${r.findingId ? ` (к находке id=${r.findingId})` : ""}: ` +
+      `${(r.body ?? "").trim()}`,
+  );
+  return `Ответы студента:\n${lines.join("\n")}`;
+}
+
+function buildUserPrompt(
+  research: string | null,
+  files: PrFile[],
+  prNumber: number,
+  prior: PriorFinding[],
+  responses: StudentResponse[],
+): string {
+  const researchBlock = research
+    ? `Описание исследования (RESEARCH.md):\n${research}\n\n`
+    : "Описание исследования (RESEARCH.md) в репозитории не найдено.\n\n";
+  return (
+    researchBlock +
+    `${buildPriorFindingsText(prior)}\n\n` +
+    `${buildResponsesText(responses)}\n\n` +
+    `Изменения в pull request #${prNumber}:\n\n${buildChangesText(files)}`
+  );
+}
+
+const VALID_STATUSES = new Set(["open", "closed", "dismissed", "reopened", "pending"]);
+
+/** Достать JSON из ответа модели (в т.ч. из ```json-блока) и привести к ReconcileResult. */
+export function parseModelJson(raw: string): ReconcileResult | null {
+  let text = raw.trim();
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch) {
+    text = fenceMatch[1].trim();
+  } else {
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    if (first !== -1 && last !== -1 && last > first) {
+      text = text.slice(first, last + 1);
+    }
+  }
+
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof data !== "object" || data === null) {
+    return null;
+  }
+  const obj = data as Record<string, unknown>;
+  if (!Array.isArray(obj.findings)) {
+    return null;
+  }
+
+  const findings: ReconciledFinding[] = [];
+  for (const item of obj.findings) {
+    if (typeof item !== "object" || item === null) {
+      continue;
+    }
+    const f = item as Record<string, unknown>;
+    const title = typeof f.title === "string" ? f.title.trim() : "";
+    if (title === "") {
+      continue;
+    }
+    const status =
+      typeof f.status === "string" && VALID_STATUSES.has(f.status)
+        ? (f.status as ReconciledFinding["status"])
+        : "open";
+    const priorId =
+      typeof f.prior_id === "number" && Number.isInteger(f.prior_id) ? f.prior_id : null;
+    const str = (v: unknown): string | null =>
+      typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+    findings.push({
+      priorId,
+      status,
+      category: str(f.category),
+      severity: str(f.severity),
+      title,
+      file: str(f.file),
+      lines: str(f.lines),
+      evidence: str(f.evidence),
+      impact: str(f.impact),
+      recommendation: str(f.recommendation),
+      reason: str(f.reason),
+    });
+  }
+
+  const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
+  return { summary, findings };
+}
+
+function renderComment(result: ReconcileResult, changes: StatusChange[]): string {
+  const open = result.findings.filter(
+    (f) => f.status === "open" || f.status === "reopened",
+  );
+
+  const parts: string[] = [COMMENT_MARKER, ""];
+  if (result.summary) {
+    parts.push(result.summary, "");
+  }
+
+  if (open.length === 0) {
+    parts.push("Существенных методических проблем в этих изменениях не нашёл.");
+  } else {
+    parts.push(`**Существенные находки (${open.length}):**`, "");
+    for (const f of open) {
+      const loc = f.file ? ` — \`${f.file}${f.lines ? `:${f.lines}` : ""}\`` : "";
+      const badge = f.status === "reopened" ? " (открыта повторно)" : "";
+      parts.push(`### ${f.title}${badge}`);
+      parts.push(
+        `_${f.category ?? "без категории"} · серьёзность: ${f.severity ?? "?"}_${loc}`,
+        "",
+      );
+      if (f.impact) parts.push(`**Влияние:** ${f.impact}`);
+      if (f.evidence) parts.push(`**Подтверждение:** ${f.evidence}`);
+      if (f.recommendation) parts.push(`**Что сделать:** ${f.recommendation}`);
+      parts.push("");
+    }
+  }
+
+  const resolved = changes.filter(
+    (c) => c.newStatus === "closed" || c.newStatus === "dismissed",
+  );
+  if (resolved.length > 0) {
+    parts.push("---", "**С прошлой проверки:**");
+    for (const c of resolved) {
+      const label = c.newStatus === "closed" ? "исправлено" : "снято по объяснению";
+      parts.push(`- ${c.title} — ${label}${c.reason ? ` (${c.reason})` : ""}`);
+    }
+    parts.push("");
+  }
+
+  parts.push("_Решение по каждой находке остаётся за студентом._");
+  return parts.join("\n");
+}
+
+interface ReviewOutcome {
+  comment: string;
+  outcome: "ok" | "parse_error";
+  summary: string;
+  statusChanges: StatusChange[];
+}
+
+/**
+ * Собрать контекст, спросить модель, сохранить находки и вернуть готовый комментарий.
+ * Персист (analyses / findings / история статусов) происходит здесь.
+ */
+async function runReview(
+  params: ReviewParams,
+  prId: number,
+  trigger: "commit" | "comment",
+): Promise<ReviewOutcome> {
   const [files, research] = await Promise.all([
     fetchChangedFiles(params),
     fetchResearchDoc(params),
   ]);
-
-  const researchBlock = research
-    ? `Описание исследования (RESEARCH.md):\n${research}\n\n`
-    : "Описание исследования (RESEARCH.md) в репозитории не найдено.\n\n";
-
-  const userPrompt =
-    researchBlock +
-    `Изменения в pull request #${params.prNumber}:\n\n${buildChangesText(files)}`;
+  const prior = loadOpenFindings(prId);
+  const responses = loadStudentResponses(prId);
 
   const answer = await chat([
     { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: userPrompt },
+    {
+      role: "user",
+      content: buildUserPrompt(research, files, params.prNumber, prior, responses),
+    },
   ]);
 
-  return `🤖 **AI Curator**\n\n${answer}`;
+  const parsed = parseModelJson(answer);
+  const provider = process.env.LLM_PROVIDER ?? null;
+  const model = process.env.LLM_MODEL ?? null;
+
+  if (!parsed) {
+    // Не смогли разобрать JSON — не портим память, публикуем сырой текст.
+    recordAnalysis({ prId, headSha: params.headSha, trigger, outcome: "parse_error", provider, model });
+    return {
+      comment: `${COMMENT_MARKER}\n\n${answer}`,
+      outcome: "parse_error",
+      summary: "",
+      statusChanges: [],
+    };
+  }
+
+  const analysisId = recordAnalysis({
+    prId,
+    headSha: params.headSha,
+    trigger,
+    outcome: "ok",
+    summary: parsed.summary || null,
+    provider,
+    model,
+  });
+  const { statusChanges } = applyReconciliation(prId, analysisId, parsed);
+
+  return {
+    comment: renderComment(parsed, statusChanges),
+    outcome: "ok",
+    summary: parsed.summary,
+    statusChanges,
+  };
+}
+
+/** Записать проект/участника/PR и вернуть id pull request в памяти. */
+function persistPrContext(params: ReviewParams): number {
+  const projectId = upsertProject(params.owner, params.repo, params.repo);
+  if (params.author) {
+    upsertParticipant(projectId, params.author);
+  }
+  return upsertPullRequest(projectId, params.prNumber, {
+    author: params.author,
+    title: params.title,
+    state: "open",
+  });
 }
 
 /**
- * Точка входа разбора языковой моделью для webhook-обработчика. Обязательную
- * проверку ставим сразу (она блокирует слияние), а сам разбор запускаем в фоне,
- * чтобы не держать ответ на вебхук на время обращения к модели.
+ * Точка входа разбора языковой моделью для webhook-обработчика (событие коммита).
+ * Обязательную проверку ставим сразу (она блокирует слияние), а сам разбор
+ * запускаем в фоне, чтобы не держать ответ на вебхук на время обращения к модели.
  */
 export async function handleLlmPullRequest(params: ReviewParams): Promise<void> {
+  const prId = persistPrContext(params);
+  if (hasSuccessfulCommitAnalysis(prId, params.headSha)) {
+    // Повторная доставка вебхука для того же коммита — уже разобрали, выходим.
+    console.log(`[curator] head ${params.headSha} already analysed, skipping`);
+    return;
+  }
   const checkRunId = await createCheckRun({
     owner: params.owner,
     repo: params.repo,
     headSha: params.headSha,
     installationId: params.installationId,
   });
-  void completeReview(params, checkRunId);
+  void completeReview(params, prId, checkRunId);
 }
 
 async function completeReview(
   params: ReviewParams,
+  prId: number,
   checkRunId: number,
 ): Promise<void> {
   try {
-    const comment = await runReview(params);
+    const { comment } = await runReview(params, prId, "commit");
     await postIssueComment({
       owner: params.owner,
       repo: params.repo,
@@ -144,6 +412,12 @@ async function completeReview(
     });
   } catch (error) {
     console.error("[curator] llm review failed:", error);
+    recordAnalysis({
+      prId,
+      headSha: params.headSha,
+      trigger: "commit",
+      outcome: "error",
+    });
     // Отсутствие ответа не должно превращаться в разрешение: оставляем слияние
     // заблокированным (action_required) и сообщаем об этом в pull request.
     try {
@@ -152,7 +426,7 @@ async function completeReview(
         repo: params.repo,
         issueNumber: params.prNumber,
         body:
-          "🤖 **AI Curator**\n\nНе удалось выполнить разбор изменений: сервис анализа " +
+          `${COMMENT_MARKER}\n\nНе удалось выполнить разбор изменений: сервис анализа ` +
           "недоступен. Слияние остаётся заблокированным до ручной проверки ответственным " +
           "сотрудником.",
         installationId: params.installationId,
@@ -169,4 +443,70 @@ async function completeReview(
       console.error("[curator] failed to report llm error:", reportError);
     }
   }
+}
+
+/** Данные комментария студента, из которых запускается сверка по объяснению. */
+export interface CommentReviewParams {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  installationId: number;
+  commentId: number;
+  commentBody: string;
+  commenterLogin: string | null;
+}
+
+/**
+ * Реакция на ответ студента без нового коммита. Новый check-run НЕ создаём: проверка
+ * уже завершена и слияние разрешено (куратор совещательный). Сохраняем ответ, запускаем
+ * сверку на текущем head PR и, если статусы находок изменились, коротко сообщаем об этом.
+ */
+export async function handleStudentComment(params: CommentReviewParams): Promise<void> {
+  const token = await getInstallationToken(params.installationId);
+  const pr = await githubRequest<{
+    head: { sha: string };
+    user: { login: string };
+    title: string;
+  }>(`/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`, { token });
+
+  const reviewParams: ReviewParams = {
+    owner: params.owner,
+    repo: params.repo,
+    prNumber: params.prNumber,
+    headSha: pr.head.sha,
+    installationId: params.installationId,
+    author: pr.user.login,
+    title: pr.title,
+  };
+  const prId = persistPrContext(reviewParams);
+
+  const isNew = saveStudentResponse({
+    prId,
+    commentId: params.commentId,
+    login: params.commenterLogin,
+    body: params.commentBody,
+  });
+  if (!isNew) {
+    return; // этот комментарий уже обработан
+  }
+
+  const { statusChanges } = await runReview(reviewParams, prId, "comment");
+  const resolved = statusChanges.filter(
+    (c) => c.newStatus === "closed" || c.newStatus === "dismissed",
+  );
+  if (resolved.length === 0) {
+    return; // ничего не сняли — не шумим в PR
+  }
+
+  const lines = resolved.map((c) => {
+    const label = c.newStatus === "closed" ? "исправлено" : "снято по объяснению";
+    return `- ${c.title} — ${label}${c.reason ? ` (${c.reason})` : ""}`;
+  });
+  await postIssueComment({
+    owner: params.owner,
+    repo: params.repo,
+    issueNumber: params.prNumber,
+    body: `${COMMENT_MARKER}\n\nУчёл ответ. Обновления по находкам:\n${lines.join("\n")}`,
+    installationId: params.installationId,
+  });
 }
