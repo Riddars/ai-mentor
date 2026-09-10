@@ -44,6 +44,268 @@ export interface ReconcileResult {
   findings: ReconciledFinding[];
 }
 
+export type ProjectStatus = "active" | "paused" | "archived";
+
+/** A project row with the aggregates the overview table shows. */
+export interface ProjectSummary {
+  id: number;
+  owner: string;
+  repo: string;
+  name: string | null;
+  status: ProjectStatus;
+  participants: string[];
+  openFindings: number;
+  seriousOpenFindings: number;
+  oldestSeriousOpenAt: string | null;
+  lastActivityAt: string | null;
+}
+
+export interface ProjectDetail {
+  id: number;
+  owner: string;
+  repo: string;
+  name: string | null;
+  status: ProjectStatus;
+}
+
+export interface FindingRow {
+  id: number;
+  pullRequestId: number;
+  prNumber: number | null;
+  category: string | null;
+  severity: string | null;
+  title: string;
+  file: string | null;
+  lines: string | null;
+  evidence: string | null;
+  impact: string | null;
+  recommendation: string | null;
+  status: FindingStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AnalysisRow {
+  id: number;
+  prNumber: number | null;
+  headSha: string;
+  trigger: string;
+  outcome: string;
+  summary: string | null;
+  createdAt: string;
+}
+
+export interface StatusHistoryRow {
+  oldStatus: string | null;
+  newStatus: string;
+  reason: string | null;
+  createdAt: string;
+}
+
+const PARTICIPANTS_SQL = `
+  SELECT github_login FROM participants WHERE project_id = @id ORDER BY first_seen_at`;
+
+const OPEN_STATUSES = "('open', 'reopened', 'pending')";
+
+/** Projects with overview aggregates; optionally restricted to one supervisor. */
+export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
+  const db = getDb();
+  const rows = (
+    supervisorId
+      ? db
+          .prepare(
+            `SELECT p.* FROM projects p
+             JOIN project_supervisors ps ON ps.project_id = p.id
+             WHERE ps.user_id = @supervisorId AND p.status != 'archived'
+             ORDER BY p.name, p.repo`,
+          )
+          .all({ supervisorId })
+      : db
+          .prepare(
+            "SELECT * FROM projects WHERE status != 'archived' ORDER BY name, repo",
+          )
+          .all()
+  ) as Array<{ id: number; owner: string; repo: string; name: string | null; status: ProjectStatus }>;
+
+  return rows.map((p) => {
+    const participants = (
+      db.prepare(PARTICIPANTS_SQL).all({ id: p.id }) as Array<{ github_login: string }>
+    ).map((r) => r.github_login);
+
+    const counts = db
+      .prepare(
+        `SELECT
+           COUNT(*) AS openFindings,
+           SUM(CASE WHEN LOWER(severity) IN ('high', 'critical') THEN 1 ELSE 0 END) AS serious,
+           MIN(CASE WHEN LOWER(severity) IN ('high', 'critical') THEN created_at END) AS oldestSerious
+         FROM findings
+         WHERE pull_request_id IN (SELECT id FROM pull_requests WHERE project_id = @id)
+           AND status IN ${OPEN_STATUSES}`,
+      )
+      .get({ id: p.id }) as {
+      openFindings: number;
+      serious: number | null;
+      oldestSerious: string | null;
+    };
+
+    const activity = db
+      .prepare(
+        `SELECT MAX(ts) AS lastActivityAt FROM (
+           SELECT MAX(updated_at) AS ts FROM pull_requests WHERE project_id = @id
+           UNION ALL
+           SELECT MAX(a.created_at) AS ts FROM analyses a
+             JOIN pull_requests pr ON pr.id = a.pull_request_id
+             WHERE pr.project_id = @id
+         )`,
+      )
+      .get({ id: p.id }) as { lastActivityAt: string | null };
+
+    return {
+      id: p.id,
+      owner: p.owner,
+      repo: p.repo,
+      name: p.name,
+      status: p.status,
+      participants,
+      openFindings: counts.openFindings,
+      seriousOpenFindings: counts.serious ?? 0,
+      oldestSeriousOpenAt: counts.oldestSerious,
+      lastActivityAt: activity.lastActivityAt,
+    };
+  });
+}
+
+export function getProject(id: number): ProjectDetail | null {
+  const row = getDb()
+    .prepare("SELECT id, owner, repo, name, status FROM projects WHERE id = @id")
+    .get({ id }) as ProjectDetail | undefined;
+  return row ?? null;
+}
+
+export function getProjectParticipants(id: number): string[] {
+  return (
+    getDb().prepare(PARTICIPANTS_SQL).all({ id }) as Array<{ github_login: string }>
+  ).map((r) => r.github_login);
+}
+
+export function listProjectFindings(projectId: number): FindingRow[] {
+  return getDb()
+    .prepare(
+      `SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber,
+              f.category, f.severity, f.title, f.file, f.lines, f.evidence, f.impact,
+              f.recommendation, f.status, f.created_at AS createdAt, f.updated_at AS updatedAt
+       FROM findings f
+       JOIN pull_requests pr ON pr.id = f.pull_request_id
+       WHERE pr.project_id = @projectId
+       ORDER BY f.updated_at DESC`,
+    )
+    .all({ projectId }) as unknown as FindingRow[];
+}
+
+export function getFinding(id: number): (FindingRow & { projectId: number }) | null {
+  const row = getDb()
+    .prepare(
+      `SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber,
+              pr.project_id AS projectId, f.category, f.severity, f.title, f.file, f.lines,
+              f.evidence, f.impact, f.recommendation, f.status,
+              f.created_at AS createdAt, f.updated_at AS updatedAt
+       FROM findings f
+       JOIN pull_requests pr ON pr.id = f.pull_request_id
+       WHERE f.id = @id`,
+    )
+    .get({ id }) as (FindingRow & { projectId: number }) | undefined;
+  return row ?? null;
+}
+
+export function getFindingHistory(findingId: number): StatusHistoryRow[] {
+  return getDb()
+    .prepare(
+      `SELECT old_status AS oldStatus, new_status AS newStatus, reason, created_at AS createdAt
+       FROM finding_status_history WHERE finding_id = @findingId ORDER BY created_at`,
+    )
+    .all({ findingId }) as unknown as StatusHistoryRow[];
+}
+
+export function getFindingResponses(findingId: number): StudentResponse[] {
+  return getDb()
+    .prepare(
+      `SELECT finding_id AS findingId, github_login AS login, body, created_at AS createdAt
+       FROM student_responses WHERE finding_id = @findingId ORDER BY created_at`,
+    )
+    .all({ findingId }) as unknown as StudentResponse[];
+}
+
+export function listProjectAnalyses(projectId: number, limit = 10): AnalysisRow[] {
+  return getDb()
+    .prepare(
+      `SELECT a.id, pr.number AS prNumber, a.head_sha AS headSha, a.trigger, a.outcome,
+              a.summary, a.created_at AS createdAt
+       FROM analyses a
+       JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE pr.project_id = @projectId
+       ORDER BY a.created_at DESC LIMIT @limit`,
+    )
+    .all({ projectId, limit }) as unknown as AnalysisRow[];
+}
+
+// --- Admin mutations ---
+
+export function createProjectManual(
+  owner: string,
+  repo: string,
+  name?: string,
+): number {
+  return upsertProject(owner, repo, name);
+}
+
+export function setProjectStatus(id: number, status: ProjectStatus): void {
+  getDb()
+    .prepare(
+      "UPDATE projects SET status = @status, updated_at = datetime('now') WHERE id = @id",
+    )
+    .run({ id, status });
+}
+
+export function assignSupervisor(projectId: number, userId: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO project_supervisors (project_id, user_id) VALUES (@projectId, @userId)
+       ON CONFLICT (project_id, user_id) DO NOTHING`,
+    )
+    .run({ projectId, userId });
+}
+
+export function unassignSupervisor(projectId: number, userId: string): void {
+  getDb()
+    .prepare(
+      "DELETE FROM project_supervisors WHERE project_id = @projectId AND user_id = @userId",
+    )
+    .run({ projectId, userId });
+}
+
+export function listProjectSupervisors(projectId: number): string[] {
+  return (
+    getDb()
+      .prepare("SELECT user_id FROM project_supervisors WHERE project_id = @projectId")
+      .all({ projectId }) as Array<{ user_id: string }>
+  ).map((r) => r.user_id);
+}
+
+export function isSupervisorOf(userId: string, projectId: number): boolean {
+  const row = getDb()
+    .prepare(
+      "SELECT 1 FROM project_supervisors WHERE project_id = @projectId AND user_id = @userId",
+    )
+    .get({ projectId, userId });
+  return row !== undefined;
+}
+
+export function listAllProjects(): ProjectDetail[] {
+  return getDb()
+    .prepare("SELECT id, owner, repo, name, status FROM projects ORDER BY name, repo")
+    .all() as unknown as ProjectDetail[];
+}
+
 export function upsertProject(owner: string, repo: string, name?: string): number {
   const db = getDb();
   const row = db

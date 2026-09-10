@@ -30,6 +30,14 @@ export interface Config {
 
 let cached: Config | null = null;
 
+/**
+ * Database file path. Kept separate from getConfig() so the panel can open the
+ * database without requiring the full GitHub App configuration.
+ */
+export function databasePath(): string {
+  return process.env.DATABASE_PATH ?? "./data/curator.db";
+}
+
 function loadPrivateKey(): string {
   const path = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
   if (path) {
@@ -89,7 +97,7 @@ export function getConfig(): Config {
     simMode: parseSimMode(),
     simDelayMs: Number(process.env.CURATOR_SIM_DELAY_MS ?? "8000"),
     simAdminToken: requireEnv("SIM_ADMIN_TOKEN"),
-    databasePath: process.env.DATABASE_PATH ?? "./data/curator.db",
+    databasePath: databasePath(),
   };
   return cached;
 }

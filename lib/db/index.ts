@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { getConfig } from "@/lib/config";
+import { databasePath } from "@/lib/config";
 
 // Единственная точка доступа к SQLite. node:sqlite — встроенный драйвер (Node 22+,
 // помечен experimental). Весь остальной код ходит в БД только через getDb() и
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS projects (
   owner      TEXT NOT NULL,
   repo       TEXT NOT NULL,
   name       TEXT,
-  connected  INTEGER NOT NULL DEFAULT 1,
+  status     TEXT NOT NULL DEFAULT 'active',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (owner, repo)
@@ -101,6 +101,24 @@ CREATE TABLE IF NOT EXISTS github_events (
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (delivery_id)
 );
+
+CREATE TABLE IF NOT EXISTS users (
+  id            TEXT PRIMARY KEY,
+  login         TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  role          TEXT NOT NULL,
+  name          TEXT,
+  disabled      INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (login)
+);
+
+CREATE TABLE IF NOT EXISTS project_supervisors (
+  project_id INTEGER NOT NULL REFERENCES projects(id),
+  user_id    TEXT NOT NULL REFERENCES users(id),
+  PRIMARY KEY (project_id, user_id)
+);
 `;
 
 let cached: DatabaseSync | null = null;
@@ -112,7 +130,7 @@ export function getDb(): DatabaseSync {
   }
   // turbopackIgnore: путь к БД — настраиваемый (DATABASE_PATH), а не ассет проекта;
   // без этого сборка трассирует весь проект в вывод сервера.
-  const path = resolve(/* turbopackIgnore: true */ process.cwd(), getConfig().databasePath);
+  const path = resolve(/* turbopackIgnore: true */ process.cwd(), databasePath());
   mkdirSync(dirname(path), { recursive: true });
 
   const db = new DatabaseSync(path);
@@ -123,9 +141,28 @@ export function getDb(): DatabaseSync {
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(SCHEMA);
-  // Место под будущие миграции: сейчас единственная версия схемы — 1.
-  db.exec("PRAGMA user_version = 1;");
+  migrate(db);
 
   cached = db;
   return cached;
+}
+
+/** Column-level migrations that CREATE TABLE IF NOT EXISTS cannot express. */
+function migrate(db: DatabaseSync): void {
+  const { user_version: version } = db.prepare("PRAGMA user_version").get() as {
+    user_version: number;
+  };
+  if (version < 3) {
+    const columns = (
+      db.prepare("PRAGMA table_info(projects)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    // Project lifecycle: active | paused | archived, replacing the earlier connected flag.
+    if (!columns.includes("status")) {
+      db.exec("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+    }
+    if (columns.includes("connected")) {
+      db.exec("ALTER TABLE projects DROP COLUMN connected");
+    }
+    db.exec("PRAGMA user_version = 3");
+  }
 }
