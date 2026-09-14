@@ -13,8 +13,9 @@ import {
 } from "@/lib/auth";
 
 // User store and passwords. Touches the database, so it is NOT imported from
-// proxy.ts (edge). Passwords are stored only as a PBKDF2-SHA256 hash, never in
-// clear. The signed-in identity for pages and actions comes from getViewer().
+// proxy.ts (which must stay cheap and database-free). Passwords are stored only
+// as a PBKDF2-SHA256 hash, never in clear. The signed-in identity for pages and
+// actions comes from getViewer().
 
 export type User = {
   id: string;
@@ -22,10 +23,22 @@ export type User = {
   role: Role;
   name: string | null;
   disabled: boolean;
+  /** Bumped to revoke every issued token (password change, account disabled). */
+  sessionVersion: number;
   createdAt: string;
 };
 
-type UserRow = User & { password_salt: string; password_hash: string };
+type UserRow = {
+  id: string;
+  login: string;
+  role: Role;
+  name: string | null;
+  disabled: number;
+  session_version: number;
+  created_at: string;
+  password_salt: string;
+  password_hash: string;
+};
 
 const encoder = new TextEncoder();
 const PBKDF2_ITERATIONS = 120_000;
@@ -67,8 +80,9 @@ function toUser(row: UserRow): User {
     login: row.login,
     role: row.role,
     name: row.name,
-    disabled: Boolean((row as unknown as { disabled: number }).disabled),
-    createdAt: (row as unknown as { created_at: string }).created_at,
+    disabled: Boolean(row.disabled),
+    sessionVersion: row.session_version,
+    createdAt: row.created_at,
   };
 }
 
@@ -130,10 +144,52 @@ export async function createUser(params: {
   return findUserById(id)!;
 }
 
+/** Disabling also revokes every issued token; re-enabling issues none. */
 export function setUserDisabled(id: string, disabled: boolean): void {
   getDb()
-    .prepare("UPDATE users SET disabled = @disabled WHERE id = @id")
-    .run({ id, disabled: disabled ? 1 : 0 });
+    .prepare(
+      `UPDATE users SET disabled = @disabled,
+         session_version = session_version + @bump WHERE id = @id`,
+    )
+    .run({ id, disabled: disabled ? 1 : 0, bump: disabled ? 1 : 0 });
+}
+
+export function countUsersByRole(role: Role): number {
+  const row = getDb()
+    .prepare("SELECT COUNT(*) AS n FROM users WHERE role = @role")
+    .get({ role }) as { n: number };
+  return row.n;
+}
+
+export function updateUser(id: string, fields: { login: string; name: string | null }): void {
+  getDb()
+    .prepare("UPDATE users SET login = @login, name = @name WHERE id = @id")
+    .run({ id, login: fields.login, name: fields.name });
+}
+
+/** Replace a user's password and revoke every issued token. */
+export async function setUserPassword(id: string, password: string): Promise<void> {
+  const { salt, hash } = await hashPassword(password);
+  getDb()
+    .prepare(
+      `UPDATE users SET password_salt = @salt, password_hash = @hash,
+         session_version = session_version + 1 WHERE id = @id`,
+    )
+    .run({ id, salt, hash });
+}
+
+/** Delete a user together with their project assignments. */
+export function deleteUser(id: string): void {
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM project_supervisors WHERE user_id = @id").run({ id });
+    db.prepare("DELETE FROM users WHERE id = @id").run({ id });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function usersCount(): number {
@@ -158,7 +214,7 @@ export const getViewer = cache(async (): Promise<Viewer | null> => {
   if (!authEnabled()) {
     // Development convenience: with auth off, act as a head so the panel is usable.
     if (process.env.NODE_ENV === "development") {
-      return { userId: "dev", login: "dev", role: "head" };
+      return { userId: "dev", login: "dev", role: "head", sessionVersion: 0 };
     }
     return null;
   }
@@ -166,6 +222,11 @@ export const getViewer = cache(async (): Promise<Viewer | null> => {
   const claim = await verifyAuthToken(token);
   if (!claim) return null;
   const user = findUserById(claim.userId);
-  if (!user || user.disabled) return null;
-  return { userId: user.id, login: user.login, role: user.role };
+  if (!user || user.disabled || user.sessionVersion !== claim.sessionVersion) return null;
+  return {
+    userId: user.id,
+    login: user.login,
+    role: user.role,
+    sessionVersion: user.sessionVersion,
+  };
 });

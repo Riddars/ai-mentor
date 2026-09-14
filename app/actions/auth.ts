@@ -58,6 +58,7 @@ export async function loginAction(
     userId: user.id,
     login: user.login,
     role: user.role,
+    sessionVersion: user.sessionVersion,
   });
   (await cookies()).set(AUTH_COOKIE, token, {
     httpOnly: true,

@@ -15,6 +15,8 @@
   --color-ring: var(--ring);
   --color-red: var(--red);
   --color-red-soft: var(--red-soft);
+  --color-orange: var(--orange);
+  --color-orange-soft: var(--orange-soft);
   --color-amber: var(--amber);
   --color-amber-soft: var(--amber-soft);
   --color-green: var(--green);
@@ -29,38 +31,44 @@
 :root {
   --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", Roboto, Arial,
     sans-serif;
-  --radius: 0.625rem;
+  --radius: 0.7rem;
 
   --background: oklch(0.985 0.002 265);
   --foreground: oklch(0.18 0.01 265);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.18 0.01 265);
-  --muted: oklch(0.96 0.003 265);
+  --muted: oklch(0.965 0.003 265);
   --muted-foreground: oklch(0.52 0.012 265);
-  --border: oklch(0.9 0.006 265);
+  --border: oklch(0.905 0.006 265);
   --primary: oklch(0.5 0.13 266);
   --primary-foreground: oklch(0.99 0.004 266);
   --accent: oklch(0.95 0.02 266);
   --accent-foreground: oklch(0.36 0.1 266);
   --ring: oklch(0.6 0.1 266);
 
+  /* Status ramp for finding severity (ordinal): amber -> orange -> red.
+     Always shipped with a text label, never color alone. */
   --red: oklch(0.55 0.19 27);
   --red-soft: oklch(0.95 0.03 27);
-  --amber: oklch(0.58 0.11 75);
-  --amber-soft: oklch(0.95 0.04 85);
+  --orange: oklch(0.63 0.16 47);
+  --orange-soft: oklch(0.95 0.045 55);
+  --amber: oklch(0.62 0.11 78);
+  --amber-soft: oklch(0.95 0.05 85);
   --green: oklch(0.52 0.12 155);
   --green-soft: oklch(0.95 0.04 155);
+
+  --shadow-card: 0 1px 2px oklch(0.2 0.02 265 / 0.05), 0 1px 3px oklch(0.2 0.02 265 / 0.04);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: oklch(0.17 0.008 265);
+    --background: oklch(0.165 0.008 265);
     --foreground: oklch(0.95 0.004 265);
-    --card: oklch(0.21 0.01 265);
+    --card: oklch(0.205 0.01 265);
     --card-foreground: oklch(0.95 0.004 265);
-    --muted: oklch(0.26 0.01 265);
+    --muted: oklch(0.255 0.01 265);
     --muted-foreground: oklch(0.68 0.012 265);
-    --border: oklch(0.3 0.012 265);
+    --border: oklch(0.295 0.012 265);
     --primary: oklch(0.68 0.13 266);
     --primary-foreground: oklch(0.17 0.02 266);
     --accent: oklch(0.3 0.04 266);
@@ -69,10 +77,14 @@
 
     --red: oklch(0.72 0.16 27);
     --red-soft: oklch(0.3 0.06 27);
+    --orange: oklch(0.74 0.14 52);
+    --orange-soft: oklch(0.32 0.06 45);
     --amber: oklch(0.78 0.12 80);
     --amber-soft: oklch(0.32 0.05 80);
     --green: oklch(0.72 0.13 155);
     --green-soft: oklch(0.3 0.05 155);
+
+    --shadow-card: 0 1px 2px oklch(0 0 0 / 0.3), 0 1px 3px oklch(0 0 0 / 0.25);
   }
 }
 
@@ -80,4 +92,9 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+}
+
+/* Subtle elevation for cards; kept as a utility so tokens drive light/dark. */
+.shadow-card {
+  box-shadow: var(--shadow-card);
 }

@@ -1,36 +1,31 @@
 import Link from "next/link";
 import { logoutAction } from "@/app/actions/auth";
 import type { Viewer } from "@/lib/auth";
+import { roleLabel } from "@/lib/format";
 import { Button } from "@/components/ui/Button";
-
-const ROLE_LABEL: Record<Viewer["role"], string> = {
-  head: "Руководитель центра",
-  supervisor: "Руководитель проекта",
-};
+import { NavLink } from "@/components/NavLink";
 
 export function AppHeader({ viewer }: { viewer: Viewer }) {
   return (
-    <header className="border-b border-border bg-card">
-      <div className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4 sm:px-6">
-        <Link href="/" className="text-sm font-semibold tracking-tight">
-          ИИ-куратор
+    <header className="sticky top-0 z-10 border-b border-border bg-card/80 backdrop-blur">
+      <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4 sm:px-6">
+        <Link href="/" className="flex items-center gap-2">
+          <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
+            К
+          </span>
+          <span className="hidden text-sm font-semibold tracking-tight sm:inline">
+            ИИ-куратор
+          </span>
         </Link>
-        <nav className="flex items-center gap-4 text-sm text-muted-foreground">
-          <Link href="/" className="hover:text-foreground">
-            Проекты
-          </Link>
-          {viewer.role === "head" && (
-            <Link href="/admin" className="hover:text-foreground">
-              Управление
-            </Link>
-          )}
+        <nav className="flex items-center gap-1">
+          <NavLink href="/">Проекты</NavLink>
+          {viewer.role === "head" && <NavLink href="/admin">Управление</NavLink>}
         </nav>
         <div className="ml-auto flex items-center gap-3">
-          <span className="hidden text-right text-xs leading-tight text-muted-foreground sm:block">
-            {viewer.login}
-            <br />
-            {ROLE_LABEL[viewer.role]}
-          </span>
+          <div className="hidden text-right leading-tight sm:block">
+            <div className="text-xs font-medium">{viewer.login}</div>
+            <div className="text-[0.7rem] text-muted-foreground">{roleLabel(viewer.role)}</div>
+          </div>
           <form action={logoutAction}>
             <Button variant="outline" size="sm" type="submit">
               Выйти
@@ -43,5 +38,7 @@ export function AppHeader({ viewer }: { viewer: Viewer }) {
 }
 
 export function PageShell({ children }: { children: React.ReactNode }) {
-  return <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-8 sm:px-6">{children}</main>;
+  return (
+    <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+  );
 }

@@ -1,7 +1,6 @@
 // Token cryptography and viewer identity. This file holds ONLY token crypto and
-// carries no disk access: it is imported from proxy.ts, which runs in the edge
-// runtime where node:fs is unavailable. The user store and password handling live
-// in lib/users.ts (node).
+// carries no database access, so proxy.ts can verify a signature on every request
+// without opening SQLite. The user store and password handling live in lib/users.ts.
 
 export const AUTH_COOKIE = "auth";
 export const AUTH_MAX_AGE_S = 30 * 24 * 60 * 60;
@@ -16,12 +15,14 @@ export type Viewer = {
   userId: string;
   login: string;
   role: Role;
+  /** Copy of users.session_version at sign-in; a mismatch revokes the token. */
+  sessionVersion: number;
 };
 
 /**
  * Auth is on only when AUTH_SECRET is set. Without it: open in development,
- * closed in production (fail closed). The secret is unrelated to user passwords —
- * changing a password does not revoke existing tokens.
+ * closed in production (fail closed). Revocation of issued tokens goes through
+ * sessionVersion (checked by getViewer), not through the secret.
  */
 export function authEnabled(): boolean {
   return Boolean(process.env.AUTH_SECRET);
@@ -98,12 +99,13 @@ export async function verifyAuthToken(token: string | undefined): Promise<Viewer
       typeof p.userId !== "string" ||
       typeof p.login !== "string" ||
       (p.role !== "head" && p.role !== "supervisor") ||
+      typeof p.sessionVersion !== "number" ||
       typeof p.exp !== "number" ||
       p.exp <= Date.now()
     ) {
       return null;
     }
-    return { userId: p.userId, login: p.login, role: p.role };
+    return { userId: p.userId, login: p.login, role: p.role, sessionVersion: p.sessionVersion };
   } catch {
     return null;
   }

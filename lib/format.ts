@@ -1,21 +1,31 @@
+import type { Role } from "@/lib/auth";
 import type { FindingStatus } from "@/lib/curator/store";
 
-function parse(iso: string | null): Date | null {
+/** SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) → Date; null when missing or malformed. */
+export function parseDbDate(iso: string | null): Date | null {
   if (!iso) return null;
   const d = new Date(iso.replace(" ", "T") + "Z");
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function plural(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
+  return many;
+}
+
 /** "сегодня" / "вчера" / "N дней назад" / "D month YYYY". */
 export function relativeDate(iso: string | null): string {
-  const date = parse(iso);
+  const date = parseDbDate(iso);
   if (!date) return "—";
   const startOfDay = (d: Date) =>
     new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const dayDiff = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86_400_000);
   if (dayDiff === 0) return "сегодня";
   if (dayDiff === 1) return "вчера";
-  if (dayDiff < 7) return `${dayDiff} дн. назад`;
+  if (dayDiff < 7) return `${dayDiff} ${plural(dayDiff, "день", "дня", "дней")} назад`;
   return new Intl.DateTimeFormat("ru-RU", {
     day: "numeric",
     month: "long",
@@ -24,7 +34,7 @@ export function relativeDate(iso: string | null): string {
 }
 
 export function fullDate(iso: string | null): string {
-  const date = parse(iso);
+  const date = parseDbDate(iso);
   if (!date) return "—";
   return new Intl.DateTimeFormat("ru-RU", {
     day: "numeric",
@@ -53,8 +63,9 @@ export function isOpenStatus(status: FindingStatus): boolean {
 
 export function severityLabel(severity: string | null): string {
   switch ((severity ?? "").toLowerCase()) {
-    case "high":
     case "critical":
+      return "критическая";
+    case "high":
       return "высокая";
     case "medium":
       return "средняя";
@@ -65,7 +76,89 @@ export function severityLabel(severity: string | null): string {
   }
 }
 
-export function isSerious(severity: string | null): boolean {
-  const s = (severity ?? "").toLowerCase();
-  return s === "high" || s === "critical";
+export type SeverityKey = "critical" | "high" | "medium" | "low" | "other";
+
+/** Normalise a raw severity string to one of the ordinal buckets. */
+export function severityKey(severity: string | null): SeverityKey {
+  switch ((severity ?? "").toLowerCase()) {
+    case "critical":
+      return "critical";
+    case "high":
+      return "high";
+    case "medium":
+      return "medium";
+    case "low":
+      return "low";
+    default:
+      return "other";
+  }
+}
+
+/** Higher = more serious. Used to sort findings by severity. */
+export function severityRank(severity: string | null): number {
+  return { critical: 4, high: 3, medium: 2, low: 1, other: 0 }[severityKey(severity)];
+}
+
+// The model writes the category as free Russian text (see the prompt in
+// review.ts), so it is shown as is — no mapping that only the seed would hit.
+export function categoryLabel(category: string | null): string {
+  return category?.trim() || "Без категории";
+}
+
+/**
+ * Human label for an analysis outcome. A failed commit analysis leaves the
+ * check-run at action_required; a failed comment reconciliation blocks nothing.
+ */
+export function outcomeLabel(outcome: string | null, trigger: string | null): string {
+  switch (outcome) {
+    case null:
+      return "разборов не было";
+    case "ok":
+      return "ok";
+    case "parse_error":
+      return "ответ модели не разобран";
+    case "error":
+      return trigger === "comment" ? "сбой сверки по ответу студента" : "ошибка разбора";
+    default:
+      return outcome;
+  }
+}
+
+const PR_STATE_LABEL: Record<string, string> = {
+  open: "открыт",
+  merged: "слит",
+  closed: "закрыт без слияния",
+};
+
+export function prStateLabel(state: string | null): string {
+  if (!state) return "—";
+  return PR_STATE_LABEL[state] ?? state;
+}
+
+const TRIGGER_LABEL: Record<string, string> = {
+  commit: "коммит",
+  comment: "комментарий",
+};
+
+export function triggerLabel(trigger: string): string {
+  return TRIGGER_LABEL[trigger] ?? trigger;
+}
+
+const ROLE_LABEL: Record<Role, string> = {
+  head: "руководитель центра",
+  supervisor: "руководитель проекта",
+};
+
+export function roleLabel(role: Role): string {
+  return ROLE_LABEL[role];
+}
+
+/** Russian plural for "замечание" (1 замечание / 2 замечания / 5 замечаний). */
+export function findingsWord(n: number): string {
+  return plural(n, "замечание", "замечания", "замечаний");
+}
+
+/** Russian plural for "проект". */
+export function projectsWord(n: number): string {
+  return plural(n, "проект", "проекта", "проектов");
 }

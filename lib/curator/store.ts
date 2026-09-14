@@ -44,7 +44,12 @@ export interface ReconcileResult {
   findings: ReconciledFinding[];
 }
 
-export type ProjectStatus = "active" | "paused" | "archived";
+/** active — в работе; paused — разбор отключён, проект остаётся в памяти. */
+export type ProjectStatus = "active" | "paused";
+
+export type PullRequestState = "open" | "merged" | "closed";
+
+export type AnalysisOutcome = "ok" | "parse_error" | "error";
 
 /** A project row with the aggregates the overview table shows. */
 export interface ProjectSummary {
@@ -54,10 +59,19 @@ export interface ProjectSummary {
   name: string | null;
   status: ProjectStatus;
   participants: string[];
+  /** Logins of the supervisors overseeing this project (shown to the head). */
+  supervisors: string[];
+  /** Open findings, excluding those in PRs closed without merge. */
   openFindings: number;
   seriousOpenFindings: number;
   oldestSeriousOpenAt: string | null;
+  /** Latest PR update or analysis — the last thing the curator saw. */
   lastActivityAt: string | null;
+  lastAnalysisAt: string | null;
+  lastAnalysisOutcome: AnalysisOutcome | null;
+  lastAnalysisTrigger: string | null;
+  /** Open PRs whose latest commit analysis failed — their merge stays blocked. */
+  blockedPrs: number;
 }
 
 export interface ProjectDetail {
@@ -72,6 +86,7 @@ export interface FindingRow {
   id: number;
   pullRequestId: number;
   prNumber: number | null;
+  prState: PullRequestState | null;
   category: string | null;
   severity: string | null;
   title: string;
@@ -81,6 +96,10 @@ export interface FindingRow {
   impact: string | null;
   recommendation: string | null;
   status: FindingStatus;
+  /** Reason recorded with the latest status change, if any. */
+  lastReason: string | null;
+  /** When the finding was last reopened (from history), if ever. */
+  reopenedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -90,14 +109,31 @@ export interface AnalysisRow {
   prNumber: number | null;
   headSha: string;
   trigger: string;
-  outcome: string;
+  outcome: AnalysisOutcome;
   summary: string | null;
   createdAt: string;
 }
 
+export interface PullRequestRow {
+  id: number;
+  number: number;
+  title: string | null;
+  author: string | null;
+  state: PullRequestState | null;
+  updatedAt: string;
+  lastAnalysisAt: string | null;
+  lastAnalysisOutcome: AnalysisOutcome | null;
+  lastAnalysisTrigger: string | null;
+  /** Open PR whose latest commit analysis failed: the check-run stays action_required. */
+  blocked: boolean;
+  openFindings: number;
+  totalFindings: number;
+  responses: number;
+}
+
 export interface StatusHistoryRow {
-  oldStatus: string | null;
-  newStatus: string;
+  oldStatus: FindingStatus | null;
+  newStatus: FindingStatus;
   reason: string | null;
   createdAt: string;
 }
@@ -107,40 +143,84 @@ const PARTICIPANTS_SQL = `
 
 const OPEN_STATUSES = "('open', 'reopened', 'pending')";
 
+/** A column of the latest analysis of `pr`, as a correlated subquery fragment. */
+function lastAnalysis(column: string, where = ""): string {
+  return `(SELECT ${column} FROM analyses WHERE pull_request_id = pr.id ${where}
+     ORDER BY created_at DESC, id DESC LIMIT 1)`;
+}
+
+/**
+ * Only a failed COMMIT analysis leaves the check-run at action_required; a failed
+ * comment reconciliation creates no check-run. Closed/merged PRs cannot be blocked.
+ */
+const BLOCKED_SQL = `(COALESCE(pr.state, 'open') = 'open'
+   AND ${lastAnalysis("outcome", "AND trigger = 'commit'")} = 'error')`;
+
+// --- Scope ---
+//
+// Overview queries are optionally scoped to one supervisor: passing a supervisorId
+// restricts them to that supervisor's projects, which is how the panel keeps a
+// project supervisor from seeing other projects. The scope is expressed once, as
+// a subquery of project ids.
+
+interface Scope {
+  projectIds: string;
+  params: Record<string, string>;
+}
+
+function scope(supervisorId?: string): Scope {
+  if (supervisorId) {
+    return {
+      projectIds: `SELECT p.id FROM projects p
+        JOIN project_supervisors ps ON ps.project_id = p.id
+        WHERE ps.user_id = @supervisorId`,
+      params: { supervisorId },
+    };
+  }
+  return { projectIds: "SELECT id FROM projects", params: {} };
+}
+
+// --- Overview ---
+
 /** Projects with overview aggregates; optionally restricted to one supervisor. */
 export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
   const db = getDb();
-  const rows = (
-    supervisorId
-      ? db
-          .prepare(
-            `SELECT p.* FROM projects p
-             JOIN project_supervisors ps ON ps.project_id = p.id
-             WHERE ps.user_id = @supervisorId AND p.status != 'archived'
-             ORDER BY p.name, p.repo`,
-          )
-          .all({ supervisorId })
-      : db
-          .prepare(
-            "SELECT * FROM projects WHERE status != 'archived' ORDER BY name, repo",
-          )
-          .all()
-  ) as Array<{ id: number; owner: string; repo: string; name: string | null; status: ProjectStatus }>;
+  const s = scope(supervisorId);
+  const rows = db
+    .prepare(
+      `SELECT id, owner, repo, name, status FROM projects
+       WHERE id IN (${s.projectIds}) ORDER BY name, repo`,
+    )
+    .all(s.params) as unknown as ProjectDetail[];
 
   return rows.map((p) => {
     const participants = (
       db.prepare(PARTICIPANTS_SQL).all({ id: p.id }) as Array<{ github_login: string }>
     ).map((r) => r.github_login);
 
+    const supervisors = (
+      db
+        .prepare(
+          `SELECT u.login FROM project_supervisors ps
+             JOIN users u ON u.id = ps.user_id
+             WHERE ps.project_id = @id ORDER BY u.login`,
+        )
+        .all({ id: p.id }) as Array<{ login: string }>
+    ).map((r) => r.login);
+
+    // Findings in PRs closed without merge never reached the main branch, so they
+    // are not "open" for the project (see принятые решения.md).
     const counts = db
       .prepare(
         `SELECT
            COUNT(*) AS openFindings,
-           SUM(CASE WHEN LOWER(severity) IN ('high', 'critical') THEN 1 ELSE 0 END) AS serious,
-           MIN(CASE WHEN LOWER(severity) IN ('high', 'critical') THEN created_at END) AS oldestSerious
-         FROM findings
-         WHERE pull_request_id IN (SELECT id FROM pull_requests WHERE project_id = @id)
-           AND status IN ${OPEN_STATUSES}`,
+           SUM(CASE WHEN LOWER(f.severity) IN ('high', 'critical') THEN 1 ELSE 0 END) AS serious,
+           MIN(CASE WHEN LOWER(f.severity) IN ('high', 'critical') THEN f.created_at END) AS oldestSerious
+         FROM findings f
+         JOIN pull_requests pr ON pr.id = f.pull_request_id
+         WHERE pr.project_id = @id
+           AND f.status IN ${OPEN_STATUSES}
+           AND COALESCE(pr.state, 'open') != 'closed'`,
       )
       .get({ id: p.id }) as {
       openFindings: number;
@@ -160,6 +240,22 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       )
       .get({ id: p.id }) as { lastActivityAt: string | null };
 
+    const last = db
+      .prepare(
+        `SELECT a.created_at AS at, a.outcome AS outcome, a.trigger AS trigger
+         FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+         WHERE pr.project_id = @id
+         ORDER BY a.created_at DESC, a.id DESC LIMIT 1`,
+      )
+      .get({ id: p.id }) as { at: string; outcome: AnalysisOutcome; trigger: string } | undefined;
+
+    const blocked = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM pull_requests pr
+         WHERE pr.project_id = @id AND ${BLOCKED_SQL}`,
+      )
+      .get({ id: p.id }) as { n: number };
+
     return {
       id: p.id,
       owner: p.owner,
@@ -167,18 +263,58 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       name: p.name,
       status: p.status,
       participants,
+      supervisors,
       openFindings: counts.openFindings,
       seriousOpenFindings: counts.serious ?? 0,
       oldestSeriousOpenAt: counts.oldestSerious,
       lastActivityAt: activity.lastActivityAt,
+      lastAnalysisAt: last?.at ?? null,
+      lastAnalysisOutcome: last?.outcome ?? null,
+      lastAnalysisTrigger: last?.trigger ?? null,
+      blockedPrs: blocked.n,
     };
   });
 }
+
+/**
+ * Analysis timestamps of the last `weeks` weeks for every project in scope, in one
+ * query. The caller buckets them per project into a weekly series.
+ */
+export function recentAnalysisTimestampsByProject(
+  weeks: number,
+  supervisorId?: string,
+): Array<{ projectId: number; ts: string }> {
+  const s = scope(supervisorId);
+  return getDb()
+    .prepare(
+      `SELECT pr.project_id AS projectId, a.created_at AS ts
+       FROM analyses a
+       JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE pr.project_id IN (${s.projectIds})
+         AND a.created_at >= datetime('now', @since)`,
+    )
+    .all({ ...s.params, since: `-${weeks * 7} days` }) as Array<{
+    projectId: number;
+    ts: string;
+  }>;
+}
+
+// --- Project page ---
 
 export function getProject(id: number): ProjectDetail | null {
   const row = getDb()
     .prepare("SELECT id, owner, repo, name, status FROM projects WHERE id = @id")
     .get({ id }) as ProjectDetail | undefined;
+  return row ?? null;
+}
+
+export function getProjectByRepo(owner: string, repo: string): ProjectDetail | null {
+  const row = getDb()
+    .prepare(
+      `SELECT id, owner, repo, name, status FROM projects
+       WHERE owner = @owner COLLATE NOCASE AND repo = @repo COLLATE NOCASE`,
+    )
+    .get({ owner, repo }) as ProjectDetail | undefined;
   return row ?? null;
 }
 
@@ -188,31 +324,27 @@ export function getProjectParticipants(id: number): string[] {
   ).map((r) => r.github_login);
 }
 
+const FINDING_SELECT = `
+  SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber, pr.state AS prState,
+         pr.project_id AS projectId, f.category, f.severity, f.title, f.file, f.lines,
+         f.evidence, f.impact, f.recommendation, f.status,
+         (SELECT h.reason FROM finding_status_history h WHERE h.finding_id = f.id
+            ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS lastReason,
+         (SELECT h.created_at FROM finding_status_history h WHERE h.finding_id = f.id
+            AND h.new_status = 'reopened' ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS reopenedAt,
+         f.created_at AS createdAt, f.updated_at AS updatedAt
+  FROM findings f
+  JOIN pull_requests pr ON pr.id = f.pull_request_id`;
+
 export function listProjectFindings(projectId: number): FindingRow[] {
   return getDb()
-    .prepare(
-      `SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber,
-              f.category, f.severity, f.title, f.file, f.lines, f.evidence, f.impact,
-              f.recommendation, f.status, f.created_at AS createdAt, f.updated_at AS updatedAt
-       FROM findings f
-       JOIN pull_requests pr ON pr.id = f.pull_request_id
-       WHERE pr.project_id = @projectId
-       ORDER BY f.updated_at DESC`,
-    )
+    .prepare(`${FINDING_SELECT} WHERE pr.project_id = @projectId ORDER BY f.updated_at DESC`)
     .all({ projectId }) as unknown as FindingRow[];
 }
 
 export function getFinding(id: number): (FindingRow & { projectId: number }) | null {
   const row = getDb()
-    .prepare(
-      `SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber,
-              pr.project_id AS projectId, f.category, f.severity, f.title, f.file, f.lines,
-              f.evidence, f.impact, f.recommendation, f.status,
-              f.created_at AS createdAt, f.updated_at AS updatedAt
-       FROM findings f
-       JOIN pull_requests pr ON pr.id = f.pull_request_id
-       WHERE f.id = @id`,
-    )
+    .prepare(`${FINDING_SELECT} WHERE f.id = @id`)
     .get({ id }) as (FindingRow & { projectId: number }) | undefined;
   return row ?? null;
 }
@@ -221,21 +353,22 @@ export function getFindingHistory(findingId: number): StatusHistoryRow[] {
   return getDb()
     .prepare(
       `SELECT old_status AS oldStatus, new_status AS newStatus, reason, created_at AS createdAt
-       FROM finding_status_history WHERE finding_id = @findingId ORDER BY created_at`,
+       FROM finding_status_history WHERE finding_id = @findingId ORDER BY created_at, id`,
     )
     .all({ findingId }) as unknown as StatusHistoryRow[];
 }
 
-export function getFindingResponses(findingId: number): StudentResponse[] {
-  return getDb()
+export function countProjectAnalyses(projectId: number): number {
+  const row = getDb()
     .prepare(
-      `SELECT finding_id AS findingId, github_login AS login, body, created_at AS createdAt
-       FROM student_responses WHERE finding_id = @findingId ORDER BY created_at`,
+      `SELECT COUNT(*) AS n FROM analyses a
+       JOIN pull_requests pr ON pr.id = a.pull_request_id WHERE pr.project_id = @projectId`,
     )
-    .all({ findingId }) as unknown as StudentResponse[];
+    .get({ projectId }) as { n: number };
+  return row.n;
 }
 
-export function listProjectAnalyses(projectId: number, limit = 10): AnalysisRow[] {
+export function listProjectAnalyses(projectId: number, limit = 20): AnalysisRow[] {
   return getDb()
     .prepare(
       `SELECT a.id, pr.number AS prNumber, a.head_sha AS headSha, a.trigger, a.outcome,
@@ -243,12 +376,33 @@ export function listProjectAnalyses(projectId: number, limit = 10): AnalysisRow[
        FROM analyses a
        JOIN pull_requests pr ON pr.id = a.pull_request_id
        WHERE pr.project_id = @projectId
-       ORDER BY a.created_at DESC LIMIT @limit`,
+       ORDER BY a.created_at DESC, a.id DESC LIMIT @limit`,
     )
     .all({ projectId, limit }) as unknown as AnalysisRow[];
 }
 
-// --- Admin mutations ---
+export function listProjectPullRequests(projectId: number): PullRequestRow[] {
+  return (getDb()
+    .prepare(
+      `SELECT pr.id, pr.number, pr.title, pr.author_login AS author, pr.state,
+              pr.updated_at AS updatedAt,
+              ${lastAnalysis("created_at")} AS lastAnalysisAt,
+              ${lastAnalysis("outcome")} AS lastAnalysisOutcome,
+              ${lastAnalysis("trigger")} AS lastAnalysisTrigger,
+              ${BLOCKED_SQL} AS blocked,
+              (SELECT COUNT(*) FROM findings f WHERE f.pull_request_id = pr.id
+                 AND f.status IN ${OPEN_STATUSES}) AS openFindings,
+              (SELECT COUNT(*) FROM findings f WHERE f.pull_request_id = pr.id) AS totalFindings,
+              (SELECT COUNT(*) FROM student_responses r WHERE r.pull_request_id = pr.id) AS responses
+       FROM pull_requests pr
+       WHERE pr.project_id = @projectId
+       ORDER BY pr.updated_at DESC, pr.number DESC`,
+    )
+    .all({ projectId }) as unknown as Array<Omit<PullRequestRow, "blocked"> & { blocked: number }>)
+    .map((r) => ({ ...r, blocked: r.blocked === 1 }));
+}
+
+// --- Admin: projects ---
 
 export function createProjectManual(
   owner: string,
@@ -256,6 +410,59 @@ export function createProjectManual(
   name?: string,
 ): number {
   return upsertProject(owner, repo, name);
+}
+
+/** All fields are always bound — node:sqlite rejects unused named parameters. */
+export function updateProject(
+  id: number,
+  fields: { owner: string; repo: string; name: string | null },
+): void {
+  getDb()
+    .prepare(
+      `UPDATE projects SET owner = @owner, repo = @repo, name = @name,
+         updated_at = datetime('now') WHERE id = @id`,
+    )
+    .run({ id, owner: fields.owner, repo: fields.repo, name: fields.name });
+}
+
+export function projectHasPullRequests(id: number): boolean {
+  const row = getDb()
+    .prepare("SELECT 1 FROM pull_requests WHERE project_id = @id LIMIT 1")
+    .get({ id });
+  return row !== undefined;
+}
+
+/**
+ * Delete a project with everything the memory holds about it, in one transaction.
+ * Order follows the foreign keys (PRAGMA foreign_keys = ON): history → responses →
+ * findings → analyses → pull requests → participants → assignments → project.
+ * github_events are not tied to a project and stay.
+ */
+export function deleteProjectCascade(id: number): void {
+  const db = getDb();
+  const steps = [
+    `DELETE FROM finding_status_history WHERE finding_id IN
+       (SELECT f.id FROM findings f JOIN pull_requests pr ON pr.id = f.pull_request_id
+        WHERE pr.project_id = @id)`,
+    `DELETE FROM student_responses WHERE pull_request_id IN
+       (SELECT id FROM pull_requests WHERE project_id = @id)`,
+    `DELETE FROM findings WHERE pull_request_id IN
+       (SELECT id FROM pull_requests WHERE project_id = @id)`,
+    `DELETE FROM analyses WHERE pull_request_id IN
+       (SELECT id FROM pull_requests WHERE project_id = @id)`,
+    `DELETE FROM pull_requests WHERE project_id = @id`,
+    `DELETE FROM participants WHERE project_id = @id`,
+    `DELETE FROM project_supervisors WHERE project_id = @id`,
+    `DELETE FROM projects WHERE id = @id`,
+  ];
+  db.exec("BEGIN");
+  try {
+    for (const sql of steps) db.prepare(sql).run({ id });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function setProjectStatus(id: number, status: ProjectStatus): void {
@@ -283,6 +490,7 @@ export function unassignSupervisor(projectId: number, userId: string): void {
     .run({ projectId, userId });
 }
 
+/** User ids of the supervisors assigned to a project. */
 export function listProjectSupervisors(projectId: number): string[] {
   return (
     getDb()
@@ -305,6 +513,8 @@ export function listAllProjects(): ProjectDetail[] {
     .prepare("SELECT id, owner, repo, name, status FROM projects ORDER BY name, repo")
     .all() as unknown as ProjectDetail[];
 }
+
+// --- Curator write path (webhook / review.ts) ---
 
 export function upsertProject(owner: string, repo: string, name?: string): number {
   const db = getDb();
@@ -332,7 +542,7 @@ export function upsertParticipant(projectId: number, login: string): void {
 export function upsertPullRequest(
   projectId: number,
   number: number,
-  info: { author?: string | null; title?: string | null; state?: string | null } = {},
+  info: { author?: string | null; title?: string | null; state?: PullRequestState | null } = {},
 ): number {
   const db = getDb();
   const row = db
@@ -354,6 +564,11 @@ export function upsertPullRequest(
       state: info.state ?? null,
     }) as { id: number };
   return row.id;
+}
+
+/** Forget a delivery so GitHub's retry of a failed handling is not treated as a duplicate. */
+export function forgetEvent(deliveryId: string): void {
+  getDb().prepare("DELETE FROM github_events WHERE delivery_id = @deliveryId").run({ deliveryId });
 }
 
 /**
@@ -392,7 +607,7 @@ export function recordAnalysis(params: {
   prId: number;
   headSha: string;
   trigger: "commit" | "comment";
-  outcome: "ok" | "parse_error" | "error";
+  outcome: AnalysisOutcome;
   summary?: string | null;
   provider?: string | null;
   model?: string | null;
@@ -420,7 +635,7 @@ export function loadOpenFindings(prId: number): PriorFinding[] {
     .prepare(
       `SELECT id, category, severity, title, file, lines, status
        FROM findings
-       WHERE pull_request_id = @prId AND status IN ('open', 'reopened', 'pending')
+       WHERE pull_request_id = @prId AND status IN ${OPEN_STATUSES}
        ORDER BY id`,
     )
     .all({ prId }) as unknown as PriorFinding[];

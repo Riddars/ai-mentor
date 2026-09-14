@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS users (
   role          TEXT NOT NULL,
   name          TEXT,
   disabled      INTEGER NOT NULL DEFAULT 0,
+  session_version INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (login)
 );
@@ -164,5 +165,23 @@ function migrate(db: DatabaseSync): void {
       db.exec("ALTER TABLE projects DROP COLUMN connected");
     }
     db.exec("PRAGMA user_version = 3");
+  }
+  if (version < 4) {
+    // Project lifecycle narrowed to active | paused; "archived" is folded into
+    // paused (deliberate: archived projects become "on pause"). Deletion is now
+    // a real delete (see панель руководителя.md).
+    db.exec("UPDATE projects SET status = 'paused' WHERE status = 'archived'");
+    db.exec("PRAGMA user_version = 4");
+  }
+  if (version < 5) {
+    // Session revocation: the auth token carries the user's session_version and is
+    // rejected once it changes (password change, account disabled).
+    const columns = (
+      db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    if (!columns.includes("session_version")) {
+      db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0");
+    }
+    db.exec("PRAGMA user_version = 5");
   }
 }

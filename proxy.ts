@@ -2,16 +2,21 @@ import { NextResponse, type NextRequest } from "next/server";
 import { AUTH_COOKIE, authEnabled, verifyAuthToken } from "@/lib/auth";
 
 // The single gate for the panel: any request without a valid cookie is sent to
-// the login page (API calls get 401). Only token-signature crypto runs here
-// (edge runtime, no disk) — whether the user still exists is re-checked by
-// getViewer in server code. Without AUTH_SECRET the service is open in
-// development and closed in production.
+// the login page (API calls get 401). Only token-signature crypto runs here (no
+// database) — whether the user still exists, is enabled and the session is not
+// revoked is re-checked by getViewer in server code. Without AUTH_SECRET the
+// service is open in development and closed in production.
 export default async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // GitHub webhooks authenticate by HMAC signature, not by cookie.
-  // The dev seed route enforces its own flag and must be reachable before login.
-  if (pathname.startsWith("/api/github/") || pathname.startsWith("/api/dev/")) {
+  // Not cookie-gated: GitHub webhooks (HMAC signature), the liveness probe, the
+  // simulation admin route (SIM_ADMIN_TOKEN) and the dev seed (its own check).
+  if (
+    pathname.startsWith("/api/github/") ||
+    pathname.startsWith("/api/health") ||
+    pathname.startsWith("/api/simulate/") ||
+    pathname.startsWith("/api/dev/")
+  ) {
     return NextResponse.next();
   }
 

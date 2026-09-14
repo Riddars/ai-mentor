@@ -5,15 +5,16 @@ import { postIssueComment } from "@/lib/github/comments";
 import { chat } from "@/lib/llm/chat";
 import {
   applyReconciliation,
+  getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
   loadStudentResponses,
   recordAnalysis,
   saveStudentResponse,
   upsertParticipant,
-  upsertProject,
   upsertPullRequest,
   type PriorFinding,
+  type PullRequestState,
   type ReconcileResult,
   type ReconciledFinding,
   type StatusChange,
@@ -29,6 +30,8 @@ export interface ReviewParams {
   installationId: number;
   author?: string | null;
   title?: string | null;
+  /** Real PR state; defaults to "open" (commit events only arrive for open PRs). */
+  state?: PullRequestState;
 }
 
 // Потолок на суммарный объём патчей в промпте: страховка от разового гигантского
@@ -354,16 +357,23 @@ async function runReview(
   };
 }
 
-/** Записать проект/участника/PR и вернуть id pull request в памяти. */
+/**
+ * Записать участника/PR и вернуть id pull request в памяти. Проект не создаётся:
+ * разбираются только подключённые в управлении проекты (вебхук отсекает
+ * остальные), поэтому удалённый проект здесь не воскресает.
+ */
 function persistPrContext(params: ReviewParams): number {
-  const projectId = upsertProject(params.owner, params.repo, params.repo);
-  if (params.author) {
-    upsertParticipant(projectId, params.author);
+  const project = getProjectByRepo(params.owner, params.repo);
+  if (!project) {
+    throw new Error(`Project ${params.owner}/${params.repo} is not connected`);
   }
-  return upsertPullRequest(projectId, params.prNumber, {
+  if (params.author) {
+    upsertParticipant(project.id, params.author);
+  }
+  return upsertPullRequest(project.id, params.prNumber, {
     author: params.author,
     title: params.title,
-    state: "open",
+    state: params.state ?? "open",
   });
 }
 
@@ -385,7 +395,9 @@ export async function handleLlmPullRequest(params: ReviewParams): Promise<void> 
     headSha: params.headSha,
     installationId: params.installationId,
   });
-  void completeReview(params, prId, checkRunId);
+  void completeReview(params, prId, checkRunId).catch((error) => {
+    console.error("[curator] unhandled review failure:", error);
+  });
 }
 
 async function completeReview(
@@ -412,12 +424,12 @@ async function completeReview(
     });
   } catch (error) {
     console.error("[curator] llm review failed:", error);
-    recordAnalysis({
-      prId,
-      headSha: params.headSha,
-      trigger: "commit",
-      outcome: "error",
-    });
+    try {
+      recordAnalysis({ prId, headSha: params.headSha, trigger: "commit", outcome: "error" });
+    } catch (recordError) {
+      // The PR may have been deleted meanwhile (project removed in the panel).
+      console.error("[curator] failed to record error outcome:", recordError);
+    }
     // Отсутствие ответа не должно превращаться в разрешение: оставляем слияние
     // заблокированным (action_required) и сообщаем об этом в pull request.
     try {
@@ -467,6 +479,8 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     head: { sha: string };
     user: { login: string };
     title: string;
+    state: "open" | "closed";
+    merged: boolean;
   }>(`/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`, { token });
 
   const reviewParams: ReviewParams = {
@@ -477,6 +491,8 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     installationId: params.installationId,
     author: pr.user.login,
     title: pr.title,
+    // Comments arrive for merged/closed PRs too — keep the real state in memory.
+    state: pr.state === "open" ? "open" : pr.merged ? "merged" : "closed",
   };
   const prId = persistPrContext(reviewParams);
 
@@ -490,7 +506,14 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     return; // этот комментарий уже обработан
   }
 
-  const { statusChanges } = await runReview(reviewParams, prId, "comment");
+  let statusChanges: StatusChange[];
+  try {
+    ({ statusChanges } = await runReview(reviewParams, prId, "comment"));
+  } catch (error) {
+    // Сбой должен быть виден в памяти (и в панели), а не только в логе.
+    recordAnalysis({ prId, headSha: pr.head.sha, trigger: "comment", outcome: "error" });
+    throw error;
+  }
   const resolved = statusChanges.filter(
     (c) => c.newStatus === "closed" || c.newStatus === "dismissed",
   );
