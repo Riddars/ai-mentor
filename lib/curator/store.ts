@@ -9,8 +9,14 @@ export type FindingStatus = "open" | "closed" | "dismissed" | "reopened" | "pend
 
 /** What the model was given for one analysis. */
 export interface AnalysisMaterials {
+  /** All changed files of the PR that were listed. */
   files: string[];
+  /** Files left out of the prompt by the size limit (absent in older analyses). */
+  omitted?: string[];
+  /** Changed files beyond the listing limit. */
+  unlisted?: number;
   researchDoc: boolean;
+  planDoc?: boolean;
   truncated: boolean;
   /** Open findings of the project given to the model for reconciliation. */
   priorFindings: number;
@@ -26,6 +32,8 @@ export interface PriorFinding {
   severity: Severity | null;
   title: string;
   locations: FindingLocation[];
+  /** How to check that the problem is fixed. */
+  verify: string | null;
   status: FindingStatus;
 }
 
@@ -45,6 +53,7 @@ export interface ReconciledFinding {
   title: string;
   description?: string | null;
   locations?: FindingLocation[];
+  verify?: string | null;
   evidence?: string | null;
   impact?: string | null;
   recommendation?: string | null;
@@ -105,6 +114,7 @@ export interface FindingRow {
   title: string;
   description: string | null;
   locations: FindingLocation[];
+  verify: string | null;
   evidence: string | null;
   impact: string | null;
   recommendation: string | null;
@@ -352,6 +362,7 @@ export function getProjectParticipants(id: number): string[] {
 const FINDING_SELECT = `
   SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber, pr.state AS prState,
          pr.project_id AS projectId, f.area, f.severity, f.title, f.description, f.locations,
+         f.verify,
          f.evidence, f.impact, f.recommendation, f.status,
          (SELECT h.reason FROM finding_status_history h WHERE h.finding_id = f.id
             ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS lastReason,
@@ -710,7 +721,8 @@ export function setAnalysisComment(analysisId: number, comment: string): void {
 export function loadOpenFindings(prId: number): PriorFinding[] {
   const rows = getDb()
     .prepare(
-      `SELECT f.id, pr.number AS prNumber, f.area, f.severity, f.title, f.locations, f.status
+      `SELECT f.id, pr.number AS prNumber, f.area, f.severity, f.title, f.locations, f.verify,
+              f.status
        FROM findings f
        JOIN pull_requests pr ON pr.id = f.pull_request_id
        WHERE pr.project_id = (SELECT project_id FROM pull_requests WHERE id = @prId)
@@ -809,10 +821,10 @@ export function applyReconciliation(
 
   const insertFinding = db.prepare(
     `INSERT INTO findings
-       (pull_request_id, area, severity, title, description, locations, evidence, impact,
-        recommendation, status, first_analysis_id, last_analysis_id)
-     VALUES (@prId, @area, @severity, @title, @description, @locations, @evidence, @impact,
-             @recommendation, 'open', @analysisId, @analysisId)
+       (pull_request_id, area, severity, title, description, locations, verify, evidence,
+        impact, recommendation, status, first_analysis_id, last_analysis_id)
+     VALUES (@prId, @area, @severity, @title, @description, @locations, @verify, @evidence,
+             @impact, @recommendation, 'open', @analysisId, @analysisId)
      RETURNING id`,
   );
   const updateFinding = db.prepare(
@@ -856,6 +868,7 @@ export function applyReconciliation(
           area: f.area ?? null,
           severity: f.severity ?? null,
           title: f.title,
+          verify: f.verify ?? null,
           ...text,
         }) as { id: number };
         created += 1;

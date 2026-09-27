@@ -169,6 +169,11 @@ export default async function FindingPage({
                 <Text value={finding.recommendation} />
               </Field>
             )}
+            {finding.verify && (
+              <Field title="Как проверить исправление">
+                <Text value={finding.verify} />
+              </Field>
+            )}
             {responses.length > 0 && (
               <Field title="Ответы студента в pull request">
                 <ul className="flex flex-col gap-4">

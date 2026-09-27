@@ -33,6 +33,8 @@ export default async function AnalysisPage({
   const repoUrl = `https://github.com/${project.owner}/${project.repo}`;
   const changes = listAnalysisChanges(analysis.id);
   const materials = analysis.materials;
+  const omitted = materials?.omitted ?? [];
+  const sent = (materials?.files ?? []).filter((f) => !omitted.includes(f));
   const model = [analysis.provider, analysis.model].filter(Boolean).join(" / ");
 
   return (
@@ -134,12 +136,10 @@ export default async function AnalysisPage({
               </CardHeader>
               <CardBody className="flex flex-col gap-3 pt-0 text-sm">
                 <div>
-                  <p className="mb-1 text-xs text-muted-foreground">
-                    Изменённые файлы{materials.truncated ? " (часть изменений обрезана по объёму)" : ""}
-                  </p>
-                  {materials.files.length > 0 ? (
+                  <p className="mb-1 text-xs text-muted-foreground">Изменённые файлы</p>
+                  {sent.length > 0 ? (
                     <ul className="flex flex-col gap-0.5">
-                      {materials.files.map((f) => (
+                      {sent.map((f) => (
                         <li key={f} className="font-mono text-xs break-all">
                           {f}
                         </li>
@@ -149,9 +149,35 @@ export default async function AnalysisPage({
                     <p className="text-muted-foreground">—</p>
                   )}
                 </div>
+                {(omitted.length > 0 || (materials.unlisted ?? 0) > 0 || (materials.truncated && !materials.omitted)) && (
+                  <div>
+                    <p className="mb-1 text-xs text-amber">Не переданы модели из-за объёма</p>
+                    {omitted.length > 0 && (
+                      <ul className="flex flex-col gap-0.5">
+                        {omitted.map((f) => (
+                          <li key={f} className="font-mono text-xs break-all">
+                            {f}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {(materials.unlisted ?? 0) > 0 && (
+                      <p className="text-xs">ещё {materials.unlisted} файлов сверх лимита списка</p>
+                    )}
+                    {materials.truncated && !materials.omitted && (
+                      <p className="text-xs">часть изменений обрезана</p>
+                    )}
+                  </div>
+                )}
                 <dl className="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1 text-xs">
                   <dt className="text-muted-foreground">RESEARCH.md</dt>
                   <dd>{materials.researchDoc ? "есть" : "нет"}</dd>
+                  {materials.planDoc !== undefined && (
+                    <>
+                      <dt className="text-muted-foreground">PLAN.md</dt>
+                      <dd>{materials.planDoc ? "есть" : "нет"}</dd>
+                    </>
+                  )}
                   <dt className="text-muted-foreground">Открытые замечания проекта</dt>
                   <dd className="tabular-nums">{materials.priorFindings}</dd>
                   <dt className="text-muted-foreground">Ответы студента</dt>

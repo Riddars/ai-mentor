@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS findings (
   title             TEXT NOT NULL,
   description       TEXT,
   locations         TEXT,
+  verify            TEXT,
   evidence          TEXT,
   impact            TEXT,
   recommendation    TEXT,
@@ -280,6 +281,11 @@ function migrate(db: DatabaseSync): void {
     addColumns(db, "finding_status_history", { actor: "TEXT" });
     addColumns(db, "analyses", { raw_response: "TEXT" });
     db.exec("PRAGMA user_version = 7");
+  }
+  if (version < 8) {
+    // How to check that a finding is fixed: set when the finding is created, like its title.
+    addColumns(db, "findings", { verify: "TEXT" });
+    db.exec("PRAGMA user_version = 8");
   }
 }
 
