@@ -8,6 +8,7 @@ import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Markdown } from "@/components/Markdown";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
+import { CollapsibleCard } from "@/components/ui/Collapsible";
 
 export const dynamic = "force-dynamic";
 
@@ -86,6 +87,13 @@ export default async function AnalysisPage({
                   <Markdown>{analysis.comment}</Markdown>
                 </CardBody>
               </Card>
+            )}
+            {analysis.rawResponse && (
+              <CollapsibleCard title="Ответ модели как есть">
+                <pre className="max-h-[32rem] overflow-auto rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs whitespace-pre-wrap">
+                  <code>{analysis.rawResponse}</code>
+                </pre>
+              </CollapsibleCard>
             )}
             {changes.length > 0 && (
               <Card className="shadow-card">

@@ -9,7 +9,15 @@ import {
   loadStudentResponses,
 } from "@/lib/curator/store";
 import type { FindingLocation } from "@/lib/curator/finding";
-import { areaLabel, findingStatusLabel, fullDate, locationText, prStateLabel } from "@/lib/format";
+import {
+  areaLabel,
+  findingStatusLabel,
+  fullDate,
+  isOpenStatus,
+  locationText,
+  prStateLabel,
+} from "@/lib/format";
+import { FindingDecisionForm } from "@/components/FindingDecisionForm";
 import { AppHeader, PageShell } from "@/components/AppHeader";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Badge, SeverityBadge } from "@/components/ui/Badge";
@@ -40,8 +48,14 @@ export default async function FindingPage({
   const history = getFindingHistory(finding.id);
   // A finding raised in one PR may be fixed or dismissed by a later one.
   const lastChange = history.at(-1);
-  const resolvedElsewhere =
-    (finding.status === "closed" || finding.status === "dismissed") &&
+  const fixedIn =
+    (finding.status === "closed" || finding.status === "pending") &&
+    finding.resolvedByPrNumber !== null &&
+    finding.resolvedByPrNumber !== finding.prNumber
+      ? finding.resolvedByPrNumber
+      : null;
+  const dismissedIn =
+    finding.status === "dismissed" &&
     lastChange?.analysisId &&
     lastChange.prNumber !== null &&
     lastChange.prNumber !== finding.prNumber
@@ -95,15 +109,23 @@ export default async function FindingPage({
               </>
             ) : null}
             обнаружено {fullDate(finding.createdAt)}
-            {resolvedElsewhere && (
+            {fixedIn !== null && (
               <>
-                {" · "}
-                {finding.status === "closed" ? "исправлено" : "снято"} в{" "}
+                {" · исправлено в "}
+                <a href={`${repoUrl}/pull/${fixedIn}`} target="_blank" rel="noreferrer" className="hover:underline">
+                  PR #{fixedIn}
+                </a>
+                {finding.status === "pending" && ", ждёт слияния"}
+              </>
+            )}
+            {dismissedIn && (
+              <>
+                {" · снято в "}
                 <Link
-                  href={`/projects/${projectId}/analyses/${resolvedElsewhere.analysisId}`}
+                  href={`/projects/${projectId}/analyses/${dismissedIn.analysisId}`}
                   className="hover:underline"
                 >
-                  PR #{resolvedElsewhere.prNumber}
+                  PR #{dismissedIn.prNumber}
                 </Link>
               </>
             )}
@@ -165,43 +187,54 @@ export default async function FindingPage({
             )}
           </div>
 
-          {history.length > 0 && (
-            <Card className="h-fit shadow-card">
+          <div className="flex h-fit flex-col gap-5">
+            {history.length > 0 && (
+              <Card className="shadow-card">
+                <CardHeader>
+                  <CardTitle>История статуса</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <ol className="flex flex-col gap-4">
+                    {history.map((h, i) => (
+                      <li key={i} className="relative pl-5">
+                        <span className="absolute top-1 left-0 flex size-3 items-center justify-center">
+                          <span className="size-2 rounded-full bg-primary" />
+                        </span>
+                        {i < history.length - 1 && (
+                          <span className="absolute top-4 left-1.5 h-full w-px bg-border" />
+                        )}
+                        <p className="text-sm font-medium">{findingStatusLabel(h.newStatus)}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {h.analysisId && h.prNumber ? (
+                            <>
+                              <Link
+                                href={`/projects/${projectId}/analyses/${h.analysisId}`}
+                                className="hover:text-foreground hover:underline"
+                              >
+                                PR #{h.prNumber}
+                              </Link>
+                              {" · "}
+                            </>
+                          ) : null}
+                          {fullDate(h.createdAt)}
+                          {h.actor && ` · решение: ${h.actor}`}
+                        </p>
+                        {h.reason && <p className="mt-1 text-xs">{h.reason}</p>}
+                      </li>
+                    ))}
+                  </ol>
+                </CardBody>
+              </Card>
+            )}
+            <Card className="shadow-card">
               <CardHeader>
-                <CardTitle>История статуса</CardTitle>
+                <CardTitle>Решение руководителя</CardTitle>
               </CardHeader>
-              <CardBody>
-                <ol className="flex flex-col gap-4">
-                  {history.map((h, i) => (
-                    <li key={i} className="relative pl-5">
-                      <span className="absolute top-1 left-0 flex size-3 items-center justify-center">
-                        <span className="size-2 rounded-full bg-primary" />
-                      </span>
-                      {i < history.length - 1 && (
-                        <span className="absolute top-4 left-1.5 h-full w-px bg-border" />
-                      )}
-                      <p className="text-sm font-medium">{findingStatusLabel(h.newStatus)}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {h.analysisId && h.prNumber ? (
-                          <>
-                            <Link
-                              href={`/projects/${projectId}/analyses/${h.analysisId}`}
-                              className="hover:text-foreground hover:underline"
-                            >
-                              PR #{h.prNumber}
-                            </Link>
-                            {" · "}
-                          </>
-                        ) : null}
-                        {fullDate(h.createdAt)}
-                      </p>
-                      {h.reason && <p className="mt-1 text-xs">{h.reason}</p>}
-                    </li>
-                  ))}
-                </ol>
+              <CardBody className="pt-0">
+                <FindingDecisionForm findingId={finding.id} isOpen={isOpenStatus(finding.status)} />
               </CardBody>
             </Card>
-          )}
+          </div>
         </div>
       </PageShell>
     </>

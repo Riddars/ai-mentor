@@ -114,6 +114,8 @@ export interface FindingRow {
   reopenedAt: string | null;
   /** Commit of the latest analysis that touched the finding — locations point there. */
   headSha: string | null;
+  /** PR whose diff showed the fix (pending) or whose merge closed it. */
+  resolvedByPrNumber: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -135,6 +137,8 @@ export interface AnalysisDetail extends AnalysisRow {
   /** The comment published to the pull request, if any. */
   comment: string | null;
   materials: AnalysisMaterials | null;
+  /** The model answer as received. */
+  rawResponse: string | null;
 }
 
 /** A finding status change made by one analysis (a new finding has no old status). */
@@ -155,6 +159,8 @@ export interface StatusHistoryRow {
   /** Analysis that made the change and the PR it ran on (may differ from the finding's PR). */
   analysisId: number | null;
   prNumber: number | null;
+  /** Login of the person who made the change; null when the model or the system did. */
+  actor: string | null;
   createdAt: string;
 }
 
@@ -319,6 +325,42 @@ export function getProjectByRepo(owner: string, repo: string): ProjectDetail | n
   return row ?? null;
 }
 
+/**
+ * Project of a webhook repository. Looks up by GitHub's stable repository id first, so a
+ * renamed or transferred repository keeps its project (the stored name is refreshed);
+ * falls back to owner/repo for projects that have not seen an event yet and remembers
+ * the id.
+ */
+export function findProjectForRepository(
+  repoId: number | null,
+  owner: string,
+  repo: string,
+): ProjectDetail | null {
+  const db = getDb();
+  if (repoId !== null) {
+    const byId = db
+      .prepare("SELECT id, owner, repo, name, status FROM projects WHERE github_repo_id = @repoId")
+      .get({ repoId }) as ProjectDetail | undefined;
+    if (byId) {
+      if (byId.owner !== owner || byId.repo !== repo) {
+        db.prepare(
+          "UPDATE projects SET owner = @owner, repo = @repo, updated_at = datetime('now') WHERE id = @id",
+        ).run({ id: byId.id, owner, repo });
+        return { ...byId, owner, repo };
+      }
+      return byId;
+    }
+  }
+  const byName = getProjectByRepo(owner, repo);
+  if (byName && repoId !== null) {
+    db.prepare("UPDATE projects SET github_repo_id = @repoId WHERE id = @id").run({
+      id: byName.id,
+      repoId,
+    });
+  }
+  return byName;
+}
+
 export function getProjectParticipants(id: number): string[] {
   return (
     getDb().prepare(PARTICIPANTS_SQL).all({ id }) as Array<{ github_login: string }>
@@ -334,6 +376,7 @@ const FINDING_SELECT = `
          (SELECT h.created_at FROM finding_status_history h WHERE h.finding_id = f.id
             AND h.new_status = 'reopened' ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS reopenedAt,
          (SELECT a.head_sha FROM analyses a WHERE a.id = f.last_analysis_id) AS headSha,
+         (SELECT r.number FROM pull_requests r WHERE r.id = f.resolved_by_pr_id) AS resolvedByPrNumber,
          f.created_at AS createdAt, f.updated_at AS updatedAt
   FROM findings f
   JOIN pull_requests pr ON pr.id = f.pull_request_id`;
@@ -371,7 +414,8 @@ export function getFindingHistory(findingId: number): StatusHistoryRow[] {
   return getDb()
     .prepare(
       `SELECT h.old_status AS oldStatus, h.new_status AS newStatus, h.reason,
-              h.analysis_id AS analysisId, pr.number AS prNumber, h.created_at AS createdAt
+              h.analysis_id AS analysisId, pr.number AS prNumber, h.actor,
+              h.created_at AS createdAt
        FROM finding_status_history h
        LEFT JOIN analyses a ON a.id = h.analysis_id
        LEFT JOIN pull_requests pr ON pr.id = a.pull_request_id
@@ -398,6 +442,7 @@ export function getAnalysis(id: number): AnalysisDetail | null {
     .prepare(
       `SELECT a.id, pr.number AS prNumber, pr.project_id AS projectId, a.head_sha AS headSha,
               a.trigger, a.outcome, a.summary, a.provider, a.model, a.comment, a.materials,
+              a.raw_response AS rawResponse,
               a.created_at AS createdAt
        FROM analyses a
        JOIN pull_requests pr ON pr.id = a.pull_request_id
@@ -563,17 +608,23 @@ export function upsertParticipant(projectId: number, login: string): void {
 export function upsertPullRequest(
   projectId: number,
   number: number,
-  info: { author?: string | null; title?: string | null; state?: PullRequestState | null } = {},
+  info: {
+    author?: string | null;
+    title?: string | null;
+    state?: PullRequestState | null;
+    headSha?: string | null;
+  } = {},
 ): number {
   const db = getDb();
   const row = db
     .prepare(
-      `INSERT INTO pull_requests (project_id, number, author_login, title, state)
-       VALUES (@projectId, @number, @author, @title, @state)
+      `INSERT INTO pull_requests (project_id, number, author_login, title, state, head_sha)
+       VALUES (@projectId, @number, @author, @title, @state, @headSha)
        ON CONFLICT (project_id, number) DO UPDATE SET
          author_login = COALESCE(@author, pull_requests.author_login),
          title = COALESCE(@title, pull_requests.title),
          state = COALESCE(@state, pull_requests.state),
+         head_sha = COALESCE(@headSha, pull_requests.head_sha),
          updated_at = datetime('now')
        RETURNING id`,
     )
@@ -583,6 +634,7 @@ export function upsertPullRequest(
       author: info.author ?? null,
       title: info.title ?? null,
       state: info.state ?? null,
+      headSha: info.headSha ?? null,
     }) as { id: number };
   return row.id;
 }
@@ -633,12 +685,15 @@ export function recordAnalysis(params: {
   provider?: string | null;
   model?: string | null;
   materials?: AnalysisMaterials | null;
+  rawResponse?: string | null;
 }): number {
   const row = getDb()
     .prepare(
       `INSERT INTO analyses
-         (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials)
-       VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials)
+         (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
+          raw_response)
+       VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
+               @rawResponse)
        RETURNING id`,
     )
     .get({
@@ -650,6 +705,7 @@ export function recordAnalysis(params: {
       provider: params.provider ?? null,
       model: params.model ?? null,
       materials: params.materials ? JSON.stringify(params.materials) : null,
+      rawResponse: params.rawResponse ?? null,
     }) as { id: number };
   return row.id;
 }
@@ -727,19 +783,41 @@ export interface StatusChange {
   reason: string | null;
 }
 
+/** A prior finding the model mentioned but left with an open status. */
+export interface KeptFinding {
+  findingId: number;
+  title: string;
+  status: FindingStatus;
+  reason: string | null;
+}
+
+export interface ReconcileOptions {
+  /** Ids of the prior findings given to the model; any other prior_id makes a new finding. */
+  allowedPriorIds: ReadonlySet<number>;
+  /** False for a reconciliation after a comment: it only changes statuses. */
+  allowNew: boolean;
+}
+
 /**
- * Применить результат сверки модели: создать новые находки, обновить существующие,
- * записать историю смены статусов. Всё в одной транзакции. Находки, которых модель
- * не упомянула, не трогаем (консервативно оставляем как есть). Возвращает смены
- * статусов — вызывающий по ним решает, что написать в комментарии.
+ * Применить результат сверки модели в одной транзакции. Правила:
+ * - prior_id принимается только из переданного модели набора;
+ * - у прошлой находки модель меняет статус и причину; серьёзность, область и суть
+ *   фиксируются при создании, остальные поля обновляются только непустыми значениями;
+ * - «исправлено» по diff PR — это `pending` (ждёт слияния PR в основную ветку, см.
+ *   resolvePendingOnClose), а не окончательное `closed`;
+ * - находки, которых модель не упомянула, не трогаем.
+ * Возвращает смены статусов и оставленные открытыми прошлые находки — по ним
+ * вызывающий пишет комментарий.
  */
 export function applyReconciliation(
   prId: number,
   analysisId: number,
   result: ReconcileResult,
-): { created: number; statusChanges: StatusChange[] } {
+  options: ReconcileOptions,
+): { created: number; statusChanges: StatusChange[]; kept: KeptFinding[] } {
   const db = getDb();
   const statusChanges: StatusChange[] = [];
+  const kept: KeptFinding[] = [];
   let created = 0;
 
   const insertFinding = db.prepare(
@@ -747,24 +825,22 @@ export function applyReconciliation(
        (pull_request_id, area, severity, title, description, locations, evidence, impact,
         recommendation, status, first_analysis_id, last_analysis_id)
      VALUES (@prId, @area, @severity, @title, @description, @locations, @evidence, @impact,
-             @recommendation, @status, @analysisId, @analysisId)
+             @recommendation, 'open', @analysisId, @analysisId)
      RETURNING id`,
   );
   const updateFinding = db.prepare(
     `UPDATE findings SET
-       area = @area, severity = @severity, title = @title, description = @description,
-       locations = @locations, evidence = @evidence, impact = @impact,
-       recommendation = @recommendation, status = @status,
+       description = COALESCE(@description, description),
+       locations = COALESCE(@locations, locations),
+       evidence = COALESCE(@evidence, evidence),
+       impact = COALESCE(@impact, impact),
+       recommendation = COALESCE(@recommendation, recommendation),
+       status = @status,
+       resolved_by_pr_id = CASE WHEN @status = 'pending' THEN @prId ELSE NULL END,
        last_analysis_id = @analysisId, updated_at = datetime('now')
      WHERE id = @id`,
   );
-  // A prior finding may come from any PR of the same project.
-  const getFinding = db.prepare(
-    `SELECT f.status, f.title FROM findings f
-     JOIN pull_requests pr ON pr.id = f.pull_request_id
-     WHERE f.id = @id
-       AND pr.project_id = (SELECT project_id FROM pull_requests WHERE id = @prId)`,
-  );
+  const getPrior = db.prepare("SELECT status, title FROM findings WHERE id = @id");
   const insertHistory = db.prepare(
     `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason, analysis_id)
      VALUES (@findingId, @oldStatus, @newStatus, @reason, @analysisId)`,
@@ -773,27 +849,33 @@ export function applyReconciliation(
   db.exec("BEGIN");
   try {
     for (const f of result.findings) {
-      const fields = {
-        prId,
-        analysisId,
-        area: f.area ?? null,
-        severity: f.severity ?? null,
-        title: f.title,
+      const text = {
         description: f.description ?? null,
         locations: f.locations && f.locations.length > 0 ? JSON.stringify(f.locations) : null,
         evidence: f.evidence ?? null,
         impact: f.impact ?? null,
         recommendation: f.recommendation ?? null,
-        status: f.status,
       };
+      const prior =
+        f.priorId != null && options.allowedPriorIds.has(f.priorId)
+          ? (getPrior.get({ id: f.priorId }) as { status: FindingStatus; title: string } | undefined)
+          : undefined;
 
-      if (f.priorId == null) {
-        const row = insertFinding.get(fields) as { id: number };
+      if (!prior) {
+        if (!options.allowNew) continue;
+        const row = insertFinding.get({
+          prId,
+          analysisId,
+          area: f.area ?? null,
+          severity: f.severity ?? null,
+          title: f.title,
+          ...text,
+        }) as { id: number };
         created += 1;
         insertHistory.run({
           findingId: row.id,
           oldStatus: null,
-          newStatus: f.status,
+          newStatus: "open",
           reason: f.reason ?? null,
           analysisId,
         });
@@ -801,55 +883,32 @@ export function applyReconciliation(
           findingId: row.id,
           title: f.title,
           oldStatus: null,
-          newStatus: f.status,
+          newStatus: "open",
           reason: f.reason ?? null,
         });
         continue;
       }
 
-      const prev = getFinding.get({ id: f.priorId, prId }) as
-        | { status: FindingStatus; title: string }
-        | undefined;
-      if (!prev) {
-        // Модель сослалась на несуществующий prior_id — считаем находку новой.
-        const row = insertFinding.get(fields) as { id: number };
-        created += 1;
+      const findingId = f.priorId as number;
+      const status: FindingStatus = f.status === "closed" ? "pending" : f.status;
+      updateFinding.run({ id: findingId, prId, analysisId, status, ...text });
+      if (prior.status !== status) {
         insertHistory.run({
-          findingId: row.id,
-          oldStatus: null,
-          newStatus: f.status,
+          findingId,
+          oldStatus: prior.status,
+          newStatus: status,
           reason: f.reason ?? null,
           analysisId,
         });
         statusChanges.push({
-          findingId: row.id,
-          title: f.title,
-          oldStatus: null,
-          newStatus: f.status,
+          findingId,
+          title: prior.title,
+          oldStatus: prior.status,
+          newStatus: status,
           reason: f.reason ?? null,
         });
-        continue;
-      }
-
-      // UPDATE не использует @prId — node:sqlite ругается на лишний параметр.
-      const { prId: _prId, ...updateFields } = fields;
-      void _prId;
-      updateFinding.run({ ...updateFields, id: f.priorId });
-      if (prev.status !== f.status) {
-        insertHistory.run({
-          findingId: f.priorId,
-          oldStatus: prev.status,
-          newStatus: f.status,
-          reason: f.reason ?? null,
-          analysisId,
-        });
-        statusChanges.push({
-          findingId: f.priorId,
-          title: f.title,
-          oldStatus: prev.status,
-          newStatus: f.status,
-          reason: f.reason ?? null,
-        });
+      } else if (status === "open" || status === "reopened") {
+        kept.push({ findingId, title: prior.title, status, reason: f.reason ?? null });
       }
     }
     db.exec("COMMIT");
@@ -858,5 +917,86 @@ export function applyReconciliation(
     throw error;
   }
 
-  return { created, statusChanges };
+  return { created, statusChanges, kept };
+}
+
+/**
+ * Second step of closing: when the PR whose diff showed a fix is closed, its `pending`
+ * findings become `closed` if it was merged into the default branch, go back to `open`
+ * if it was closed without merge, and stay `pending` if it was merged elsewhere.
+ */
+export function resolvePendingOnClose(
+  prId: number,
+  outcome: "merged-default" | "merged-other" | "closed",
+): void {
+  if (outcome === "merged-other") return;
+  const db = getDb();
+  const newStatus: FindingStatus = outcome === "merged-default" ? "closed" : "open";
+  const reason =
+    outcome === "merged-default"
+      ? "Исправление слито в основную ветку."
+      : "Pull request с исправлением закрыт без слияния.";
+  const ids = (
+    db
+      .prepare("SELECT id FROM findings WHERE status = 'pending' AND resolved_by_pr_id = @prId")
+      .all({ prId }) as Array<{ id: number }>
+  ).map((r) => r.id);
+  if (ids.length === 0) return;
+
+  const update = db.prepare(
+    `UPDATE findings SET status = @newStatus,
+       resolved_by_pr_id = CASE WHEN @newStatus = 'closed' THEN resolved_by_pr_id ELSE NULL END,
+       updated_at = datetime('now')
+     WHERE id = @id`,
+  );
+  const history = db.prepare(
+    `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason)
+     VALUES (@id, 'pending', @newStatus, @reason)`,
+  );
+  db.exec("BEGIN");
+  try {
+    for (const id of ids) {
+      update.run({ id, newStatus });
+      history.run({ id, newStatus, reason });
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** A person (supervisor or head) overrides the model: reopen, or dismiss as a false finding. */
+export function setFindingStatusByPerson(params: {
+  findingId: number;
+  status: "open" | "dismissed";
+  reason: string;
+  actor: string;
+}): void {
+  const db = getDb();
+  const prev = db.prepare("SELECT status FROM findings WHERE id = @id").get({
+    id: params.findingId,
+  }) as { status: FindingStatus } | undefined;
+  if (!prev || prev.status === params.status) return;
+  db.exec("BEGIN");
+  try {
+    db.prepare(
+      `UPDATE findings SET status = @status, resolved_by_pr_id = NULL,
+         updated_at = datetime('now') WHERE id = @id`,
+    ).run({ id: params.findingId, status: params.status });
+    db.prepare(
+      `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason, actor)
+       VALUES (@id, @oldStatus, @status, @reason, @actor)`,
+    ).run({
+      id: params.findingId,
+      oldStatus: prev.status,
+      status: params.status,
+      reason: params.reason,
+      actor: params.actor,
+    });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }

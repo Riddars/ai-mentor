@@ -54,7 +54,7 @@ export function fullDate(iso: string | null): string {
 const FINDING_STATUS_LABEL: Record<FindingStatus, string> = {
   open: "Открыта",
   reopened: "Открыта повторно",
-  pending: "Ожидает проверки",
+  pending: "Исправлено, ждёт слияния",
   closed: "Закрыта",
   dismissed: "Снята",
 };

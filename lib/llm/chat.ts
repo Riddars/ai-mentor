@@ -59,7 +59,19 @@ function fallbackTarget(): Target | null {
 }
 
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: string } }[];
+  choices?: { message?: { content?: string }; finish_reason?: string }[];
+}
+
+/** A model answer together with who actually produced it (the fallback may have). */
+export interface ChatResult {
+  content: string;
+  provider: string;
+  model: string;
+}
+
+function numberEnv(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 /**
@@ -86,7 +98,15 @@ async function callOpenAICompatible(
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model: target.model, messages, stream: false }),
+    body: JSON.stringify({
+      model: target.model,
+      messages,
+      stream: false,
+      max_tokens: numberEnv("LLM_MAX_TOKENS", 8000),
+      temperature: Number(process.env.LLM_TEMPERATURE ?? "0.2"),
+    }),
+    // A hung provider must not keep the required check "in progress" forever.
+    signal: AbortSignal.timeout(numberEnv("LLM_TIMEOUT_MS", 300_000)),
   });
 
   if (!response.ok) {
@@ -95,16 +115,21 @@ async function callOpenAICompatible(
   }
 
   const data = (await response.json()) as ChatCompletionResponse;
-  const content = data.choices?.[0]?.message?.content;
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content;
   if (typeof content !== "string" || content.trim() === "") {
     throw new Error(`LLM ${target.provider} returned an empty response`);
+  }
+  if (choice?.finish_reason === "length") {
+    throw new Error(`LLM ${target.provider} answer was cut off by the token limit`);
   }
   return content;
 }
 
 /** Вызвать одного провайдера. Сюда добавится ветка на anthropic (своя схема). */
-function callTarget(target: Target, messages: ChatMessage[]): Promise<string> {
-  return callOpenAICompatible(target, messages);
+async function callTarget(target: Target, messages: ChatMessage[]): Promise<ChatResult> {
+  const content = await callOpenAICompatible(target, messages);
+  return { content, provider: target.provider, model: target.model };
 }
 
 /**
@@ -112,7 +137,7 @@ function callTarget(target: Target, messages: ChatMessage[]): Promise<string> {
  * окружения (LLM_PROVIDER / LLM_MODEL). Если задан резерв (LLM_FALLBACK_PROVIDER)
  * и основной провайдер не ответил — один раз пробуем резерв.
  */
-export async function chat(messages: ChatMessage[]): Promise<string> {
+export async function chat(messages: ChatMessage[]): Promise<ChatResult> {
   const primary = primaryTarget();
   try {
     return await callTarget(primary, messages);

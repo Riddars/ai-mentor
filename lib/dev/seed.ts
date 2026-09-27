@@ -6,6 +6,8 @@ import {
   deleteProjectCascade,
   loadOpenFindings,
   recordAnalysis,
+  resolvePendingOnClose,
+  setFindingStatusByPerson,
   saveStudentResponse,
   setAnalysisComment,
   setProjectStatus,
@@ -39,6 +41,16 @@ function backdate(table: string, id: number, daysAgo: number): void {
   db()
     .prepare(`UPDATE ${table} SET created_at = datetime('now', @d) WHERE id = @id`)
     .run({ id, d: `-${daysAgo} days` });
+}
+
+/** Status changes made outside an analysis (merge, a person) get their own date. */
+function backdateLastChange(findingId: number, daysAgo: number): void {
+  db()
+    .prepare(
+      `UPDATE finding_status_history SET created_at = datetime('now', @d)
+       WHERE id = (SELECT MAX(id) FROM finding_status_history WHERE finding_id = @findingId)`,
+    )
+    .run({ findingId, d: `-${daysAgo} days` });
 }
 
 function setPrActivity(prId: number, daysAgo: number): void {
@@ -84,7 +96,7 @@ function review(
 ): StatusChange[] {
   const trigger = opts.trigger ?? "commit";
   const outcome = opts.outcome ?? "ok";
-  const prior = loadOpenFindings(prId).length;
+  const prior = loadOpenFindings(prId);
   const responses = db()
     .prepare("SELECT COUNT(*) AS n FROM student_responses WHERE pull_request_id = @prId")
     .get({ prId }) as { n: number };
@@ -104,16 +116,21 @@ function review(
             files: opts.files,
             researchDoc: opts.researchDoc ?? true,
             truncated: false,
-            priorFindings: prior,
+            priorFindings: prior.length,
             studentResponses: responses.n,
           },
   });
   backdate("analyses", id, daysAgo);
   if (!result || outcome !== "ok") return [];
 
-  const { statusChanges } = applyReconciliation(prId, id, result);
+  const { statusChanges, kept } = applyReconciliation(prId, id, result, {
+    allowedPriorIds: new Set(prior.map((f) => f.id)),
+    allowNew: trigger === "commit",
+  });
   const comment =
-    trigger === "commit" ? renderComment(result, statusChanges) : renderReplyComment(statusChanges);
+    trigger === "commit"
+      ? renderComment(result, statusChanges)
+      : renderReplyComment(statusChanges, kept);
   if (comment) setAnalysisComment(id, comment);
   return statusChanges;
 }
@@ -334,7 +351,7 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
   setPrActivity(t1, 3);
 
   // 3. Quiet, and fixed across PRs: the baseline PR was merged with a finding still
-  //    open; the next PR fixed it and closed it. Nothing for 18 days since.
+  //    open; the next PR fixed it (pending) and its merge closed it. Nothing for 18 days.
   const yieldP = upsertProject(DEMO_OWNER, "reaction-yield", "Предсказание выхода реакции");
   upsertParticipant(yieldP, "student-grigory");
   const y1 = pr(yieldP, 2, "student-grigory", "Базовый бейзлайн", "merged");
@@ -358,7 +375,7 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
     { files: ["src/baseline.py", "README.md"] },
   );
   setPrActivity(y1, 38);
-  const y2 = pr(yieldP, 3, "student-grigory", "Фиксация сидов и перезапуск бейзлайна", "merged");
+  const y2 = pr(yieldP, 3, "student-grigory", "Правки бейзлайна", "merged");
   const seedsC = y1changes.find((c) => c.title === seeds.title);
   review(
     y2,
@@ -371,6 +388,8 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
     },
     { files: ["src/baseline.py", "README.md"] },
   );
+  resolvePendingOnClose(y2, "merged-default");
+  if (seedsC) backdateLastChange(seedsC.findingId, 18);
   setPrActivity(y2, 18);
 
   // 4. A critical finding found and fixed (open → closed), and one that came back
@@ -441,7 +460,7 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
   upsertParticipant(retro, "student-elena");
   const r1 = pr(retro, 4, "student-elena", "Добавил перебор путей синтеза", "open");
   quiet(r1, 68, ["src/search.py"]);
-  review(
+  const r1changes = review(
     r1,
     42,
     {
@@ -475,6 +494,17 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
     },
     { files: ["src/search.py", "RESEARCH.md"] },
   );
+  // The supervisor overrode the model: the comparison is planned for a later stage.
+  const novelty = r1changes.find((c) => c.title.startsWith("Нет сравнения"));
+  if (novelty) {
+    setFindingStatusByPerson({
+      findingId: novelty.findingId,
+      status: "dismissed",
+      reason: "Сравнение с AiZynthFinder запланировано на этап 3 (PLAN.md), сейчас не требуется.",
+      actor: "supervisor3",
+    });
+    backdateLastChange(novelty.findingId, 39);
+  }
   setPrActivity(r1, 40);
 
   // 6. Healthy and busy: a critical leak found earlier and fixed, an info finding open,

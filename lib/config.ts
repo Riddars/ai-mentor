@@ -63,6 +63,11 @@ function parseSimMode(): SimMode {
 }
 
 function parseReviewer(): Reviewer {
+  // The simulate default would leave every PR's required check in progress forever, so
+  // a production server must choose the reviewer explicitly.
+  if (!process.env.CURATOR_REVIEWER && process.env.NODE_ENV === "production") {
+    throw new Error("CURATOR_REVIEWER must be set explicitly in production (llm or simulate)");
+  }
   const raw = process.env.CURATOR_REVIEWER ?? "simulate";
   if (!REVIEWERS.includes(raw as Reviewer)) {
     throw new Error(

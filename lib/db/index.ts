@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS projects (
   repo       TEXT NOT NULL,
   name       TEXT,
   status     TEXT NOT NULL DEFAULT 'active',
+  github_repo_id INTEGER,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (owner, repo)
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   author_login TEXT,
   title       TEXT,
   state       TEXT,
+  head_sha    TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE (project_id, number)
@@ -53,6 +55,7 @@ CREATE TABLE IF NOT EXISTS analyses (
   model            TEXT,
   comment          TEXT,
   materials        TEXT,
+  raw_response     TEXT,
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -68,6 +71,7 @@ CREATE TABLE IF NOT EXISTS findings (
   impact            TEXT,
   recommendation    TEXT,
   status            TEXT NOT NULL DEFAULT 'open',
+  resolved_by_pr_id INTEGER REFERENCES pull_requests(id),
   first_analysis_id INTEGER REFERENCES analyses(id),
   last_analysis_id  INTEGER REFERENCES analyses(id),
   created_at        TEXT NOT NULL DEFAULT (datetime('now')),
@@ -81,6 +85,7 @@ CREATE TABLE IF NOT EXISTS finding_status_history (
   new_status  TEXT NOT NULL,
   reason      TEXT,
   analysis_id INTEGER REFERENCES analyses(id),
+  actor       TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -223,5 +228,27 @@ function migrate(db: DatabaseSync): void {
       }
     }
     db.exec("PRAGMA user_version = 6");
+  }
+  if (version < 7) {
+    // Stable GitHub repository id (renames keep the link), head of each PR, the PR whose
+    // merge finalises a fix, who made a status change (null = the model), and the raw
+    // model answer of each analysis.
+    addColumns(db, "projects", { github_repo_id: "INTEGER" });
+    addColumns(db, "pull_requests", { head_sha: "TEXT" });
+    addColumns(db, "findings", { resolved_by_pr_id: "INTEGER REFERENCES pull_requests(id)" });
+    addColumns(db, "finding_status_history", { actor: "TEXT" });
+    addColumns(db, "analyses", { raw_response: "TEXT" });
+    db.exec("PRAGMA user_version = 7");
+  }
+}
+
+function addColumns(db: DatabaseSync, table: string, columns: Record<string, string>): void {
+  const existing = (
+    db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  ).map((c) => c.name);
+  for (const [name, type] of Object.entries(columns)) {
+    if (!existing.includes(name)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+    }
   }
 }

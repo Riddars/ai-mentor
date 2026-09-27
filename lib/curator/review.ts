@@ -2,7 +2,7 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { chat } from "@/lib/llm/chat";
+import { chat, type ChatMessage } from "@/lib/llm/chat";
 import {
   FINDING_AREAS,
   LOCATION_KINDS,
@@ -24,6 +24,8 @@ import {
   upsertParticipant,
   upsertPullRequest,
   type AnalysisMaterials,
+  type FindingStatus,
+  type KeptFinding,
   type PriorFinding,
   type PullRequestState,
   type ReconcileResult,
@@ -366,14 +368,11 @@ export function renderComment(result: ReconcileResult, changes: StatusChange[]):
     }
   }
 
-  const resolved = changes.filter(
-    (c) => c.newStatus === "closed" || c.newStatus === "dismissed",
-  );
+  const resolved = changes.filter((c) => RESOLVED_LABEL[c.newStatus]);
   if (resolved.length > 0) {
     parts.push("---", "**С прошлой проверки:**");
     for (const c of resolved) {
-      const label = c.newStatus === "closed" ? "исправлено" : "снято по объяснению";
-      parts.push(`- ${c.title} — ${label}${c.reason ? ` (${c.reason})` : ""}`);
+      parts.push(`- ${c.title} — ${RESOLVED_LABEL[c.newStatus]}${c.reason ? ` (${c.reason})` : ""}`);
     }
     parts.push("");
   }
@@ -383,15 +382,31 @@ export function renderComment(result: ReconcileResult, changes: StatusChange[]):
 }
 
 /** Short reply after a student's comment; null when nothing was closed or dismissed. */
-export function renderReplyComment(changes: StatusChange[]): string | null {
-  const resolved = changes.filter((c) => c.newStatus === "closed" || c.newStatus === "dismissed");
-  if (resolved.length === 0) return null;
-  const lines = resolved.map((c) => {
-    const label = c.newStatus === "closed" ? "исправлено" : "снято по объяснению";
-    return `- ${c.title} — ${label}${c.reason ? ` (${c.reason})` : ""}`;
-  });
-  return `${COMMENT_MARKER}\n\nУчёл ответ. Обновления по находкам:\n${lines.join("\n")}`;
+export function renderReplyComment(changes: StatusChange[], kept: KeptFinding[]): string | null {
+  const resolved = changes.filter((c) => RESOLVED_LABEL[c.newStatus]);
+  if (resolved.length === 0 && kept.length === 0) return null;
+  const parts: string[] = [COMMENT_MARKER, "", "Учёл ответ."];
+  if (resolved.length > 0) {
+    parts.push("", "**Обновления по находкам:**");
+    for (const c of resolved) {
+      parts.push(`- ${c.title} — ${RESOLVED_LABEL[c.newStatus]}${c.reason ? ` (${c.reason})` : ""}`);
+    }
+  }
+  if (kept.length > 0) {
+    parts.push("", "**Объяснение не сняло замечание:**");
+    for (const k of kept) {
+      parts.push(`- ${k.title}${k.reason ? ` — ${k.reason}` : ""}`);
+    }
+  }
+  return parts.join("\n");
 }
+
+// What the student is told about a finding that stopped being open.
+const RESOLVED_LABEL: Partial<Record<FindingStatus, string>> = {
+  pending: "исправлено, закроется после слияния в основную ветку",
+  closed: "исправлено",
+  dismissed: "снято по объяснению",
+};
 
 interface ReviewOutcome {
   analysisId: number;
@@ -399,6 +414,7 @@ interface ReviewOutcome {
   outcome: "ok" | "parse_error";
   summary: string;
   statusChanges: StatusChange[];
+  kept: KeptFinding[];
 }
 
 /**
@@ -425,49 +441,52 @@ async function runReview(
     studentResponses: responses.length,
   };
 
-  const answer = await chat([
+  const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "user",
       content: buildUserPrompt(research, changes.text, params.prNumber, prior, responses),
     },
-  ]);
-
-  const parsed = parseModelJson(answer);
-  const provider = process.env.LLM_PROVIDER ?? null;
-  const model = process.env.LLM_MODEL ?? null;
-
+  ];
+  // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
+  let answer = await chat(messages);
+  let parsed = parseModelJson(answer.content);
   if (!parsed) {
-    // Не смогли разобрать JSON — не портим память, публикуем сырой текст.
-    const analysisId = recordAnalysis({
-      prId,
-      headSha: params.headSha,
-      trigger,
-      outcome: "parse_error",
-      provider,
-      model,
-      materials,
-    });
-    return {
-      analysisId,
-      comment: `${COMMENT_MARKER}\n\n${answer}`,
-      outcome: "parse_error",
-      summary: "",
-      statusChanges: [],
-    };
+    answer = await chat(messages);
+    parsed = parseModelJson(answer.content);
   }
 
-  const analysisId = recordAnalysis({
+  const record = {
     prId,
     headSha: params.headSha,
     trigger,
-    outcome: "ok",
-    summary: parsed.summary || null,
-    provider,
-    model,
+    provider: answer.provider,
+    model: answer.model,
     materials,
+    rawResponse: answer.content,
+  };
+
+  if (!parsed) {
+    // Память не портим; сырой ответ сохранён в разборе и виден руководителю в панели,
+    // в публичный PR он не попадает.
+    const analysisId = recordAnalysis({ ...record, outcome: "parse_error" });
+    return {
+      analysisId,
+      comment:
+        `${COMMENT_MARKER}\n\nРазбор не удался: ответ модели не удалось разобрать. ` +
+        "Подробности — у руководителя в панели.",
+      outcome: "parse_error",
+      summary: "",
+      statusChanges: [],
+      kept: [],
+    };
+  }
+
+  const analysisId = recordAnalysis({ ...record, outcome: "ok", summary: parsed.summary || null });
+  const { statusChanges, kept } = applyReconciliation(prId, analysisId, parsed, {
+    allowedPriorIds: new Set(prior.map((f) => f.id)),
+    allowNew: trigger === "commit",
   });
-  const { statusChanges } = applyReconciliation(prId, analysisId, parsed);
 
   return {
     analysisId,
@@ -475,6 +494,7 @@ async function runReview(
     outcome: "ok",
     summary: parsed.summary,
     statusChanges,
+    kept,
   };
 }
 
@@ -495,6 +515,7 @@ function persistPrContext(params: ReviewParams): number {
     author: params.author,
     title: params.title,
     state: params.state ?? "open",
+    headSha: params.headSha,
   });
 }
 
@@ -628,18 +649,22 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     return; // этот комментарий уже обработан
   }
 
-  let analysisId: number;
-  let statusChanges: StatusChange[];
+  if (loadOpenFindings(prId).length === 0) {
+    return; // сверять нечего — модель не вызываем, ответ сохранён
+  }
+
+  let outcome: ReviewOutcome;
   try {
-    ({ analysisId, statusChanges } = await runReview(reviewParams, prId, "comment"));
+    outcome = await runReview(reviewParams, prId, "comment");
   } catch (error) {
     // Сбой должен быть виден в памяти (и в панели), а не только в логе.
     recordAnalysis({ prId, headSha: pr.head.sha, trigger: "comment", outcome: "error" });
     throw error;
   }
-  const body = renderReplyComment(statusChanges);
+  const { analysisId } = outcome;
+  const body = renderReplyComment(outcome.statusChanges, outcome.kept);
   if (!body) {
-    return; // ничего не сняли — не шумим в PR
+    return; // модель ничего не сказала о прошлых находках — не шумим в PR
   }
   await postIssueComment({
     owner: params.owner,
