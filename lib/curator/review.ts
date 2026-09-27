@@ -14,12 +14,14 @@ import {
 import { areaLabel, locationText, severityLabel } from "@/lib/format";
 import {
   applyReconciliation,
+  enqueueCommitJob,
+  getPullRequestHead,
+  hasJobForHead,
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
   loadStudentResponses,
   recordAnalysis,
-  saveStudentResponse,
   setAnalysisComment,
   upsertParticipant,
   upsertPullRequest,
@@ -425,6 +427,7 @@ async function runReview(
   params: ReviewParams,
   prId: number,
   trigger: "commit" | "comment",
+  isCurrent: () => boolean = () => true,
 ): Promise<ReviewOutcome> {
   const [files, research] = await Promise.all([
     fetchChangedFiles(params),
@@ -454,6 +457,9 @@ async function runReview(
   if (!parsed) {
     answer = await chat(messages);
     parsed = parseModelJson(answer.content);
+  }
+  if (!isCurrent()) {
+    throw new StaleReviewError(); // пока модель думала, пришёл новый коммит
   }
 
   const record = {
@@ -519,17 +525,38 @@ function persistPrContext(params: ReviewParams): number {
   });
 }
 
+/** Timing of the review queue; overridable from the environment. */
+export function queueSettings() {
+  const num = (name: string, fallback: number) => {
+    const value = Number(process.env[name]);
+    return Number.isFinite(value) && value >= 0 ? value : fallback;
+  };
+  return {
+    debounceMs: num("REVIEW_DEBOUNCE_MS", 120_000),
+    deadlineMs: num("REVIEW_DEADLINE_MS", 30 * 60_000),
+    dailyLimit: num("REVIEW_DAILY_LIMIT", 50),
+    retryWindowMs: num("REVIEW_RETRY_WINDOW_MS", 24 * 60 * 60_000),
+    concurrency: Math.max(1, num("REVIEW_CONCURRENCY", 3)),
+  };
+}
+
 /**
- * Точка входа разбора языковой моделью для webhook-обработчика (событие коммита).
- * Обязательную проверку ставим сразу (она блокирует слияние), а сам разбор
- * запускаем в фоне, чтобы не держать ответ на вебхук на время обращения к модели.
+ * Поставить разбор коммита в очередь. Обязательную проверку ставим сразу (она блокирует
+ * слияние до разбора или до срока), сам разбор выполнит обработчик очереди. `delay` —
+ * подождать, не придёт ли следующий коммит (разбирается только последний); `force` —
+ * разобрать заново даже уже разобранный коммит (перезапуск); `skipIfTried` — не трогать
+ * коммит, по которому задача уже была, в том числе неудачная (сверка с GitHub).
  */
-export async function handleLlmPullRequest(params: ReviewParams): Promise<void> {
+export async function startCommitReview(
+  params: ReviewParams,
+  opts: { delay: boolean; force?: boolean; skipIfTried?: boolean },
+): Promise<"queued" | "skipped"> {
   const prId = persistPrContext(params);
-  if (hasSuccessfulCommitAnalysis(prId, params.headSha)) {
-    // Повторная доставка вебхука для того же коммита — уже разобрали, выходим.
-    console.log(`[curator] head ${params.headSha} already analysed, skipping`);
-    return;
+  if (hasJobForHead(prId, params.headSha, !opts.skipIfTried)) {
+    return "skipped"; // этот коммит уже в очереди (повторная доставка)
+  }
+  if (!opts.force && hasSuccessfulCommitAnalysis(prId, params.headSha)) {
+    return "skipped";
   }
   const checkRunId = await createCheckRun({
     owner: params.owner,
@@ -537,66 +564,90 @@ export async function handleLlmPullRequest(params: ReviewParams): Promise<void> 
     headSha: params.headSha,
     installationId: params.installationId,
   });
-  void completeReview(params, prId, checkRunId).catch((error) => {
-    console.error("[curator] unhandled review failure:", error);
+  const settings = queueSettings();
+  const { supersededCheckRunIds } = enqueueCommitJob({
+    prId,
+    headSha: params.headSha,
+    checkRunId,
+    payload: params,
+    delayMs: opts.delay ? settings.debounceMs : 0,
+    deadlineMs: settings.deadlineMs,
+  });
+  for (const id of supersededCheckRunIds) {
+    await concludeCheck(params, id, "Заменён новым коммитом — разбирается последний.");
+  }
+  return "queued";
+}
+
+/** Conclude a required check as success with a short note (no review happened). */
+export async function concludeCheck(
+  params: Pick<ReviewParams, "owner" | "repo" | "installationId">,
+  checkRunId: number,
+  summary: string,
+): Promise<void> {
+  await concludeCheckRun({
+    owner: params.owner,
+    repo: params.repo,
+    checkRunId,
+    conclusion: "success",
+    output: { title: "AI Curator", summary },
+    installationId: params.installationId,
   });
 }
 
-async function completeReview(
+/** The PR moved on to a newer commit while its old commit was being reviewed. */
+export class StaleReviewError extends Error {
+  constructor() {
+    super("Pull request head changed during the review");
+  }
+}
+
+/**
+ * Выполнить разбор коммита из очереди: разбор, комментарий, завершение проверки. Если head
+ * PR сменился (пришёл новый коммит), результат не применяется — StaleReviewError.
+ */
+export async function executeCommitJob(
   params: ReviewParams,
   prId: number,
-  checkRunId: number,
+  checkRunId: number | null,
 ): Promise<void> {
-  try {
-    const { analysisId, comment } = await runReview(params, prId, "commit");
+  const isCurrent = () => getPullRequestHead(prId) === params.headSha;
+  if (!isCurrent()) throw new StaleReviewError();
+  const { analysisId, comment } = await runReview(params, prId, "commit", isCurrent);
+  await postIssueComment({
+    owner: params.owner,
+    repo: params.repo,
+    issueNumber: params.prNumber,
+    body: comment,
+    installationId: params.installationId,
+  });
+  setAnalysisComment(analysisId, comment);
+  if (checkRunId !== null) {
+    // Also after an early "not reviewed" conclusion: the check now tells the truth.
+    await concludeCheck(params, checkRunId, "Разбор изменений завершён.");
+  }
+}
+
+/**
+ * Разбор не удался за всё окно повторов: записать сбой (виден в панели) и сообщить в PR.
+ * Проверка к этому времени уже завершена по сроку, слияние не заблокировано.
+ */
+export async function reportReviewFailure(
+  params: ReviewParams,
+  prId: number,
+  kind: "commit" | "comment",
+): Promise<void> {
+  recordAnalysis({ prId, headSha: params.headSha, trigger: kind, outcome: "error" });
+  if (kind === "commit") {
     await postIssueComment({
       owner: params.owner,
       repo: params.repo,
       issueNumber: params.prNumber,
-      body: comment,
+      body:
+        `${COMMENT_MARKER}\n\nНе удалось выполнить разбор изменений: сервис анализа был ` +
+        "недоступен. Руководитель видит это в панели и может перезапустить разбор.",
       installationId: params.installationId,
     });
-    setAnalysisComment(analysisId, comment);
-    await concludeCheckRun({
-      owner: params.owner,
-      repo: params.repo,
-      checkRunId,
-      conclusion: "success",
-      output: { title: "AI Curator", summary: "Разбор изменений завершён." },
-      installationId: params.installationId,
-    });
-  } catch (error) {
-    console.error("[curator] llm review failed:", error);
-    try {
-      recordAnalysis({ prId, headSha: params.headSha, trigger: "commit", outcome: "error" });
-    } catch (recordError) {
-      // The PR may have been deleted meanwhile (project removed in the panel).
-      console.error("[curator] failed to record error outcome:", recordError);
-    }
-    // Отсутствие ответа не должно превращаться в разрешение: оставляем слияние
-    // заблокированным (action_required) и сообщаем об этом в pull request.
-    try {
-      await postIssueComment({
-        owner: params.owner,
-        repo: params.repo,
-        issueNumber: params.prNumber,
-        body:
-          `${COMMENT_MARKER}\n\nНе удалось выполнить разбор изменений: сервис анализа ` +
-          "недоступен. Слияние остаётся заблокированным до ручной проверки ответственным " +
-          "сотрудником.",
-        installationId: params.installationId,
-      });
-      await concludeCheckRun({
-        owner: params.owner,
-        repo: params.repo,
-        checkRunId,
-        conclusion: "action_required",
-        output: { title: "AI Curator", summary: "Разбор не выполнен — сервис недоступен." },
-        installationId: params.installationId,
-      });
-    } catch (reportError) {
-      console.error("[curator] failed to report llm error:", reportError);
-    }
   }
 }
 
@@ -607,16 +658,14 @@ export interface CommentReviewParams {
   prNumber: number;
   installationId: number;
   commentId: number;
-  commentBody: string;
-  commenterLogin: string | null;
 }
 
 /**
- * Реакция на ответ студента без нового коммита. Новый check-run НЕ создаём: проверка
- * уже завершена и слияние разрешено (куратор совещательный). Сохраняем ответ, запускаем
- * сверку на текущем head PR и, если статусы находок изменились, коротко сообщаем об этом.
+ * Сверка по ответу студента (задача очереди; сам ответ уже сохранён вебхуком). Новый
+ * check-run НЕ создаём: проверка уже завершена и слияние разрешено (куратор
+ * совещательный). Сверяем статусы на текущем head PR и коротко отвечаем студенту.
  */
-export async function handleStudentComment(params: CommentReviewParams): Promise<void> {
+export async function executeCommentJob(params: CommentReviewParams): Promise<void> {
   const token = await getInstallationToken(params.installationId);
   const pr = await githubRequest<{
     head: { sha: string };
@@ -638,30 +687,11 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     state: pr.state === "open" ? "open" : pr.merged ? "merged" : "closed",
   };
   const prId = persistPrContext(reviewParams);
-
-  const isNew = saveStudentResponse({
-    prId,
-    commentId: params.commentId,
-    login: params.commenterLogin,
-    body: params.commentBody,
-  });
-  if (!isNew) {
-    return; // этот комментарий уже обработан
-  }
-
   if (loadOpenFindings(prId).length === 0) {
-    return; // сверять нечего — модель не вызываем, ответ сохранён
+    return; // сверять нечего — модель не вызываем
   }
 
-  let outcome: ReviewOutcome;
-  try {
-    outcome = await runReview(reviewParams, prId, "comment");
-  } catch (error) {
-    // Сбой должен быть виден в памяти (и в панели), а не только в логе.
-    recordAnalysis({ prId, headSha: pr.head.sha, trigger: "comment", outcome: "error" });
-    throw error;
-  }
-  const { analysisId } = outcome;
+  const outcome = await runReview(reviewParams, prId, "comment");
   const body = renderReplyComment(outcome.statusChanges, outcome.kept);
   if (!body) {
     return; // модель ничего не сказала о прошлых находках — не шумим в PR
@@ -673,5 +703,5 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     body,
     installationId: params.installationId,
   });
-  setAnalysisComment(analysisId, body);
+  setAnalysisComment(outcome.analysisId, body);
 }

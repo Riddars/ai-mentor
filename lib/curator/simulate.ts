@@ -1,7 +1,7 @@
 import { getConfig } from "@/lib/config";
 import { CheckConclusion, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { handleLlmPullRequest } from "@/lib/curator/review";
+import { startCommitReview } from "@/lib/curator/review";
 
 export const SIMULATED_ANSWER =
   "🤖 **AI Curator (симуляция)**\n\n" +
@@ -36,15 +36,18 @@ export async function handlePullRequest(
   }
 
   if (reviewer === "llm") {
-    await handleLlmPullRequest({
-      owner,
-      repo,
-      prNumber,
-      headSha,
-      installationId,
-      author: payload.pull_request.user?.login ?? null,
-      title: payload.pull_request.title ?? null,
-    });
+    await startCommitReview(
+      {
+        owner,
+        repo,
+        prNumber,
+        headSha,
+        installationId,
+        author: payload.pull_request.user?.login ?? null,
+        title: payload.pull_request.title ?? null,
+      },
+      { delay: true },
+    );
     return;
   }
 

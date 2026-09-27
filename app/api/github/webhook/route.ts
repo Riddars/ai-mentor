@@ -1,13 +1,15 @@
 import { getConfig } from "@/lib/config";
 import { verifySignature } from "@/lib/github/verify";
-import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
+import { CHECK_NAME, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { handlePullRequest } from "@/lib/curator/simulate";
-import { handleStudentComment } from "@/lib/curator/review";
+import { startCommitReview } from "@/lib/curator/review";
 import {
+  enqueueCommentJob,
   findProjectForRepository,
   forgetEvent,
   recordEventOnce,
   resolvePendingOnClose,
+  saveStudentResponse,
   upsertPullRequest,
 } from "@/lib/curator/store";
 
@@ -58,7 +60,11 @@ export async function POST(req: Request) {
 
   const isPullRequest = event === "pull_request";
   const isComment = event === "issue_comment";
-  if (!isPullRequest && !isComment) {
+  const isRerun =
+    event === "check_run" &&
+    payload.action === "rerequested" &&
+    payload.check_run?.name === CHECK_NAME;
+  if (!isPullRequest && !isComment && !isRerun) {
     return Response.json({ ok: true });
   }
 
@@ -152,18 +158,46 @@ export async function POST(req: Request) {
     TRUSTED_ASSOCIATIONS.has(payload.comment?.author_association) &&
     payload.installation?.id !== undefined
   ) {
-    // Ответ студента без нового коммита: сверка по объяснению в фоне (без check-run).
-    void handleStudentComment({
-      owner: project.owner,
-      repo: project.repo,
-      prNumber: payload.issue.number,
-      installationId: payload.installation.id,
+    // Ответ студента без нового коммита: сохраняем сразу (повтор задачи его не потеряет),
+    // сверку по объяснению выполнит очередь (без check-run).
+    const prId = upsertPullRequest(project.id, payload.issue.number);
+    const isNew = saveStudentResponse({
+      prId,
       commentId: payload.comment.id,
-      commentBody: payload.comment.body ?? "",
-      commenterLogin: payload.comment.user?.login ?? null,
-    }).catch((error) => {
-      console.error("[webhook] failed to handle issue_comment:", error);
+      login: payload.comment.user?.login ?? null,
+      body: payload.comment.body ?? "",
     });
+    if (isNew) {
+      enqueueCommentJob({
+        prId,
+        payload: {
+          owner: project.owner,
+          repo: project.repo,
+          prNumber: payload.issue.number,
+          installationId: payload.installation.id,
+          commentId: payload.comment.id,
+        },
+      });
+    }
+  } else if (isRerun && config.reviewer === "llm" && payload.installation?.id !== undefined) {
+    // «Re-run» у проверки в GitHub — разобрать этот коммит заново.
+    const prNumber: number | undefined = payload.check_run.pull_requests?.[0]?.number;
+    if (prNumber !== undefined) {
+      try {
+        await startCommitReview(
+          {
+            owner: project.owner,
+            repo: project.repo,
+            prNumber,
+            headSha: payload.check_run.head_sha,
+            installationId: payload.installation.id,
+          },
+          { delay: false, force: true },
+        );
+      } catch (error) {
+        return failed("failed to rerun review", error);
+      }
+    }
   }
 
   return Response.json({ ok: true });

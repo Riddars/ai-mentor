@@ -240,8 +240,8 @@ function ProjectRow({ p, isHead }: { p: ProjectSummary; isHead: boolean }) {
             {p.owner}/{p.repo}
           </a>
           {p.status === "paused" && <Badge tone="neutral">пауза</Badge>}
-          {p.blockedPrs > 0 ? (
-            <Badge tone="red">слияние заблокировано</Badge>
+          {p.unreviewedPrs > 0 ? (
+            <Badge tone="amber">не разобрано</Badge>
           ) : (
             failed && <Badge tone="amber">сбой разбора</Badge>
           )}

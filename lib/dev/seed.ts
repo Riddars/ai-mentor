@@ -580,7 +580,7 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
   setPrActivity(p1, 2);
 
   // 7. Unassigned and active: a critical finding open 5 days, a problem-statement
-  //    finding, and the latest commit analysis FAILED — the PR's merge stays blocked.
+  //    finding, and the latest commit could not be reviewed at all.
   const spectra = upsertProject(DEMO_OWNER, "spectra", "Предсказание ИК-спектров");
   upsertParticipant(spectra, "student-igor");
   const sp1 = pr(spectra, 1, "student-igor", "Первая версия модели спектров", "open");
@@ -616,7 +616,17 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
     },
     { files: ["src/train.py", "RESEARCH.md"] },
   );
+  // The latest commit could not be reviewed within the retry window: the check was
+  // concluded "not reviewed" and the job failed — the panel offers a restart.
   review(sp1, 1, null, { files: [], outcome: "error" });
+  db()
+    .prepare(
+      `INSERT INTO review_jobs (pull_request_id, kind, head_sha, payload, status, attempts,
+         check_concluded, note, last_error, created_at)
+       VALUES (@prId, 'commit', 'demo-unreviewed', '{}', 'failed', 12, 1, 'deadline',
+         'LLM provod 503: service unavailable', datetime('now', '-1 day'))`,
+    )
+    .run({ prId: sp1 });
   setPrActivity(sp1, 1);
 
   // 8. Paused project.

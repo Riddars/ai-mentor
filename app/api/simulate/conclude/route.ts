@@ -20,6 +20,11 @@ export async function POST(req: Request) {
     return new Response("Service not configured", { status: 500 });
   }
 
+  // Only for the stub reviewer: the language-model reviewer concludes checks through the
+  // review queue (deadline, retries, restart from the panel).
+  if (config.reviewer !== "simulate") {
+    return new Response("Not available with the llm reviewer", { status: 404 });
+  }
   if (req.headers.get("x-sim-admin-token") !== config.simAdminToken) {
     return new Response("Unauthorized", { status: 401 });
   }

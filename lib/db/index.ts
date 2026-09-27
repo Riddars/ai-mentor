@@ -1,5 +1,5 @@
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { databasePath } from "@/lib/config";
 
@@ -127,6 +127,28 @@ CREATE TABLE IF NOT EXISTS project_supervisors (
   user_id    TEXT NOT NULL REFERENCES users(id),
   PRIMARY KEY (project_id, user_id)
 );
+
+-- Queue of reviews. A commit job carries the id of its required check-run; the check is
+-- concluded when the review is done, or earlier with a "not reviewed" note (deadline or
+-- daily limit) while the job keeps retrying.
+CREATE TABLE IF NOT EXISTS review_jobs (
+  id              INTEGER PRIMARY KEY,
+  pull_request_id INTEGER NOT NULL REFERENCES pull_requests(id),
+  kind            TEXT NOT NULL,
+  head_sha        TEXT,
+  check_run_id    INTEGER,
+  payload         TEXT NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'queued',
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  run_after       TEXT NOT NULL DEFAULT (datetime('now')),
+  deadline_at     TEXT,
+  check_concluded INTEGER NOT NULL DEFAULT 0,
+  note            TEXT,
+  last_error      TEXT,
+  created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS review_jobs_status ON review_jobs (status, run_after);
 `;
 
 let cached: DatabaseSync | null = null;
@@ -153,6 +175,25 @@ export function getDb(): DatabaseSync {
 
   cached = db;
   return cached;
+}
+
+/**
+ * Daily copy of the database next to it (`backups/curator-YYYY-MM-DD.db`), keeping the
+ * `keep` most recent. A no-op when today's copy already exists.
+ */
+export function backupDatabase(keep = 7): void {
+  const dir = resolve(process.cwd(), dirname(databasePath()), "backups");
+  mkdirSync(dir, { recursive: true });
+  const today = new Date().toISOString().slice(0, 10);
+  const target = join(dir, `curator-${today}.db`);
+  if (existsSync(target)) return;
+  getDb().exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
+  const copies = readdirSync(dir)
+    .filter((f) => /^curator-\d{4}-\d{2}-\d{2}\.db$/.test(f))
+    .sort();
+  for (const old of copies.slice(0, Math.max(0, copies.length - keep))) {
+    rmSync(join(dir, old));
+  }
 }
 
 /** Column-level migrations that CREATE TABLE IF NOT EXISTS cannot express. */

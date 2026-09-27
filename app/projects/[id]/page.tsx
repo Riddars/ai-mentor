@@ -9,6 +9,7 @@ import {
   listProjectAnalyses,
   listProjectFindings,
   listProjectSupervisors,
+  listUnreviewedPrs,
   type AnalysisRow,
   type FindingRow,
 } from "@/lib/curator/store";
@@ -26,6 +27,7 @@ import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Badge, SeverityBadge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CollapsibleCard } from "@/components/ui/Collapsible";
+import { RestartReviewButton } from "@/components/RestartReviewButton";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -49,6 +51,7 @@ export default async function ProjectPage({
   const participants = getProjectParticipants(projectId);
   const findings = listProjectFindings(projectId);
   const analyses = listProjectAnalyses(projectId);
+  const unreviewed = listUnreviewedPrs(projectId);
   const lastActivity = getProjectLastActivity(projectId);
   const supervisors = isHead
     ? (() => {
@@ -99,6 +102,27 @@ export default async function ProjectPage({
         </div>
 
         <div className="flex flex-col gap-5">
+          {unreviewed.length > 0 && (
+            <Card className="shadow-card">
+              <CardHeader className="flex items-center justify-between">
+                <CardTitle>Не разобраны</CardTitle>
+                <span className="text-xs text-muted-foreground">{unreviewed.length}</span>
+              </CardHeader>
+              <CardBody className="pt-0">
+                <ul className="flex flex-col divide-y divide-border text-sm">
+                  {unreviewed.map((u) => (
+                    <li key={u.prId} className="flex flex-wrap items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
+                      <span>
+                        <span className="font-medium">PR #{u.number}</span>
+                        <span className="text-muted-foreground"> · {unreviewedReason(u.status, u.note)}</span>
+                      </span>
+                      <RestartReviewButton prId={u.prId} />
+                    </li>
+                  ))}
+                </ul>
+              </CardBody>
+            </Card>
+          )}
           <Card className="shadow-card">
             <CardHeader className="flex items-center justify-between">
               <CardTitle>Открытые замечания</CardTitle>
@@ -145,6 +169,11 @@ export default async function ProjectPage({
       </PageShell>
     </>
   );
+}
+
+function unreviewedReason(status: string, note: string | null): string {
+  if (status === "failed") return "разбор не удался";
+  return note === "limit" ? "исчерпан дневной лимит, разбор в очереди" : "не успел вовремя, разбор в очереди";
 }
 
 /** Reopened first (the model re-flagged it), then by severity, then most recent. */

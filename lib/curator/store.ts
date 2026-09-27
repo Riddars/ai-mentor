@@ -82,8 +82,8 @@ export interface ProjectSummary {
   lastAnalysisAt: string | null;
   lastAnalysisOutcome: AnalysisOutcome | null;
   lastAnalysisTrigger: string | null;
-  /** Open PRs whose latest commit analysis failed — their merge stays blocked. */
-  blockedPrs: number;
+  /** PRs whose latest commit has no review yet although its check was concluded. */
+  unreviewedPrs: number;
 }
 
 export interface ProjectDetail {
@@ -169,19 +169,6 @@ const PARTICIPANTS_SQL = `
 
 const OPEN_STATUSES = "('open', 'reopened', 'pending')";
 
-/** A column of the latest analysis of `pr`, as a correlated subquery fragment. */
-function lastAnalysis(column: string, where = ""): string {
-  return `(SELECT ${column} FROM analyses WHERE pull_request_id = pr.id ${where}
-     ORDER BY created_at DESC, id DESC LIMIT 1)`;
-}
-
-/**
- * Only a failed COMMIT analysis leaves the check-run at action_required; a failed
- * comment reconciliation creates no check-run. Closed/merged PRs cannot be blocked.
- */
-const BLOCKED_SQL = `(COALESCE(pr.state, 'open') = 'open'
-   AND ${lastAnalysis("outcome", "AND trigger = 'commit'")} = 'error')`;
-
 // --- Scope ---
 //
 // Overview queries are optionally scoped to one supervisor: passing a supervisorId
@@ -263,12 +250,6 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       )
       .get({ id: p.id }) as { at: string; outcome: AnalysisOutcome; trigger: string } | undefined;
 
-    const blocked = db
-      .prepare(
-        `SELECT COUNT(*) AS n FROM pull_requests pr
-         WHERE pr.project_id = @id AND ${BLOCKED_SQL}`,
-      )
-      .get({ id: p.id }) as { n: number };
 
     return {
       id: p.id,
@@ -285,7 +266,7 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       lastAnalysisAt: last?.at ?? null,
       lastAnalysisOutcome: last?.outcome ?? null,
       lastAnalysisTrigger: last?.trigger ?? null,
-      blockedPrs: blocked.n,
+      unreviewedPrs: countUnreviewedPrs(p.id),
     };
   });
 }
@@ -501,7 +482,8 @@ export function projectHasPullRequests(id: number): boolean {
 /**
  * Delete a project with everything the memory holds about it, in one transaction.
  * Order follows the foreign keys (PRAGMA foreign_keys = ON): history → responses →
- * findings → analyses → pull requests → participants → assignments → project.
+ * findings → analyses → review jobs → pull requests → participants → assignments →
+ * project.
  * github_events are not tied to a project and stay.
  */
 export function deleteProjectCascade(id: number): void {
@@ -515,6 +497,8 @@ export function deleteProjectCascade(id: number): void {
     `DELETE FROM findings WHERE pull_request_id IN
        (SELECT id FROM pull_requests WHERE project_id = @id)`,
     `DELETE FROM analyses WHERE pull_request_id IN
+       (SELECT id FROM pull_requests WHERE project_id = @id)`,
+    `DELETE FROM review_jobs WHERE pull_request_id IN
        (SELECT id FROM pull_requests WHERE project_id = @id)`,
     `DELETE FROM pull_requests WHERE project_id = @id`,
     `DELETE FROM participants WHERE project_id = @id`,
@@ -999,4 +983,305 @@ export function setFindingStatusByPerson(params: {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+// --- Review queue ---
+
+export type JobKind = "commit" | "comment";
+export type JobStatus = "queued" | "running" | "done" | "failed" | "superseded";
+
+export interface ReviewJob {
+  id: number;
+  prId: number;
+  projectId: number;
+  kind: JobKind;
+  headSha: string | null;
+  checkRunId: number | null;
+  /** Everything needed to run the job without the webhook payload (JSON). */
+  payload: unknown;
+  status: JobStatus;
+  attempts: number;
+  checkConcluded: boolean;
+  createdAt: string;
+}
+
+type RawJob = Omit<ReviewJob, "payload" | "checkConcluded"> & {
+  payload: string;
+  checkConcluded: number;
+};
+
+const JOB_SELECT = `
+  SELECT j.id, j.pull_request_id AS prId, pr.project_id AS projectId, j.kind,
+         j.head_sha AS headSha, j.check_run_id AS checkRunId, j.payload, j.status,
+         j.attempts, j.check_concluded AS checkConcluded, j.created_at AS createdAt
+  FROM review_jobs j
+  JOIN pull_requests pr ON pr.id = j.pull_request_id`;
+
+function toJob(row: RawJob): ReviewJob {
+  return { ...row, payload: JSON.parse(row.payload), checkConcluded: row.checkConcluded === 1 };
+}
+
+const ACTIVE_JOB = "('queued', 'running')";
+
+function seconds(ms: number): string {
+  return `+${Math.max(0, Math.round(ms / 1000))} seconds`;
+}
+
+/**
+ * Queue a commit review. A queued (not yet running) commit job of the same PR is replaced:
+ * only the latest commit is reviewed. Returns the check-runs of replaced jobs that are
+ * still open, so the caller can conclude them.
+ */
+export function enqueueCommitJob(params: {
+  prId: number;
+  headSha: string;
+  checkRunId: number | null;
+  payload: unknown;
+  delayMs: number;
+  deadlineMs: number;
+}): { supersededCheckRunIds: number[] } {
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    const replaced = db
+      .prepare(
+        `SELECT check_run_id AS checkRunId, check_concluded AS concluded FROM review_jobs
+         WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
+      )
+      .all({ prId: params.prId }) as Array<{ checkRunId: number | null; concluded: number }>;
+    db.prepare(
+      `UPDATE review_jobs SET status = 'superseded', updated_at = datetime('now')
+       WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
+    ).run({ prId: params.prId });
+    db.prepare(
+      `INSERT INTO review_jobs
+         (pull_request_id, kind, head_sha, check_run_id, payload, run_after, deadline_at)
+       VALUES (@prId, 'commit', @headSha, @checkRunId, @payload,
+               datetime('now', @delay), datetime('now', @deadline))`,
+    ).run({
+      prId: params.prId,
+      headSha: params.headSha,
+      checkRunId: params.checkRunId,
+      payload: JSON.stringify(params.payload),
+      delay: seconds(params.delayMs),
+      deadline: seconds(params.deadlineMs),
+    });
+    db.exec("COMMIT");
+    return {
+      supersededCheckRunIds: replaced
+        .filter((r) => r.checkRunId !== null && r.concluded === 0)
+        .map((r) => r.checkRunId as number),
+    };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+export function enqueueCommentJob(params: { prId: number; payload: unknown }): void {
+  getDb()
+    .prepare(
+      `INSERT INTO review_jobs (pull_request_id, kind, payload)
+       VALUES (@prId, 'comment', @payload)`,
+    )
+    .run({ prId: params.prId, payload: JSON.stringify(params.payload) });
+}
+
+/**
+ * A commit job for this PR and head exists: queued or running (`activeOnly`), or in any
+ * state but replaced — then a failed head is not retried on its own.
+ */
+export function hasJobForHead(prId: number, headSha: string, activeOnly = false): boolean {
+  const row = getDb()
+    .prepare(
+      `SELECT 1 FROM review_jobs WHERE pull_request_id = @prId AND head_sha = @headSha
+         AND kind = 'commit'
+         AND status IN (${activeOnly ? "'queued', 'running'" : "'queued', 'running', 'done', 'failed'"})
+       LIMIT 1`,
+    )
+    .get({ prId, headSha });
+  return row !== undefined;
+}
+
+export function hasActiveCommitJob(prId: number): boolean {
+  const row = getDb()
+    .prepare(
+      `SELECT 1 FROM review_jobs WHERE pull_request_id = @prId AND kind = 'commit'
+         AND status IN ${ACTIVE_JOB} LIMIT 1`,
+    )
+    .get({ prId });
+  return row !== undefined;
+}
+
+/** Run the PR's waiting commit job now (a person asked for it); false if there is none. */
+export function bringCommitJobForward(prId: number): boolean {
+  const res = getDb()
+    .prepare(
+      `UPDATE review_jobs SET run_after = datetime('now'), updated_at = datetime('now')
+       WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
+    )
+    .run({ prId });
+  return res.changes > 0;
+}
+
+/** After a restart nothing is running: interrupted jobs go back to the queue. */
+export function requeueRunningJobs(): number {
+  return Number(
+    getDb()
+      .prepare(
+        `UPDATE review_jobs SET status = 'queued', updated_at = datetime('now')
+         WHERE status = 'running'`,
+      )
+      .run().changes,
+  );
+}
+
+/** Due jobs, oldest first: at most one per project, none for a project with a running job. */
+export function listDueJobs(limit: number): ReviewJob[] {
+  const rows = getDb()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE j.status = 'queued' AND j.run_after <= datetime('now')
+         AND pr.project_id NOT IN (
+           SELECT p2.project_id FROM review_jobs j2
+           JOIN pull_requests p2 ON p2.id = j2.pull_request_id WHERE j2.status = 'running')
+       ORDER BY j.run_after, j.id`,
+    )
+    .all() as unknown as RawJob[];
+  const seen = new Set<number>();
+  const due: ReviewJob[] = [];
+  for (const row of rows) {
+    if (seen.has(row.projectId)) continue;
+    seen.add(row.projectId);
+    due.push(toJob(row));
+    if (due.length >= limit) break;
+  }
+  return due;
+}
+
+/** Commit jobs past their deadline whose required check is still open. */
+export function listOverdueJobs(): ReviewJob[] {
+  return (
+    getDb()
+      .prepare(
+        `${JOB_SELECT}
+         WHERE j.kind = 'commit' AND j.status IN ${ACTIVE_JOB} AND j.check_concluded = 0
+           AND j.check_run_id IS NOT NULL AND j.deadline_at <= datetime('now')`,
+      )
+      .all() as unknown as RawJob[]
+  ).map(toJob);
+}
+
+export function markJobRunning(id: number): void {
+  getDb()
+    .prepare(
+      `UPDATE review_jobs SET status = 'running', attempts = attempts + 1,
+         updated_at = datetime('now') WHERE id = @id`,
+    )
+    .run({ id });
+}
+
+export function finishJob(
+  id: number,
+  status: "done" | "failed" | "superseded",
+  error?: string,
+): void {
+  getDb()
+    .prepare(
+      `UPDATE review_jobs SET status = @status, last_error = @error, updated_at = datetime('now')
+       WHERE id = @id`,
+    )
+    .run({ id, status, error: error ?? null });
+}
+
+/** Put a job back in the queue to run after `delayMs` (or at `at`, SQLite UTC time). */
+export function rescheduleJob(id: number, when: { delayMs?: number; at?: string }, error?: string): void {
+  getDb()
+    .prepare(
+      `UPDATE review_jobs SET status = 'queued',
+         run_after = COALESCE(@at, datetime('now', @delay)),
+         last_error = COALESCE(@error, last_error), updated_at = datetime('now')
+       WHERE id = @id`,
+    )
+    .run({ id, at: when.at ?? null, delay: seconds(when.delayMs ?? 0), error: error ?? null });
+}
+
+/** The job's required check was concluded without a review ("deadline" or "limit"). */
+export function markCheckConcluded(id: number, note: "deadline" | "limit"): void {
+  getDb()
+    .prepare(
+      `UPDATE review_jobs SET check_concluded = 1, note = @note, updated_at = datetime('now')
+       WHERE id = @id`,
+    )
+    .run({ id, note });
+}
+
+/** Model requests of a project in the last 24 hours, and when the oldest of them expires. */
+export function recentAnalysesOfProject(projectId: number): {
+  count: number;
+  freeAt: string | null;
+} {
+  return getDb()
+    .prepare(
+      `SELECT COUNT(*) AS count, datetime(MIN(a.created_at), '+1 day') AS freeAt
+       FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE pr.project_id = @projectId AND a.created_at > datetime('now', '-1 day')
+         AND a.outcome != 'error'`,
+    )
+    .get({ projectId }) as { count: number; freeAt: string | null };
+}
+
+export function getPullRequestHead(prId: number): string | null {
+  const row = getDb()
+    .prepare("SELECT head_sha AS headSha FROM pull_requests WHERE id = @prId")
+    .get({ prId }) as { headSha: string | null } | undefined;
+  return row?.headSha ?? null;
+}
+
+export interface UnreviewedPr {
+  prId: number;
+  number: number;
+  status: JobStatus;
+  note: string | null;
+}
+
+/**
+ * PRs of a project whose latest commit job has no review yet although its check was
+ * already concluded ("not reviewed": deadline or daily limit), or which failed for good.
+ */
+export function listUnreviewedPrs(projectId: number): UnreviewedPr[] {
+  return getDb()
+    .prepare(
+      `SELECT pr.id AS prId, pr.number, j.status, j.note
+       FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
+       WHERE pr.project_id = @projectId AND j.kind = 'commit'
+         AND j.id = (SELECT MAX(id) FROM review_jobs
+                     WHERE pull_request_id = pr.id AND kind = 'commit' AND status != 'superseded')
+         AND ((j.status IN ${ACTIVE_JOB} AND j.check_concluded = 1) OR j.status = 'failed')
+       ORDER BY pr.number`,
+    )
+    .all({ projectId }) as unknown as UnreviewedPr[];
+}
+
+/** Number of PRs per project listed by listUnreviewedPrs, for the overview. */
+export function countUnreviewedPrs(projectId: number): number {
+  return listUnreviewedPrs(projectId).length;
+}
+
+export function getPullRequest(prId: number): {
+  id: number;
+  projectId: number;
+  number: number;
+  headSha: string | null;
+  author: string | null;
+  title: string | null;
+  state: PullRequestState | null;
+} | null {
+  const row = getDb()
+    .prepare(
+      `SELECT id, project_id AS projectId, number, head_sha AS headSha, author_login AS author,
+              title, state FROM pull_requests WHERE id = @prId`,
+    )
+    .get({ prId }) as ReturnType<typeof getPullRequest> | undefined;
+  return row ?? null;
 }
