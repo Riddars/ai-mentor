@@ -51,7 +51,7 @@ export async function restartReviewAction(
     revalidatePath(`/projects/${pr.projectId}`);
     return result === "queued"
       ? { ok: "Разбор поставлен в очередь." }
-      : { ok: "Разбор этого коммита уже выполняется или pull request закрыт." };
+      : { ok: "Последний коммит уже разобран или разбор уже идёт." };
   } catch (error) {
     console.error("[panel] restart review failed:", error);
     return { error: "Не удалось связаться с GitHub." };

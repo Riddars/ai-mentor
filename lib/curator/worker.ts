@@ -3,6 +3,7 @@ import { parseDbDate } from "@/lib/format";
 import { getConfig } from "@/lib/config";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
+import { isProjectMember } from "@/lib/github/members";
 import {
   concludeCheck,
   executeCommentJob,
@@ -157,9 +158,15 @@ async function syncOpenPullRequests(): Promise<void> {
         }>
       >(`/repos/${project.owner}/${project.repo}/pulls?state=open&per_page=100`, { token });
       for (const pr of pulls) {
-        if (pr.draft || !["OWNER", "MEMBER", "COLLABORATOR"].includes(pr.author_association)) {
-          continue;
-        }
+        if (pr.draft) continue;
+        const member = await isProjectMember({
+          owner: project.owner,
+          repo: project.repo,
+          login: pr.user?.login,
+          association: pr.author_association,
+          installationId,
+        });
+        if (!member) continue;
         await startCommitReview(
           {
             owner: project.owner,

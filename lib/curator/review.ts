@@ -568,7 +568,8 @@ async function fetchLivePullRequest(
  * слияние до разбора или до срока). Источник:
  * - `webhook` — событие коммита; разбор через задержку (разбирается только последний коммит);
  * - `sync` — сверка с GitHub: только коммиты, по которым задачи ещё не было;
- * - `rerun` / `restart` — «Re-run» в GitHub или кнопка в панели: разобрать заново.
+ * - `rerun` — «Re-run» в GitHub: разобрать заново, даже если коммит уже разобран;
+ * - `restart` — кнопка в панели: разобрать последний коммит, если он ещё не разобран.
  * Вне вебхука последний коммит берётся из GitHub: запрос по устаревшему коммиту
  * пропускается и не откатывает head в памяти.
  */
@@ -590,7 +591,9 @@ export async function startCommitReview(
   if (hasJobForHead(prId, params.headSha, source !== "sync")) {
     return "skipped"; // этот коммит уже в очереди (или, для сверки, уже пробовали)
   }
-  if (source !== "rerun" && source !== "restart" && hasSuccessfulCommitAnalysis(prId, params.headSha)) {
+  // Only "Re-run" in GitHub reviews an already reviewed commit again: a person asked for it
+  // explicitly. The panel button restarts only commits without a review.
+  if (source !== "rerun" && hasSuccessfulCommitAnalysis(prId, params.headSha)) {
     return "skipped";
   }
   const settings = queueSettings();

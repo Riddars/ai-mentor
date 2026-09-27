@@ -1,6 +1,7 @@
 import { getConfig } from "@/lib/config";
 import { verifySignature } from "@/lib/github/verify";
 import { CHECK_NAME, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
+import { isProjectMember } from "@/lib/github/members";
 import { handlePullRequest } from "@/lib/curator/simulate";
 import { startCommitReview } from "@/lib/curator/review";
 import {
@@ -16,11 +17,6 @@ import {
 export const runtime = "nodejs";
 
 const REVIEW_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"]);
-
-// Who counts as a project member on GitHub: only their PRs are reviewed and only their
-// comments are taken as student replies. Repositories are public, so anyone else could
-// otherwise dismiss findings or spend model requests.
-const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
 export async function POST(req: Request) {
   const rawBody = await req.text();
@@ -125,12 +121,34 @@ export async function POST(req: Request) {
     });
   }
 
+  // Only PRs and comments of project members count (lib/github/members.ts).
+  const memberOf = async (login: string | undefined, association: string | undefined) =>
+    payload.installation?.id !== undefined &&
+    (await isProjectMember({
+      owner: project.owner,
+      repo: project.repo,
+      login,
+      association,
+      installationId: payload.installation.id,
+    }));
+  let authorIsMember = true;
+  if (isReviewEvent && project.status !== "paused") {
+    try {
+      authorIsMember = await memberOf(
+        payload.pull_request.user?.login,
+        payload.pull_request.author_association,
+      );
+    } catch (error) {
+      return failed("failed to check the PR author", error);
+    }
+  }
+
   // Cases where the required check is concluded at once, without a review, so that it
   // does not block the merge: a paused project, a PR from outside the project, a draft.
   const skipReason =
     project.status === "paused"
       ? "Проект на паузе — разбор не выполняется."
-      : isReviewEvent && !TRUSTED_ASSOCIATIONS.has(payload.pull_request.author_association)
+      : isReviewEvent && !authorIsMember
         ? "Автор pull request не участник проекта — разбор не выполняется."
         : isReviewEvent && payload.pull_request.draft
           ? "Черновик — разбор после перевода в «готов к ревью»."
@@ -169,9 +187,20 @@ export async function POST(req: Request) {
     payload.action === "created" &&
     payload.issue?.pull_request &&
     payload.sender?.type !== "Bot" &&
-    TRUSTED_ASSOCIATIONS.has(payload.comment?.author_association) &&
     payload.installation?.id !== undefined
   ) {
+    let commenterIsMember: boolean;
+    try {
+      commenterIsMember = await memberOf(
+        payload.comment?.user?.login,
+        payload.comment?.author_association,
+      );
+    } catch (error) {
+      return failed("failed to check the comment author", error);
+    }
+    if (!commenterIsMember) {
+      return Response.json({ ok: true, ignored: "comment author is not a project member" });
+    }
     // Ответ студента без нового коммита: сохраняем сразу (повтор задачи его не потеряет),
     // сверку по объяснению выполнит очередь (без check-run).
     saveReplyAndEnqueue({
