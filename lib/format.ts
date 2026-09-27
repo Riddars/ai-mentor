@@ -117,6 +117,8 @@ export function outcomeLabel(outcome: string | null, trigger: string | null): st
       return "выполнен";
     case "parse_error":
       return "ответ модели не разобран";
+    case "stale":
+      return "устарел — пришёл новый коммит";
     case "error":
       return trigger === "comment" ? "сбой сверки по ответу студента" : "ошибка разбора";
     default:

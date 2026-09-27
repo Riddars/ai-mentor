@@ -26,28 +26,34 @@ export async function restartReviewAction(
     return { error: "Нет доступа к этому проекту." };
   }
   const project = getProject(pr.projectId);
-  if (!project || !pr.headSha) return { error: "Нет данных о последнем коммите." };
+  if (!project) return { error: "Проект не найден." };
+  if (pr.state !== null && pr.state !== "open") return { error: "Pull request уже закрыт." };
 
-  if (!bringCommitJobForward(pr.id)) {
-    try {
-      const installationId = await getRepoInstallationId(project.owner, project.repo);
-      await startCommitReview(
-        {
-          owner: project.owner,
-          repo: project.repo,
-          prNumber: pr.number,
-          headSha: pr.headSha,
-          installationId,
-          author: pr.author,
-          title: pr.title,
-        },
-        { delay: false, force: true },
-      );
-    } catch (error) {
-      console.error("[panel] restart review failed:", error);
-      return { error: "Не удалось связаться с GitHub." };
-    }
+  // A job already waiting (backoff or daily limit) runs at once; the limit still applies.
+  if (bringCommitJobForward(pr.id)) {
+    revalidatePath(`/projects/${pr.projectId}`);
+    return { ok: "Разбор выполнится в течение минуты, если не исчерпан дневной лимит." };
   }
-  revalidatePath(`/projects/${pr.projectId}`);
-  return { ok: "Разбор поставлен в очередь." };
+  try {
+    const installationId = await getRepoInstallationId(project.owner, project.repo);
+    const result = await startCommitReview(
+      {
+        owner: project.owner,
+        repo: project.repo,
+        prNumber: pr.number,
+        headSha: pr.headSha ?? "",
+        installationId,
+        author: pr.author,
+        title: pr.title,
+      },
+      "restart",
+    );
+    revalidatePath(`/projects/${pr.projectId}`);
+    return result === "queued"
+      ? { ok: "Разбор поставлен в очередь." }
+      : { ok: "Разбор этого коммита уже выполняется или pull request закрыт." };
+  } catch (error) {
+    console.error("[panel] restart review failed:", error);
+    return { error: "Не удалось связаться с GitHub." };
+  }
 }

@@ -46,7 +46,7 @@ export async function handlePullRequest(
         author: payload.pull_request.user?.login ?? null,
         title: payload.pull_request.title ?? null,
       },
-      { delay: true },
+      "webhook",
     );
     return;
   }

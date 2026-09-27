@@ -4,12 +4,12 @@ import { CHECK_NAME, concludeCheckRun, createCheckRun } from "@/lib/github/check
 import { handlePullRequest } from "@/lib/curator/simulate";
 import { startCommitReview } from "@/lib/curator/review";
 import {
-  enqueueCommentJob,
   findProjectForRepository,
   forgetEvent,
   recordEventOnce,
   resolvePendingOnClose,
-  saveStudentResponse,
+  saveReplyAndEnqueue,
+  supersedeCommitJobs,
   upsertPullRequest,
 } from "@/lib/curator/store";
 
@@ -96,6 +96,20 @@ export async function POST(req: Request) {
           ? "merged-default"
           : "merged-other",
     );
+    // Closed without merge: its code never lands, a waiting review is pointless. A merged
+    // PR keeps its queued review — the findings still matter.
+    if (!pr.merged && payload.installation?.id !== undefined) {
+      for (const checkRunId of supersedeCommitJobs(prId)) {
+        await concludeCheckRun({
+          owner: project.owner,
+          repo: project.repo,
+          installationId: payload.installation.id,
+          checkRunId,
+          conclusion: "success",
+          output: { title: "AI Curator", summary: "Pull request закрыт без слияния — разбор не нужен." },
+        }).catch((error) => console.error(`[webhook] failed to conclude check ${checkRunId}:`, error));
+      }
+    }
     return Response.json({ ok: true, closed: true });
   }
 
@@ -160,25 +174,19 @@ export async function POST(req: Request) {
   ) {
     // Ответ студента без нового коммита: сохраняем сразу (повтор задачи его не потеряет),
     // сверку по объяснению выполнит очередь (без check-run).
-    const prId = upsertPullRequest(project.id, payload.issue.number);
-    const isNew = saveStudentResponse({
-      prId,
+    saveReplyAndEnqueue({
+      prId: upsertPullRequest(project.id, payload.issue.number),
       commentId: payload.comment.id,
       login: payload.comment.user?.login ?? null,
       body: payload.comment.body ?? "",
+      payload: {
+        owner: project.owner,
+        repo: project.repo,
+        prNumber: payload.issue.number,
+        installationId: payload.installation.id,
+        commentId: payload.comment.id,
+      },
     });
-    if (isNew) {
-      enqueueCommentJob({
-        prId,
-        payload: {
-          owner: project.owner,
-          repo: project.repo,
-          prNumber: payload.issue.number,
-          installationId: payload.installation.id,
-          commentId: payload.comment.id,
-        },
-      });
-    }
   } else if (isRerun && config.reviewer === "llm" && payload.installation?.id !== undefined) {
     // «Re-run» у проверки в GitHub — разобрать этот коммит заново.
     const prNumber: number | undefined = payload.check_run.pull_requests?.[0]?.number;
@@ -192,7 +200,7 @@ export async function POST(req: Request) {
             headSha: payload.check_run.head_sha,
             installationId: payload.installation.id,
           },
-          { delay: false, force: true },
+          "rerun",
         );
       } catch (error) {
         return failed("failed to rerun review", error);

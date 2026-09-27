@@ -15,6 +15,10 @@ import { areaLabel, locationText, severityLabel } from "@/lib/format";
 import {
   applyReconciliation,
   enqueueCommitJob,
+  finishJob,
+  getJobCheckRun,
+  getPullRequest,
+  setJobCheckRun,
   getPullRequestHead,
   hasJobForHead,
   getProjectByRepo,
@@ -427,7 +431,7 @@ async function runReview(
   params: ReviewParams,
   prId: number,
   trigger: "commit" | "comment",
-  isCurrent: () => boolean = () => true,
+  context: { isCurrent?: () => boolean; fixesFinal?: () => boolean } = {},
 ): Promise<ReviewOutcome> {
   const [files, research] = await Promise.all([
     fetchChangedFiles(params),
@@ -458,10 +462,6 @@ async function runReview(
     answer = await chat(messages);
     parsed = parseModelJson(answer.content);
   }
-  if (!isCurrent()) {
-    throw new StaleReviewError(); // пока модель думала, пришёл новый коммит
-  }
-
   const record = {
     prId,
     headSha: params.headSha,
@@ -471,6 +471,13 @@ async function runReview(
     materials,
     rawResponse: answer.content,
   };
+
+  if (context.isCurrent && !context.isCurrent()) {
+    // Пока модель думала, пришёл новый коммит или PR закрыли без слияния: результат не
+    // применяем, но обращение к модели учитываем (дневной лимит, панель).
+    recordAnalysis({ ...record, outcome: "stale", summary: parsed?.summary || null });
+    throw new StaleReviewError();
+  }
 
   if (!parsed) {
     // Память не портим; сырой ответ сохранён в разборе и виден руководителю в панели,
@@ -492,6 +499,7 @@ async function runReview(
   const { statusChanges, kept } = applyReconciliation(prId, analysisId, parsed, {
     allowedPriorIds: new Set(prior.map((f) => f.id)),
     allowNew: trigger === "commit",
+    fixesFinal: context.fixesFinal?.() ?? false,
   });
 
   return {
@@ -540,41 +548,81 @@ export function queueSettings() {
   };
 }
 
+/** Where a commit review request comes from. */
+export type ReviewSource = "webhook" | "sync" | "rerun" | "restart";
+
+/** Current head and state of a PR on GitHub — the source of truth outside webhooks. */
+async function fetchLivePullRequest(
+  params: ReviewParams,
+): Promise<{ headSha: string; open: boolean }> {
+  const token = await getInstallationToken(params.installationId);
+  const pr = await githubRequest<{ head: { sha: string }; state: string }>(
+    `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`,
+    { token },
+  );
+  return { headSha: pr.head.sha, open: pr.state === "open" };
+}
+
 /**
- * Поставить разбор коммита в очередь. Обязательную проверку ставим сразу (она блокирует
- * слияние до разбора или до срока), сам разбор выполнит обработчик очереди. `delay` —
- * подождать, не придёт ли следующий коммит (разбирается только последний); `force` —
- * разобрать заново даже уже разобранный коммит (перезапуск); `skipIfTried` — не трогать
- * коммит, по которому задача уже была, в том числе неудачная (сверка с GitHub).
+ * Поставить разбор коммита в очередь и поставить обязательную проверку (она блокирует
+ * слияние до разбора или до срока). Источник:
+ * - `webhook` — событие коммита; разбор через задержку (разбирается только последний коммит);
+ * - `sync` — сверка с GitHub: только коммиты, по которым задачи ещё не было;
+ * - `rerun` / `restart` — «Re-run» в GitHub или кнопка в панели: разобрать заново.
+ * Вне вебхука последний коммит берётся из GitHub: запрос по устаревшему коммиту
+ * пропускается и не откатывает head в памяти.
  */
 export async function startCommitReview(
   params: ReviewParams,
-  opts: { delay: boolean; force?: boolean; skipIfTried?: boolean },
+  source: ReviewSource,
 ): Promise<"queued" | "skipped"> {
-  const prId = persistPrContext(params);
-  if (hasJobForHead(prId, params.headSha, !opts.skipIfTried)) {
-    return "skipped"; // этот коммит уже в очереди (повторная доставка)
+  if (source !== "webhook") {
+    const live = await fetchLivePullRequest(params);
+    if (!live.open) return "skipped";
+    // A restart from the panel reviews whatever is the head now; other sources only the
+    // commit they were asked about.
+    if (source === "restart") params = { ...params, headSha: live.headSha };
+    else if (live.headSha !== params.headSha) return "skipped";
   }
-  if (!opts.force && hasSuccessfulCommitAnalysis(prId, params.headSha)) {
+
+  // Synchronous from here to the insert: no other event can interleave.
+  const prId = persistPrContext(params);
+  if (hasJobForHead(prId, params.headSha, source !== "sync")) {
+    return "skipped"; // этот коммит уже в очереди (или, для сверки, уже пробовали)
+  }
+  if (source !== "rerun" && source !== "restart" && hasSuccessfulCommitAnalysis(prId, params.headSha)) {
     return "skipped";
   }
-  const checkRunId = await createCheckRun({
-    owner: params.owner,
-    repo: params.repo,
-    headSha: params.headSha,
-    installationId: params.installationId,
-  });
   const settings = queueSettings();
-  const { supersededCheckRunIds } = enqueueCommitJob({
+  const { jobId, supersededCheckRunIds } = enqueueCommitJob({
     prId,
     headSha: params.headSha,
-    checkRunId,
     payload: params,
-    delayMs: opts.delay ? settings.debounceMs : 0,
+    delayMs: source === "webhook" ? settings.debounceMs : 0,
     deadlineMs: settings.deadlineMs,
   });
+  if (jobId === null) return "skipped";
+
+  let checkRunId: number;
+  try {
+    checkRunId = await createCheckRun({
+      owner: params.owner,
+      repo: params.repo,
+      headSha: params.headSha,
+      installationId: params.installationId,
+    });
+  } catch (error) {
+    finishJob(jobId, "superseded", "failed to create the check-run");
+    throw error;
+  }
+  if (setJobCheckRun(jobId, checkRunId) === "done") {
+    // The review finished before the check existed — conclude it now.
+    await concludeCheck(params, checkRunId, "Разбор изменений завершён.");
+  }
   for (const id of supersededCheckRunIds) {
-    await concludeCheck(params, id, "Заменён новым коммитом — разбирается последний.");
+    await concludeCheck(params, id, "Заменён новым коммитом — разбирается последний.").catch(
+      (error) => console.error(`[curator] failed to conclude replaced check ${id}:`, error),
+    );
   }
   return "queued";
 }
@@ -595,25 +643,32 @@ export async function concludeCheck(
   });
 }
 
-/** The PR moved on to a newer commit while its old commit was being reviewed. */
+/** The PR moved on (new commit) or was closed without merge while it was being reviewed. */
 export class StaleReviewError extends Error {
   constructor() {
-    super("Pull request head changed during the review");
+    super("Pull request changed during the review");
   }
 }
 
 /**
  * Выполнить разбор коммита из очереди: разбор, комментарий, завершение проверки. Если head
- * PR сменился (пришёл новый коммит), результат не применяется — StaleReviewError.
+ * PR сменился или PR закрыт без слияния, результат не применяется — StaleReviewError. Если
+ * PR уже слит, исправления закрываются сразу (второго шага закрытия уже не будет).
  */
 export async function executeCommitJob(
   params: ReviewParams,
   prId: number,
-  checkRunId: number | null,
+  jobId: number,
 ): Promise<void> {
-  const isCurrent = () => getPullRequestHead(prId) === params.headSha;
+  const isCurrent = () => {
+    const pr = getPullRequest(prId);
+    return pr !== null && pr.headSha === params.headSha && pr.state !== "closed";
+  };
   if (!isCurrent()) throw new StaleReviewError();
-  const { analysisId, comment } = await runReview(params, prId, "commit", isCurrent);
+  const { analysisId, comment } = await runReview(params, prId, "commit", {
+    isCurrent,
+    fixesFinal: () => getPullRequest(prId)?.state === "merged",
+  });
   await postIssueComment({
     owner: params.owner,
     repo: params.repo,
@@ -622,22 +677,30 @@ export async function executeCommitJob(
     installationId: params.installationId,
   });
   setAnalysisComment(analysisId, comment);
+  // The comment is out: from here on a failure must not repeat the review. The check is
+  // updated also after an early "not reviewed" conclusion; if this fails, it stays as is.
+  const checkRunId = getJobCheckRun(jobId);
   if (checkRunId !== null) {
-    // Also after an early "not reviewed" conclusion: the check now tells the truth.
-    await concludeCheck(params, checkRunId, "Разбор изменений завершён.");
+    await concludeCheck(params, checkRunId, "Разбор изменений завершён.").catch((error) =>
+      console.error(`[curator] failed to conclude check ${checkRunId}:`, error),
+    );
   }
 }
 
 /**
  * Разбор не удался за всё окно повторов: записать сбой (виден в панели) и сообщить в PR.
- * Проверка к этому времени уже завершена по сроку, слияние не заблокировано.
  */
 export async function reportReviewFailure(
-  params: ReviewParams,
+  params: { owner: string; repo: string; prNumber: number; installationId: number; headSha?: string },
   prId: number,
   kind: "commit" | "comment",
 ): Promise<void> {
-  recordAnalysis({ prId, headSha: params.headSha, trigger: kind, outcome: "error" });
+  recordAnalysis({
+    prId,
+    headSha: params.headSha ?? getPullRequestHead(prId) ?? "unknown",
+    trigger: kind,
+    outcome: "error",
+  });
   if (kind === "commit") {
     await postIssueComment({
       owner: params.owner,
@@ -691,7 +754,9 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
     return; // сверять нечего — модель не вызываем
   }
 
-  const outcome = await runReview(reviewParams, prId, "comment");
+  const outcome = await runReview(reviewParams, prId, "comment", {
+    fixesFinal: () => reviewParams.state === "merged",
+  });
   const body = renderReplyComment(outcome.statusChanges, outcome.kept);
   if (!body) {
     return; // модель ничего не сказала о прошлых находках — не шумим в PR

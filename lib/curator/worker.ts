@@ -16,6 +16,7 @@ import {
 } from "@/lib/curator/review";
 import {
   finishJob,
+  getProject,
   listAllProjects,
   listDueJobs,
   listOverdueJobs,
@@ -23,6 +24,7 @@ import {
   markJobRunning,
   recentAnalysesOfProject,
   requeueRunningJobs,
+  requeueStrayRunningJobs,
   rescheduleJob,
   type ReviewJob,
 } from "@/lib/curator/store";
@@ -44,7 +46,7 @@ export interface WorkerDeps {
 
 const realDeps: WorkerDeps = {
   runCommit: (job) =>
-    executeCommitJob(job.payload as ReviewParams, job.prId, job.checkRunId),
+    executeCommitJob(job.payload as ReviewParams, job.prId, job.id),
   runComment: (job) => executeCommentJob(job.payload as CommentReviewParams),
   concludeUnreviewed: (job, summary) =>
     concludeCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
@@ -55,6 +57,8 @@ const realDeps: WorkerDeps = {
 const NOT_REVIEWED_DEADLINE =
   "Не разобрано: разбор не успел выполниться вовремя. Слияние разрешено, разбор будет " +
   "выполнен позже.";
+const NOT_REVIEWED_FAILED =
+  "Не разобрано: разбор не удался. Руководитель может перезапустить его из панели.";
 const NOT_REVIEWED_LIMIT =
   "Не разобрано: исчерпан дневной лимит разборов проекта. Слияние разрешено, разбор будет " +
   "выполнен, когда лимит обновится.";
@@ -71,32 +75,43 @@ export async function concludeOverdue(deps: WorkerDeps = realDeps): Promise<void
   }
 }
 
-/** Run one job: daily limit, execution, retries with backoff, final failure. */
+/** Conclude the job's check if it is still open; failures are logged, not thrown. */
+async function concludeIfOpen(job: ReviewJob, summary: string, deps: WorkerDeps): Promise<boolean> {
+  if (job.kind !== "commit" || job.checkRunId === null || job.checkConcluded) return false;
+  try {
+    await deps.concludeUnreviewed(job, summary);
+    return true;
+  } catch (error) {
+    console.error(`[queue] failed to conclude check of job ${job.id}:`, error);
+    return false;
+  }
+}
+
+/** Run one job: pause, daily limit, execution, retries with backoff, final failure. */
 export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promise<void> {
   const settings = queueSettings();
 
+  if (getProject(job.projectId)?.status !== "active") {
+    await concludeIfOpen(job, "Проект на паузе — разбор не выполняется.", deps);
+    finishJob(job.id, "superseded", "project paused");
+    return;
+  }
+
   const recent = recentAnalysesOfProject(job.projectId);
   if (recent.count >= settings.dailyLimit) {
-    if (job.kind === "commit" && job.checkRunId !== null && !job.checkConcluded) {
-      await deps.concludeUnreviewed(job, NOT_REVIEWED_LIMIT);
-      markCheckConcluded(job.id, "limit");
-    }
+    if (await concludeIfOpen(job, NOT_REVIEWED_LIMIT, deps)) markCheckConcluded(job.id, "limit");
     rescheduleJob(job.id, { at: recent.freeAt ?? undefined, delayMs: 60 * 60_000 });
     return;
   }
 
-  markJobRunning(job.id);
+  if (!markJobRunning(job.id)) return; // replaced meanwhile
   try {
     if (job.kind === "commit") await deps.runCommit(job);
     else await deps.runComment(job);
     finishJob(job.id, "done");
   } catch (error) {
     if (error instanceof StaleReviewError) {
-      if (job.checkRunId !== null && !job.checkConcluded) {
-        await deps
-          .concludeUnreviewed(job, "Заменён новым коммитом — разбирается последний.")
-          .catch(() => {});
-      }
+      await concludeIfOpen(job, "Заменён новым коммитом — разбирается последний.", deps);
       finishJob(job.id, "superseded");
       return;
     }
@@ -105,6 +120,9 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     if (age >= settings.retryWindowMs) {
       console.error(`[queue] job ${job.id} failed for good:`, error);
       finishJob(job.id, "failed", message);
+      if (await concludeIfOpen(job, NOT_REVIEWED_FAILED, deps)) {
+        markCheckConcluded(job.id, "deadline");
+      }
       await deps.reportFailure(job).catch((reportError) => {
         console.error(`[queue] failed to report failure of job ${job.id}:`, reportError);
       });
@@ -113,7 +131,10 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     // Backoff: 1, 2, 4 … minutes, at most 30.
     const attempts = job.attempts + 1;
     const delayMs = Math.min(2 ** (attempts - 1), 30) * 60_000;
-    console.warn(`[queue] job ${job.id} attempt ${attempts} failed, retry in ${delayMs / 60_000} min:`, message);
+    console.warn(
+      `[queue] job ${job.id} attempt ${attempts} failed, retry in ${delayMs / 60_000} min:`,
+      message,
+    );
     rescheduleJob(job.id, { delayMs }, message);
   }
 }
@@ -149,7 +170,7 @@ async function syncOpenPullRequests(): Promise<void> {
             author: pr.user?.login ?? null,
             title: pr.title,
           },
-          { delay: false, skipIfTried: true },
+          "sync",
         );
       }
     } catch (error) {
@@ -163,6 +184,9 @@ const inFlight = new Set<number>();
 let lastSweep = 0;
 
 async function tick(): Promise<void> {
+  // A job left "running" by a crashed run would block its project until a restart.
+  const stray = requeueStrayRunningJobs(inFlight);
+  if (stray > 0) console.warn(`[queue] ${stray} stray running job(s) back in the queue`);
   await concludeOverdue();
 
   const settings = queueSettings();

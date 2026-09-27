@@ -61,7 +61,8 @@ export type ProjectStatus = "active" | "paused";
 
 export type PullRequestState = "open" | "merged" | "closed";
 
-export type AnalysisOutcome = "ok" | "parse_error" | "error";
+/** `stale`: the model answered, but the PR had moved on (new commit, closed) — not applied. */
+export type AnalysisOutcome = "ok" | "parse_error" | "error" | "stale";
 
 /** A project row with the aggregates the overview table shows. */
 export interface ProjectSummary {
@@ -780,6 +781,8 @@ export interface ReconcileOptions {
   allowedPriorIds: ReadonlySet<number>;
   /** False for a reconciliation after a comment: it only changes statuses. */
   allowNew: boolean;
+  /** The PR is already merged: a fix is final (`closed`), not waiting for a merge. */
+  fixesFinal?: boolean;
 }
 
 /**
@@ -820,7 +823,7 @@ export function applyReconciliation(
        impact = COALESCE(@impact, impact),
        recommendation = COALESCE(@recommendation, recommendation),
        status = @status,
-       resolved_by_pr_id = CASE WHEN @status = 'pending' THEN @prId ELSE NULL END,
+       resolved_by_pr_id = CASE WHEN @status IN ('pending', 'closed') THEN @prId ELSE NULL END,
        last_analysis_id = @analysisId, updated_at = datetime('now')
      WHERE id = @id`,
   );
@@ -874,7 +877,8 @@ export function applyReconciliation(
       }
 
       const findingId = f.priorId as number;
-      const status: FindingStatus = f.status === "closed" ? "pending" : f.status;
+      const status: FindingStatus =
+        f.status === "closed" ? (options.fixesFinal ? "closed" : "pending") : f.status;
       updateFinding.run({ id: findingId, prId, analysisId, status, ...text });
       if (prior.status !== status) {
         insertHistory.run({
@@ -1028,50 +1032,128 @@ function seconds(ms: number): string {
 }
 
 /**
- * Queue a commit review. A queued (not yet running) commit job of the same PR is replaced:
- * only the latest commit is reviewed. Returns the check-runs of replaced jobs that are
- * still open, so the caller can conclude them.
+ * Queue a commit review; synchronous, so nothing can interleave between the checks and the
+ * insert. Not queued when this head is already active, or when the PR's recorded head is
+ * another commit (a newer one arrived). Queued jobs of other heads of the PR are replaced:
+ * only the latest commit is reviewed; their open check-runs are returned to be concluded.
+ * The job's own check-run is attached afterwards (setJobCheckRun).
  */
 export function enqueueCommitJob(params: {
   prId: number;
   headSha: string;
-  checkRunId: number | null;
   payload: unknown;
   delayMs: number;
   deadlineMs: number;
-}): { supersededCheckRunIds: number[] } {
+}): { jobId: number | null; supersededCheckRunIds: number[] } {
   const db = getDb();
+  if (hasJobForHead(params.prId, params.headSha, true)) {
+    return { jobId: null, supersededCheckRunIds: [] };
+  }
+  if (getPullRequestHead(params.prId) !== params.headSha) {
+    return { jobId: null, supersededCheckRunIds: [] };
+  }
   db.exec("BEGIN");
   try {
     const replaced = db
       .prepare(
         `SELECT check_run_id AS checkRunId, check_concluded AS concluded FROM review_jobs
-         WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
+         WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'
+           AND head_sha != @headSha`,
       )
-      .all({ prId: params.prId }) as Array<{ checkRunId: number | null; concluded: number }>;
+      .all({ prId: params.prId, headSha: params.headSha }) as Array<{
+      checkRunId: number | null;
+      concluded: number;
+    }>;
     db.prepare(
       `UPDATE review_jobs SET status = 'superseded', updated_at = datetime('now')
-       WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
-    ).run({ prId: params.prId });
-    db.prepare(
-      `INSERT INTO review_jobs
-         (pull_request_id, kind, head_sha, check_run_id, payload, run_after, deadline_at)
-       VALUES (@prId, 'commit', @headSha, @checkRunId, @payload,
-               datetime('now', @delay), datetime('now', @deadline))`,
-    ).run({
-      prId: params.prId,
-      headSha: params.headSha,
-      checkRunId: params.checkRunId,
-      payload: JSON.stringify(params.payload),
-      delay: seconds(params.delayMs),
-      deadline: seconds(params.deadlineMs),
-    });
+       WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'
+         AND head_sha != @headSha`,
+    ).run({ prId: params.prId, headSha: params.headSha });
+    const row = db
+      .prepare(
+        `INSERT INTO review_jobs
+           (pull_request_id, kind, head_sha, payload, run_after, deadline_at)
+         VALUES (@prId, 'commit', @headSha, @payload,
+                 datetime('now', @delay), datetime('now', @deadline))
+         RETURNING id`,
+      )
+      .get({
+        prId: params.prId,
+        headSha: params.headSha,
+        payload: JSON.stringify(params.payload),
+        delay: seconds(params.delayMs),
+        deadline: seconds(params.deadlineMs),
+      }) as { id: number };
     db.exec("COMMIT");
     return {
+      jobId: row.id,
       supersededCheckRunIds: replaced
         .filter((r) => r.checkRunId !== null && r.concluded === 0)
         .map((r) => r.checkRunId as number),
     };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** Attach the required check-run created for a job; returns the job's status by then. */
+export function setJobCheckRun(jobId: number, checkRunId: number): JobStatus | null {
+  const db = getDb();
+  db.prepare("UPDATE review_jobs SET check_run_id = @checkRunId WHERE id = @jobId").run({
+    jobId,
+    checkRunId,
+  });
+  const row = db.prepare("SELECT status FROM review_jobs WHERE id = @jobId").get({ jobId }) as
+    | { status: JobStatus }
+    | undefined;
+  return row?.status ?? null;
+}
+
+export function getJobCheckRun(jobId: number): number | null {
+  const row = getDb()
+    .prepare("SELECT check_run_id AS id FROM review_jobs WHERE id = @jobId")
+    .get({ jobId }) as { id: number | null } | undefined;
+  return row?.id ?? null;
+}
+
+/** A PR was closed without merge: its queued commit jobs are dropped; returns open checks. */
+export function supersedeCommitJobs(prId: number): number[] {
+  const db = getDb();
+  const ids = (
+    db
+      .prepare(
+        `SELECT check_run_id AS id FROM review_jobs WHERE pull_request_id = @prId
+           AND kind = 'commit' AND status = 'queued' AND check_concluded = 0
+           AND check_run_id IS NOT NULL`,
+      )
+      .all({ prId }) as Array<{ id: number }>
+  ).map((r) => r.id);
+  db.prepare(
+    `UPDATE review_jobs SET status = 'superseded', updated_at = datetime('now')
+     WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
+  ).run({ prId });
+  return ids;
+}
+
+/**
+ * Save a student reply and queue its reconciliation in one transaction, so a reply is
+ * never stored without its job. False when the comment was already saved.
+ */
+export function saveReplyAndEnqueue(params: {
+  prId: number;
+  commentId: number;
+  login: string | null;
+  body: string;
+  payload: unknown;
+}): boolean {
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    const isNew = saveStudentResponse(params);
+    if (isNew) enqueueCommentJob({ prId: params.prId, payload: params.payload });
+    db.exec("COMMIT");
+    return isNew;
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -1165,22 +1247,25 @@ export function listOverdueJobs(): ReviewJob[] {
     getDb()
       .prepare(
         `${JOB_SELECT}
-         WHERE j.kind = 'commit' AND j.status IN ${ACTIVE_JOB} AND j.check_concluded = 0
+         WHERE j.kind = 'commit' AND j.status = 'queued' AND j.check_concluded = 0
            AND j.check_run_id IS NOT NULL AND j.deadline_at <= datetime('now')`,
       )
       .all() as unknown as RawJob[]
   ).map(toJob);
 }
 
-export function markJobRunning(id: number): void {
-  getDb()
+/** Claim a queued job; false if it is no longer queued (replaced meanwhile). */
+export function markJobRunning(id: number): boolean {
+  const res = getDb()
     .prepare(
       `UPDATE review_jobs SET status = 'running', attempts = attempts + 1,
-         updated_at = datetime('now') WHERE id = @id`,
+         updated_at = datetime('now') WHERE id = @id AND status = 'queued'`,
     )
     .run({ id });
+  return res.changes > 0;
 }
 
+/** Finish an active job; a job already replaced or finished is left as it is. */
 export function finishJob(
   id: number,
   status: "done" | "failed" | "superseded",
@@ -1189,21 +1274,41 @@ export function finishJob(
   getDb()
     .prepare(
       `UPDATE review_jobs SET status = @status, last_error = @error, updated_at = datetime('now')
-       WHERE id = @id`,
+       WHERE id = @id AND status IN ${ACTIVE_JOB}`,
     )
     .run({ id, status, error: error ?? null });
 }
 
-/** Put a job back in the queue to run after `delayMs` (or at `at`, SQLite UTC time). */
-export function rescheduleJob(id: number, when: { delayMs?: number; at?: string }, error?: string): void {
+/** Put an active job back in the queue to run after `delayMs` (or at `at`, SQLite UTC time). */
+export function rescheduleJob(
+  id: number,
+  when: { delayMs?: number; at?: string },
+  error?: string,
+): void {
   getDb()
     .prepare(
       `UPDATE review_jobs SET status = 'queued',
          run_after = COALESCE(@at, datetime('now', @delay)),
          last_error = COALESCE(@error, last_error), updated_at = datetime('now')
-       WHERE id = @id`,
+       WHERE id = @id AND status IN ${ACTIVE_JOB}`,
     )
     .run({ id, at: when.at ?? null, delay: seconds(when.delayMs ?? 0), error: error ?? null });
+}
+
+/** Jobs marked running in the database that this process is not running (lost). */
+export function requeueStrayRunningJobs(runningHere: ReadonlySet<number>): number {
+  const db = getDb();
+  const ids = (
+    db.prepare("SELECT id FROM review_jobs WHERE status = 'running'").all() as Array<{ id: number }>
+  )
+    .map((r) => r.id)
+    .filter((id) => !runningHere.has(id));
+  for (const id of ids) {
+    db.prepare(
+      "UPDATE review_jobs SET status = 'queued', updated_at = datetime('now') WHERE id = @id",
+    ).run({ id });
+  }
+  return ids.length;
 }
 
 /** The job's required check was concluded without a review ("deadline" or "limit"). */
@@ -1255,6 +1360,7 @@ export function listUnreviewedPrs(projectId: number): UnreviewedPr[] {
       `SELECT pr.id AS prId, pr.number, j.status, j.note
        FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
        WHERE pr.project_id = @projectId AND j.kind = 'commit'
+         AND COALESCE(pr.state, 'open') = 'open'
          AND j.id = (SELECT MAX(id) FROM review_jobs
                      WHERE pull_request_id = pr.id AND kind = 'commit' AND status != 'superseded')
          AND ((j.status IN ${ACTIVE_JOB} AND j.check_concluded = 1) OR j.status = 'failed')
