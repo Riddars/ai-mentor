@@ -8,8 +8,10 @@ import {
   isSupervisorOf,
   loadStudentResponses,
 } from "@/lib/curator/store";
-import { categoryLabel, findingStatusLabel, fullDate, prStateLabel } from "@/lib/format";
+import type { FindingLocation } from "@/lib/curator/finding";
+import { areaLabel, findingStatusLabel, fullDate, locationText, prStateLabel } from "@/lib/format";
 import { AppHeader, PageShell } from "@/components/AppHeader";
+import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Badge, SeverityBadge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Avatar } from "@/components/ui/Avatar";
@@ -33,17 +35,28 @@ export default async function FindingPage({
   }
 
   const project = getProject(projectId);
+  if (!project) notFound();
+  const repoUrl = `https://github.com/${project.owner}/${project.repo}`;
   const history = getFindingHistory(finding.id);
+  // A finding raised in one PR may be fixed or dismissed by a later one.
+  const lastChange = history.at(-1);
+  const resolvedElsewhere =
+    (finding.status === "closed" || finding.status === "dismissed") &&
+    lastChange?.analysisId &&
+    lastChange.prNumber !== null &&
+    lastChange.prNumber !== finding.prNumber
+      ? { analysisId: lastChange.analysisId, prNumber: lastChange.prNumber }
+      : null;
   // Student replies are recorded per pull request, not per finding.
   const responses = loadStudentResponses(finding.pullRequestId);
-  // Same tones as the project page: closed = green, dismissed = neutral (a human
-  // still checks it), reopened = red.
+  // Same tones as the project page: closed = green, dismissed = amber (a human
+  // still checks the model's decision), reopened = red.
   const statusTone =
     finding.status === "closed"
       ? "green"
       : finding.status === "reopened"
         ? "red"
-        : finding.status === "pending"
+        : finding.status === "dismissed" || finding.status === "pending"
           ? "amber"
           : "neutral";
 
@@ -51,17 +64,18 @@ export default async function FindingPage({
     <>
       <AppHeader viewer={viewer} />
       <PageShell>
-        <Link
-          href={`/projects/${projectId}`}
-          className="text-xs text-muted-foreground hover:text-foreground"
-        >
-          ← {project?.name ?? project?.repo ?? "К проекту"}
-        </Link>
+        <Breadcrumbs
+          items={[
+            { label: "Проекты", href: "/" },
+            { label: project.name ?? project.repo, href: `/projects/${projectId}` },
+            { label: "Замечание" },
+          ]}
+        />
 
         <div className="mt-2 mb-6">
           <div className="flex flex-wrap items-center gap-2">
             <SeverityBadge severity={finding.severity} />
-            <Badge tone="primary">{categoryLabel(finding.category)}</Badge>
+            <Badge tone="primary">{areaLabel(finding.area)}</Badge>
             <Badge tone={statusTone}>{findingStatusLabel(finding.status)}</Badge>
           </div>
           <h1 className="mt-3 text-2xl font-semibold tracking-tight">{finding.title}</h1>
@@ -69,7 +83,7 @@ export default async function FindingPage({
             {finding.prNumber ? (
               <>
                 <a
-                  href={`https://github.com/${project?.owner}/${project?.repo}/pull/${finding.prNumber}`}
+                  href={`${repoUrl}/pull/${finding.prNumber}`}
                   target="_blank"
                   rel="noreferrer"
                   className="hover:underline"
@@ -81,32 +95,58 @@ export default async function FindingPage({
               </>
             ) : null}
             обнаружено {fullDate(finding.createdAt)}
+            {resolvedElsewhere && (
+              <>
+                {" · "}
+                {finding.status === "closed" ? "исправлено" : "снято"} в{" "}
+                <Link
+                  href={`/projects/${projectId}/analyses/${resolvedElsewhere.analysisId}`}
+                  className="hover:underline"
+                >
+                  PR #{resolvedElsewhere.prNumber}
+                </Link>
+              </>
+            )}
           </p>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-3">
           <div className="flex flex-col gap-5 lg:col-span-2">
-            <Field title="Место обнаружения">
-              {finding.file ? (
-                <pre className="overflow-x-auto rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">
-                  <code>
-                    {finding.file}
-                    {finding.lines ? `:${finding.lines}` : ""}
-                  </code>
-                </pre>
-              ) : (
-                <Muted>Не указано.</Muted>
-              )}
-            </Field>
-            <Field title="Подтверждение">
-              <Evidence value={finding.evidence} />
-            </Field>
-            <Field title="Влияние на результаты">
-              <Text value={finding.impact} />
-            </Field>
-            <Field title="Рекомендуемое исправление">
-              <Text value={finding.recommendation} />
-            </Field>
+            {finding.description && (
+              <Field title="Что не так">
+                <Text value={finding.description} />
+              </Field>
+            )}
+            {finding.impact && (
+              <Field title="Почему это важно">
+                <Text value={finding.impact} />
+              </Field>
+            )}
+            {(finding.locations.length > 0 || finding.evidence) && (
+              <Field title="Основания">
+                <div className="flex flex-col gap-2">
+                  {finding.locations.length > 0 && (
+                    <ul className="flex flex-col gap-1 text-sm">
+                      {finding.locations.map((l, i) => (
+                        <li key={i}>
+                          <Location location={l} repoUrl={repoUrl} sha={finding.headSha} />
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {finding.evidence && (
+                    <pre className="overflow-x-auto rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm whitespace-pre-wrap">
+                      <code>{finding.evidence}</code>
+                    </pre>
+                  )}
+                </div>
+              </Field>
+            )}
+            {finding.recommendation && (
+              <Field title="Что сделать">
+                <Text value={finding.recommendation} />
+              </Field>
+            )}
             {responses.length > 0 && (
               <Field title="Ответы студента в pull request">
                 <ul className="flex flex-col gap-4">
@@ -125,12 +165,12 @@ export default async function FindingPage({
             )}
           </div>
 
-          <Card className="h-fit shadow-card">
-            <CardHeader>
-              <CardTitle>История статуса</CardTitle>
-            </CardHeader>
-            <CardBody>
-              {history.length > 0 ? (
+          {history.length > 0 && (
+            <Card className="h-fit shadow-card">
+              <CardHeader>
+                <CardTitle>История статуса</CardTitle>
+              </CardHeader>
+              <CardBody>
                 <ol className="flex flex-col gap-4">
                   {history.map((h, i) => (
                     <li key={i} className="relative pl-5">
@@ -140,24 +180,64 @@ export default async function FindingPage({
                       {i < history.length - 1 && (
                         <span className="absolute top-4 left-1.5 h-full w-px bg-border" />
                       )}
-                      <p className="text-sm font-medium">
-                        {h.oldStatus
-                          ? `${findingStatusLabel(h.oldStatus)} → ${findingStatusLabel(h.newStatus)}`
-                          : findingStatusLabel(h.newStatus)}
+                      <p className="text-sm font-medium">{findingStatusLabel(h.newStatus)}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {h.analysisId && h.prNumber ? (
+                          <>
+                            <Link
+                              href={`/projects/${projectId}/analyses/${h.analysisId}`}
+                              className="hover:text-foreground hover:underline"
+                            >
+                              PR #{h.prNumber}
+                            </Link>
+                            {" · "}
+                          </>
+                        ) : null}
+                        {fullDate(h.createdAt)}
                       </p>
-                      <p className="text-xs text-muted-foreground">{fullDate(h.createdAt)}</p>
                       {h.reason && <p className="mt-1 text-xs">{h.reason}</p>}
                     </li>
                   ))}
                 </ol>
-              ) : (
-                <Muted>Изменений статуса не было.</Muted>
-              )}
-            </CardBody>
-          </Card>
+              </CardBody>
+            </Card>
+          )}
         </div>
       </PageShell>
     </>
+  );
+}
+
+/** "42-58" → "#L42-L58"; anything else has no line anchor. */
+function lineAnchor(detail: string | null | undefined): string {
+  const m = detail?.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
+  if (!m) return "";
+  return m[2] ? `#L${m[1]}-L${m[2]}` : `#L${m[1]}`;
+}
+
+function Location({
+  location,
+  repoUrl,
+  sha,
+}: {
+  location: FindingLocation;
+  repoUrl: string;
+  sha: string | null;
+}) {
+  const text = locationText(location);
+  if (location.kind === "other") return <span>{text}</span>;
+  const code = <code className="rounded bg-muted px-1.5 py-0.5 text-[0.8rem]">{text}</code>;
+  if (location.kind === "data" || !sha) return code;
+  const anchor = location.kind === "file" ? lineAnchor(location.detail) : "";
+  return (
+    <a
+      href={`${repoUrl}/blob/${sha}/${location.target}${anchor}`}
+      target="_blank"
+      rel="noreferrer"
+      className="hover:underline"
+    >
+      {code}
+    </a>
   );
 }
 
@@ -172,20 +252,6 @@ function Field({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function Text({ value }: { value: string | null }) {
-  if (!value) return <Muted>Не указано.</Muted>;
+function Text({ value }: { value: string }) {
   return <p className="text-sm leading-relaxed whitespace-pre-wrap">{value}</p>;
-}
-
-function Evidence({ value }: { value: string | null }) {
-  if (!value) return <Muted>Не указано.</Muted>;
-  return (
-    <pre className="overflow-x-auto rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm whitespace-pre-wrap">
-      <code>{value}</code>
-    </pre>
-  );
-}
-
-function Muted({ children }: { children: React.ReactNode }) {
-  return <p className="text-sm text-muted-foreground">{children}</p>;
 }

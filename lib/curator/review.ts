@@ -4,6 +4,15 @@ import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
 import { chat } from "@/lib/llm/chat";
 import {
+  FINDING_AREAS,
+  LOCATION_KINDS,
+  type FindingArea,
+  type FindingLocation,
+  type LocationKind,
+  type Severity,
+} from "@/lib/curator/finding";
+import { areaLabel, locationText, severityLabel } from "@/lib/format";
+import {
   applyReconciliation,
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
@@ -11,8 +20,10 @@ import {
   loadStudentResponses,
   recordAnalysis,
   saveStudentResponse,
+  setAnalysisComment,
   upsertParticipant,
   upsertPullRequest,
+  type AnalysisMaterials,
   type PriorFinding,
   type PullRequestState,
   type ReconcileResult,
@@ -50,27 +61,57 @@ interface PrFile {
 
 const SYSTEM_PROMPT = `Ты — ИИ-куратор студенческих исследований на стыке химии и машинного обучения.
 Ты разбираешь изменения из pull request в контексте исследовательской задачи проекта и
-ведёшь память находок между проверками одного и того же pull request.
+ведёшь память находок проекта между проверками: находка, поднятая в одном pull request,
+может быть исправлена в следующем.
 
 Ищи существенные методические и содержательные ошибки, способные повлиять на выводы работы:
 утечка данных между обучающей и тестовой выборками, некорректное разделение данных,
 дубликаты в датасете, неподходящая метрика, невоспроизводимость эксперимента, расхождение
 между описанием проекта и фактической реализацией, ошибки в коде, меняющие результат без
-явного сбоя.
+явного сбоя, логические ошибки в рассуждениях и выводах.
 
-Тебе даются: изменения PR, описание исследования, СПИСОК ПРОШЛЫХ НАХОДОК этого PR (с их id
-и статусом) и ОТВЕТЫ СТУДЕНТА. Твоя задача — сверить прошлые находки с текущим состоянием и
-выдать актуальный список.
+Каждой находке назначь ровно одну область (area):
+- "code" — ошибка в коде, меняющая результат без явного сбоя;
+- "data" — качество и обработка данных: дубликаты, пропуски, выбросы, некорректная очистка;
+- "methodology" — схема эксперимента: разбиение, утечка, валидация, метрики, бейзлайны;
+- "reproducibility" — воспроизводимость: сиды, версии, окружение, недостающие шаги;
+- "problem" — постановка задачи: цель, гипотеза или целевая переменная сформулированы
+  неверно или не проверяемо;
+- "reasoning" — научная логика: выводы не следуют из результатов, противоречия,
+  необоснованные допущения;
+- "novelty" — новизна и научный контекст: задача уже решена известными методами, упущены
+  стандартные подходы;
+- "plan" — расхождение между описанием исследования и фактической работой.
+
+Серьёзность (severity):
+- "critical" — может исказить результаты или выводы работы;
+- "important" — снижает надёжность или качество работы, но выводы, вероятно, устоят;
+- "info" — стоит учесть, на выводы не влияет.
+
+Основания (locations) — список мест, на которые опирается находка; их может быть несколько
+(проблема проходит через несколько файлов) или ни одного конкретного места (логическая
+ошибка). Вид места (kind): "file" — файл репозитория (detail — строки), "document" —
+документ или его раздел (например, RESEARCH.md), "data" — набор данных, "other" — иное.
+
+Тебе даются: изменения PR, описание исследования, СПИСОК ОТКРЫТЫХ НАХОДОК ПРОЕКТА (с их id,
+номером PR, где находка поднята, и статусом) и ОТВЕТЫ СТУДЕНТА в этом PR. Твоя задача —
+сверить прошлые находки с текущим состоянием и выдать актуальный список.
 
 Правила разбора:
-- Каждую находку подтверждай конкретным фрагментом кода или данных из изменений. Находку без
-  подтверждения не включай.
+- Каждую находку подтверждай конкретным фрагментом кода, данных или текста описания
+  исследования. Находку без подтверждения не включай.
 - Прошлые находки сверяй по существу, а не по формулировке. Для каждой прошлой находки reши:
   - "open" — проблема всё ещё присутствует и не решена;
   - "closed" — из изменений видно, что она исправлена;
   - "dismissed" — студент дал объяснение, и оно по существу снимает замечание (прими его);
   - "reopened" — была закрыта/снята, но снова появилась.
   В поле prior_id укажи id той прошлой находки, к которой относится статус.
+- Находки этого PR сверяй все. Находки из других PR включай в ответ, только если изменения
+  этого PR или ответ студента их касаются: исправляют ("closed") или объясняют
+  ("dismissed"). Не касаются — не упоминай их: такие находки остаются как есть. Не
+  закрывай находку из другого PR, если исправление не видно в изменениях.
+- Если проблема из прошлой находки встречается и в этом PR, не создавай новую — укажи
+  prior_id прошлой.
 - Новые находки давай с prior_id: null и статусом "open".
 - Не поднимай заново находку, которую студент уже объяснил и ты счёл объяснение принятым,
   если не появилось новых оснований.
@@ -83,11 +124,13 @@ const SYSTEM_PROMPT = `Ты — ИИ-куратор студенческих и�
     {
       "prior_id": <число или null>,
       "status": "open" | "closed" | "dismissed" | "reopened",
-      "category": "краткая категория",
-      "severity": "high" | "medium" | "low",
-      "title": "короткий заголовок находки",
-      "file": "путь к файлу или null",
-      "lines": "строки/диапазон или null",
+      "area": "code" | "data" | "methodology" | "reproducibility" | "problem" | "reasoning" | "novelty" | "plan",
+      "severity": "critical" | "important" | "info",
+      "title": "суть проблемы одной фразой простым языком",
+      "description": "что не так, подробнее (2-4 предложения)",
+      "locations": [
+        { "kind": "file" | "document" | "data" | "other", "target": "путь, название документа или краткое описание", "detail": "строки, раздел или null" }
+      ],
       "evidence": "подтверждающий фрагмент",
       "impact": "чем грозит результатам",
       "recommendation": "как проверить или исправить",
@@ -122,8 +165,9 @@ async function fetchResearchDoc(params: ReviewParams): Promise<string | null> {
   }
 }
 
-function buildChangesText(files: PrFile[]): string {
+function buildChangesText(files: PrFile[]): { text: string; truncated: boolean } {
   let out = "";
+  let truncated = false;
   for (const file of files) {
     const header = `### ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})\n`;
     const body = file.patch
@@ -131,23 +175,27 @@ function buildChangesText(files: PrFile[]): string {
       : "(изменения без текстового diff — бинарный или слишком большой файл)\n";
     if (out.length + header.length + body.length > MAX_PATCH_CHARS) {
       out += "\n_(часть изменений обрезана из-за объёма)_\n";
+      truncated = true;
       break;
     }
     out += header + body + "\n";
   }
-  return out.trim() === "" ? "(нет текстовых изменений)" : out;
+  return { text: out.trim() === "" ? "(нет текстовых изменений)" : out, truncated };
 }
 
-function buildPriorFindingsText(findings: PriorFinding[]): string {
+function buildPriorFindingsText(findings: PriorFinding[], prNumber: number): string {
   if (findings.length === 0) {
-    return "Прошлых находок по этому pull request нет.";
+    return "Открытых находок по проекту нет.";
   }
-  const lines = findings.map(
-    (f) =>
-      `- id=${f.id} [${f.status}] (${f.category ?? "без категории"}, ${f.severity ?? "?"}) ` +
-      `${f.title}${f.file ? ` — ${f.file}${f.lines ? `:${f.lines}` : ""}` : ""}`,
-  );
-  return `Прошлые находки этого pull request:\n${lines.join("\n")}`;
+  const lines = findings.map((f) => {
+    const where = f.locations.length > 0 ? ` — ${f.locations.map(locationText).join("; ")}` : "";
+    const origin = f.prNumber === prNumber ? "этот PR" : `PR #${f.prNumber}`;
+    return (
+      `- id=${f.id} [${f.status}] (${origin}; ${f.area ?? "без области"}, ${f.severity ?? "?"}) ` +
+      `${f.title}${where}`
+    );
+  });
+  return `Открытые находки проекта:\n${lines.join("\n")}`;
 }
 
 function buildResponsesText(responses: StudentResponse[]): string {
@@ -164,7 +212,7 @@ function buildResponsesText(responses: StudentResponse[]): string {
 
 function buildUserPrompt(
   research: string | null,
-  files: PrFile[],
+  changes: string,
   prNumber: number,
   prior: PriorFinding[],
   responses: StudentResponse[],
@@ -174,13 +222,53 @@ function buildUserPrompt(
     : "Описание исследования (RESEARCH.md) в репозитории не найдено.\n\n";
   return (
     researchBlock +
-    `${buildPriorFindingsText(prior)}\n\n` +
+    `${buildPriorFindingsText(prior, prNumber)}\n\n` +
     `${buildResponsesText(responses)}\n\n` +
-    `Изменения в pull request #${prNumber}:\n\n${buildChangesText(files)}`
+    `Изменения в pull request #${prNumber}:\n\n${changes}`
   );
 }
 
 const VALID_STATUSES = new Set(["open", "closed", "dismissed", "reopened", "pending"]);
+
+function str(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+// Older answers used high/medium/low; they map onto the current three levels.
+const SEVERITY_ALIASES: Record<string, Severity> = {
+  critical: "critical",
+  high: "critical",
+  important: "important",
+  medium: "important",
+  info: "info",
+  low: "info",
+};
+
+function parseSeverity(raw: string | null): Severity | null {
+  return raw ? (SEVERITY_ALIASES[raw.toLowerCase()] ?? null) : null;
+}
+
+/** Locations from the answer; a legacy single file/lines pair becomes one file location. */
+function parseLocations(f: Record<string, unknown>): FindingLocation[] {
+  if (!Array.isArray(f.locations)) {
+    const file = str(f.file);
+    return file ? [{ kind: "file", target: file, detail: str(f.lines) }] : [];
+  }
+  const out: FindingLocation[] = [];
+  for (const item of f.locations) {
+    if (typeof item !== "object" || item === null) continue;
+    const loc = item as Record<string, unknown>;
+    const target = str(loc.target);
+    if (!target) continue;
+    const kind = str(loc.kind);
+    out.push({
+      kind: LOCATION_KINDS.includes(kind as LocationKind) ? (kind as LocationKind) : "other",
+      target,
+      detail: str(loc.detail),
+    });
+  }
+  return out;
+}
 
 /** Достать JSON из ответа модели (в т.ч. из ```json-блока) и привести к ReconcileResult. */
 export function parseModelJson(raw: string): ReconcileResult | null {
@@ -226,16 +314,15 @@ export function parseModelJson(raw: string): ReconcileResult | null {
         : "open";
     const priorId =
       typeof f.prior_id === "number" && Number.isInteger(f.prior_id) ? f.prior_id : null;
-    const str = (v: unknown): string | null =>
-      typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+    const area = str(f.area);
     findings.push({
       priorId,
       status,
-      category: str(f.category),
-      severity: str(f.severity),
+      area: FINDING_AREAS.includes(area as FindingArea) ? (area as FindingArea) : null,
+      severity: parseSeverity(str(f.severity)),
       title,
-      file: str(f.file),
-      lines: str(f.lines),
+      description: str(f.description),
+      locations: parseLocations(f),
       evidence: str(f.evidence),
       impact: str(f.impact),
       recommendation: str(f.recommendation),
@@ -247,7 +334,7 @@ export function parseModelJson(raw: string): ReconcileResult | null {
   return { summary, findings };
 }
 
-function renderComment(result: ReconcileResult, changes: StatusChange[]): string {
+export function renderComment(result: ReconcileResult, changes: StatusChange[]): string {
   const open = result.findings.filter(
     (f) => f.status === "open" || f.status === "reopened",
   );
@@ -262,17 +349,20 @@ function renderComment(result: ReconcileResult, changes: StatusChange[]): string
   } else {
     parts.push(`**Существенные находки (${open.length}):**`, "");
     for (const f of open) {
-      const loc = f.file ? ` — \`${f.file}${f.lines ? `:${f.lines}` : ""}\`` : "";
       const badge = f.status === "reopened" ? " (открыта повторно)" : "";
       parts.push(`### ${f.title}${badge}`);
-      parts.push(
-        `_${f.category ?? "без категории"} · серьёзность: ${f.severity ?? "?"}_${loc}`,
-        "",
-      );
-      if (f.impact) parts.push(`**Влияние:** ${f.impact}`);
-      if (f.evidence) parts.push(`**Подтверждение:** ${f.evidence}`);
-      if (f.recommendation) parts.push(`**Что сделать:** ${f.recommendation}`);
-      parts.push("");
+      parts.push(`_${areaLabel(f.area ?? null)} · ${severityLabel(f.severity ?? null)}_`, "");
+      if (f.description) parts.push(f.description, "");
+      if (f.impact) parts.push(`**Почему это важно:** ${f.impact}`, "");
+      if (f.locations && f.locations.length > 0) {
+        parts.push("**Основания:**");
+        for (const l of f.locations) {
+          parts.push(`- ${l.kind === "other" ? locationText(l) : `\`${locationText(l)}\``}`);
+        }
+        parts.push("");
+      }
+      if (f.evidence) parts.push(`**Подтверждение:** ${f.evidence}`, "");
+      if (f.recommendation) parts.push(`**Что сделать:** ${f.recommendation}`, "");
     }
   }
 
@@ -292,7 +382,19 @@ function renderComment(result: ReconcileResult, changes: StatusChange[]): string
   return parts.join("\n");
 }
 
+/** Short reply after a student's comment; null when nothing was closed or dismissed. */
+export function renderReplyComment(changes: StatusChange[]): string | null {
+  const resolved = changes.filter((c) => c.newStatus === "closed" || c.newStatus === "dismissed");
+  if (resolved.length === 0) return null;
+  const lines = resolved.map((c) => {
+    const label = c.newStatus === "closed" ? "исправлено" : "снято по объяснению";
+    return `- ${c.title} — ${label}${c.reason ? ` (${c.reason})` : ""}`;
+  });
+  return `${COMMENT_MARKER}\n\nУчёл ответ. Обновления по находкам:\n${lines.join("\n")}`;
+}
+
 interface ReviewOutcome {
+  analysisId: number;
   comment: string;
   outcome: "ok" | "parse_error";
   summary: string;
@@ -314,12 +416,20 @@ async function runReview(
   ]);
   const prior = loadOpenFindings(prId);
   const responses = loadStudentResponses(prId);
+  const changes = buildChangesText(files);
+  const materials: AnalysisMaterials = {
+    files: files.map((f) => f.filename),
+    researchDoc: research !== null,
+    truncated: changes.truncated,
+    priorFindings: prior.length,
+    studentResponses: responses.length,
+  };
 
   const answer = await chat([
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "user",
-      content: buildUserPrompt(research, files, params.prNumber, prior, responses),
+      content: buildUserPrompt(research, changes.text, params.prNumber, prior, responses),
     },
   ]);
 
@@ -329,8 +439,17 @@ async function runReview(
 
   if (!parsed) {
     // Не смогли разобрать JSON — не портим память, публикуем сырой текст.
-    recordAnalysis({ prId, headSha: params.headSha, trigger, outcome: "parse_error", provider, model });
+    const analysisId = recordAnalysis({
+      prId,
+      headSha: params.headSha,
+      trigger,
+      outcome: "parse_error",
+      provider,
+      model,
+      materials,
+    });
     return {
+      analysisId,
       comment: `${COMMENT_MARKER}\n\n${answer}`,
       outcome: "parse_error",
       summary: "",
@@ -346,10 +465,12 @@ async function runReview(
     summary: parsed.summary || null,
     provider,
     model,
+    materials,
   });
   const { statusChanges } = applyReconciliation(prId, analysisId, parsed);
 
   return {
+    analysisId,
     comment: renderComment(parsed, statusChanges),
     outcome: "ok",
     summary: parsed.summary,
@@ -406,7 +527,7 @@ async function completeReview(
   checkRunId: number,
 ): Promise<void> {
   try {
-    const { comment } = await runReview(params, prId, "commit");
+    const { analysisId, comment } = await runReview(params, prId, "commit");
     await postIssueComment({
       owner: params.owner,
       repo: params.repo,
@@ -414,6 +535,7 @@ async function completeReview(
       body: comment,
       installationId: params.installationId,
     });
+    setAnalysisComment(analysisId, comment);
     await concludeCheckRun({
       owner: params.owner,
       repo: params.repo,
@@ -506,30 +628,25 @@ export async function handleStudentComment(params: CommentReviewParams): Promise
     return; // этот комментарий уже обработан
   }
 
+  let analysisId: number;
   let statusChanges: StatusChange[];
   try {
-    ({ statusChanges } = await runReview(reviewParams, prId, "comment"));
+    ({ analysisId, statusChanges } = await runReview(reviewParams, prId, "comment"));
   } catch (error) {
     // Сбой должен быть виден в памяти (и в панели), а не только в логе.
     recordAnalysis({ prId, headSha: pr.head.sha, trigger: "comment", outcome: "error" });
     throw error;
   }
-  const resolved = statusChanges.filter(
-    (c) => c.newStatus === "closed" || c.newStatus === "dismissed",
-  );
-  if (resolved.length === 0) {
+  const body = renderReplyComment(statusChanges);
+  if (!body) {
     return; // ничего не сняли — не шумим в PR
   }
-
-  const lines = resolved.map((c) => {
-    const label = c.newStatus === "closed" ? "исправлено" : "снято по объяснению";
-    return `- ${c.title} — ${label}${c.reason ? ` (${c.reason})` : ""}`;
-  });
   await postIssueComment({
     owner: params.owner,
     repo: params.repo,
     issueNumber: params.prNumber,
-    body: `${COMMENT_MARKER}\n\nУчёл ответ. Обновления по находкам:\n${lines.join("\n")}`,
+    body,
     installationId: params.installationId,
   });
+  setAnalysisComment(analysisId, body);
 }

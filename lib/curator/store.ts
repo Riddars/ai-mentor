@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import type { FindingArea, FindingLocation, Severity } from "@/lib/curator/finding";
 
 // Репозиторий памяти проекта (этап 3). Тонкие функции над getDb(); никакой SQL за
 // пределами этого файла и lib/db/index.ts. Работает синхронно — node:sqlite
@@ -6,14 +7,25 @@ import { getDb } from "@/lib/db";
 
 export type FindingStatus = "open" | "closed" | "dismissed" | "reopened" | "pending";
 
+/** What the model was given for one analysis. */
+export interface AnalysisMaterials {
+  files: string[];
+  researchDoc: boolean;
+  truncated: boolean;
+  /** Open findings of the project given to the model for reconciliation. */
+  priorFindings: number;
+  studentResponses: number;
+}
+
 /** Находка в том виде, в каком её отдаём модели для сверки (без объёмных текстов). */
 export interface PriorFinding {
   id: number;
-  category: string | null;
-  severity: string | null;
+  /** Pull request the finding was raised in. */
+  prNumber: number;
+  area: FindingArea | null;
+  severity: Severity | null;
   title: string;
-  file: string | null;
-  lines: string | null;
+  locations: FindingLocation[];
   status: FindingStatus;
 }
 
@@ -28,11 +40,11 @@ export interface StudentResponse {
 export interface ReconciledFinding {
   priorId: number | null;
   status: FindingStatus;
-  category?: string | null;
-  severity?: string | null;
+  area?: FindingArea | null;
+  severity?: Severity | null;
   title: string;
-  file?: string | null;
-  lines?: string | null;
+  description?: string | null;
+  locations?: FindingLocation[];
   evidence?: string | null;
   impact?: string | null;
   recommendation?: string | null;
@@ -87,11 +99,11 @@ export interface FindingRow {
   pullRequestId: number;
   prNumber: number | null;
   prState: PullRequestState | null;
-  category: string | null;
-  severity: string | null;
+  area: FindingArea | null;
+  severity: Severity | null;
   title: string;
-  file: string | null;
-  lines: string | null;
+  description: string | null;
+  locations: FindingLocation[];
   evidence: string | null;
   impact: string | null;
   recommendation: string | null;
@@ -100,6 +112,8 @@ export interface FindingRow {
   lastReason: string | null;
   /** When the finding was last reopened (from history), if ever. */
   reopenedAt: string | null;
+  /** Commit of the latest analysis that touched the finding — locations point there. */
+  headSha: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -114,27 +128,33 @@ export interface AnalysisRow {
   createdAt: string;
 }
 
-export interface PullRequestRow {
-  id: number;
-  number: number;
-  title: string | null;
-  author: string | null;
-  state: PullRequestState | null;
-  updatedAt: string;
-  lastAnalysisAt: string | null;
-  lastAnalysisOutcome: AnalysisOutcome | null;
-  lastAnalysisTrigger: string | null;
-  /** Open PR whose latest commit analysis failed: the check-run stays action_required. */
-  blocked: boolean;
-  openFindings: number;
-  totalFindings: number;
-  responses: number;
+export interface AnalysisDetail extends AnalysisRow {
+  projectId: number;
+  provider: string | null;
+  model: string | null;
+  /** The comment published to the pull request, if any. */
+  comment: string | null;
+  materials: AnalysisMaterials | null;
+}
+
+/** A finding status change made by one analysis (a new finding has no old status). */
+export interface AnalysisChange {
+  findingId: number;
+  /** Pull request the finding was raised in. */
+  prNumber: number;
+  title: string;
+  oldStatus: FindingStatus | null;
+  newStatus: FindingStatus;
+  reason: string | null;
 }
 
 export interface StatusHistoryRow {
   oldStatus: FindingStatus | null;
   newStatus: FindingStatus;
   reason: string | null;
+  /** Analysis that made the change and the PR it ran on (may differ from the finding's PR). */
+  analysisId: number | null;
+  prNumber: number | null;
   createdAt: string;
 }
 
@@ -214,8 +234,8 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       .prepare(
         `SELECT
            COUNT(*) AS openFindings,
-           SUM(CASE WHEN LOWER(f.severity) IN ('high', 'critical') THEN 1 ELSE 0 END) AS serious,
-           MIN(CASE WHEN LOWER(f.severity) IN ('high', 'critical') THEN f.created_at END) AS oldestSerious
+           SUM(CASE WHEN f.severity = 'critical' THEN 1 ELSE 0 END) AS serious,
+           MIN(CASE WHEN f.severity = 'critical' THEN f.created_at END) AS oldestSerious
          FROM findings f
          JOIN pull_requests pr ON pr.id = f.pull_request_id
          WHERE pr.project_id = @id
@@ -227,18 +247,6 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       serious: number | null;
       oldestSerious: string | null;
     };
-
-    const activity = db
-      .prepare(
-        `SELECT MAX(ts) AS lastActivityAt FROM (
-           SELECT MAX(updated_at) AS ts FROM pull_requests WHERE project_id = @id
-           UNION ALL
-           SELECT MAX(a.created_at) AS ts FROM analyses a
-             JOIN pull_requests pr ON pr.id = a.pull_request_id
-             WHERE pr.project_id = @id
-         )`,
-      )
-      .get({ id: p.id }) as { lastActivityAt: string | null };
 
     const last = db
       .prepare(
@@ -267,7 +275,7 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       openFindings: counts.openFindings,
       seriousOpenFindings: counts.serious ?? 0,
       oldestSeriousOpenAt: counts.oldestSerious,
-      lastActivityAt: activity.lastActivityAt,
+      lastActivityAt: getProjectLastActivity(p.id),
       lastAnalysisAt: last?.at ?? null,
       lastAnalysisOutcome: last?.outcome ?? null,
       lastAnalysisTrigger: last?.trigger ?? null,
@@ -276,27 +284,20 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
   });
 }
 
-/**
- * Analysis timestamps of the last `weeks` weeks for every project in scope, in one
- * query. The caller buckets them per project into a weekly series.
- */
-export function recentAnalysisTimestampsByProject(
-  weeks: number,
-  supervisorId?: string,
-): Array<{ projectId: number; ts: string }> {
-  const s = scope(supervisorId);
-  return getDb()
+/** Latest PR update or analysis of a project — the last thing the curator saw. */
+export function getProjectLastActivity(projectId: number): string | null {
+  const row = getDb()
     .prepare(
-      `SELECT pr.project_id AS projectId, a.created_at AS ts
-       FROM analyses a
-       JOIN pull_requests pr ON pr.id = a.pull_request_id
-       WHERE pr.project_id IN (${s.projectIds})
-         AND a.created_at >= datetime('now', @since)`,
+      `SELECT MAX(ts) AS ts FROM (
+         SELECT MAX(updated_at) AS ts FROM pull_requests WHERE project_id = @projectId
+         UNION ALL
+         SELECT MAX(a.created_at) AS ts FROM analyses a
+           JOIN pull_requests pr ON pr.id = a.pull_request_id
+           WHERE pr.project_id = @projectId
+       )`,
     )
-    .all({ ...s.params, since: `-${weeks * 7} days` }) as Array<{
-    projectId: number;
-    ts: string;
-  }>;
+    .get({ projectId }) as { ts: string | null };
+  return row.ts;
 }
 
 // --- Project page ---
@@ -326,49 +327,60 @@ export function getProjectParticipants(id: number): string[] {
 
 const FINDING_SELECT = `
   SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber, pr.state AS prState,
-         pr.project_id AS projectId, f.category, f.severity, f.title, f.file, f.lines,
+         pr.project_id AS projectId, f.area, f.severity, f.title, f.description, f.locations,
          f.evidence, f.impact, f.recommendation, f.status,
          (SELECT h.reason FROM finding_status_history h WHERE h.finding_id = f.id
             ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS lastReason,
          (SELECT h.created_at FROM finding_status_history h WHERE h.finding_id = f.id
             AND h.new_status = 'reopened' ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS reopenedAt,
+         (SELECT a.head_sha FROM analyses a WHERE a.id = f.last_analysis_id) AS headSha,
          f.created_at AS createdAt, f.updated_at AS updatedAt
   FROM findings f
   JOIN pull_requests pr ON pr.id = f.pull_request_id`;
 
+function parseJson<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+type RawFinding<T> = Omit<T, "locations"> & { locations: string | null };
+
+function toFinding<T extends FindingRow>(row: RawFinding<T>): T {
+  return { ...row, locations: parseJson<FindingLocation[]>(row.locations) ?? [] } as T;
+}
+
 export function listProjectFindings(projectId: number): FindingRow[] {
-  return getDb()
+  const rows = getDb()
     .prepare(`${FINDING_SELECT} WHERE pr.project_id = @projectId ORDER BY f.updated_at DESC`)
-    .all({ projectId }) as unknown as FindingRow[];
+    .all({ projectId }) as unknown as RawFinding<FindingRow>[];
+  return rows.map(toFinding);
 }
 
 export function getFinding(id: number): (FindingRow & { projectId: number }) | null {
   const row = getDb()
     .prepare(`${FINDING_SELECT} WHERE f.id = @id`)
-    .get({ id }) as (FindingRow & { projectId: number }) | undefined;
-  return row ?? null;
+    .get({ id }) as RawFinding<FindingRow & { projectId: number }> | undefined;
+  return row ? toFinding(row) : null;
 }
 
 export function getFindingHistory(findingId: number): StatusHistoryRow[] {
   return getDb()
     .prepare(
-      `SELECT old_status AS oldStatus, new_status AS newStatus, reason, created_at AS createdAt
-       FROM finding_status_history WHERE finding_id = @findingId ORDER BY created_at, id`,
+      `SELECT h.old_status AS oldStatus, h.new_status AS newStatus, h.reason,
+              h.analysis_id AS analysisId, pr.number AS prNumber, h.created_at AS createdAt
+       FROM finding_status_history h
+       LEFT JOIN analyses a ON a.id = h.analysis_id
+       LEFT JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE h.finding_id = @findingId ORDER BY h.created_at, h.id`,
     )
     .all({ findingId }) as unknown as StatusHistoryRow[];
 }
 
-export function countProjectAnalyses(projectId: number): number {
-  const row = getDb()
-    .prepare(
-      `SELECT COUNT(*) AS n FROM analyses a
-       JOIN pull_requests pr ON pr.id = a.pull_request_id WHERE pr.project_id = @projectId`,
-    )
-    .get({ projectId }) as { n: number };
-  return row.n;
-}
-
-export function listProjectAnalyses(projectId: number, limit = 20): AnalysisRow[] {
+export function listProjectAnalyses(projectId: number): AnalysisRow[] {
   return getDb()
     .prepare(
       `SELECT a.id, pr.number AS prNumber, a.head_sha AS headSha, a.trigger, a.outcome,
@@ -376,30 +388,39 @@ export function listProjectAnalyses(projectId: number, limit = 20): AnalysisRow[
        FROM analyses a
        JOIN pull_requests pr ON pr.id = a.pull_request_id
        WHERE pr.project_id = @projectId
-       ORDER BY a.created_at DESC, a.id DESC LIMIT @limit`,
+       ORDER BY a.created_at DESC, a.id DESC`,
     )
-    .all({ projectId, limit }) as unknown as AnalysisRow[];
+    .all({ projectId }) as unknown as AnalysisRow[];
 }
 
-export function listProjectPullRequests(projectId: number): PullRequestRow[] {
-  return (getDb()
+export function getAnalysis(id: number): AnalysisDetail | null {
+  const row = getDb()
     .prepare(
-      `SELECT pr.id, pr.number, pr.title, pr.author_login AS author, pr.state,
-              pr.updated_at AS updatedAt,
-              ${lastAnalysis("created_at")} AS lastAnalysisAt,
-              ${lastAnalysis("outcome")} AS lastAnalysisOutcome,
-              ${lastAnalysis("trigger")} AS lastAnalysisTrigger,
-              ${BLOCKED_SQL} AS blocked,
-              (SELECT COUNT(*) FROM findings f WHERE f.pull_request_id = pr.id
-                 AND f.status IN ${OPEN_STATUSES}) AS openFindings,
-              (SELECT COUNT(*) FROM findings f WHERE f.pull_request_id = pr.id) AS totalFindings,
-              (SELECT COUNT(*) FROM student_responses r WHERE r.pull_request_id = pr.id) AS responses
-       FROM pull_requests pr
-       WHERE pr.project_id = @projectId
-       ORDER BY pr.updated_at DESC, pr.number DESC`,
+      `SELECT a.id, pr.number AS prNumber, pr.project_id AS projectId, a.head_sha AS headSha,
+              a.trigger, a.outcome, a.summary, a.provider, a.model, a.comment, a.materials,
+              a.created_at AS createdAt
+       FROM analyses a
+       JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE a.id = @id`,
     )
-    .all({ projectId }) as unknown as Array<Omit<PullRequestRow, "blocked"> & { blocked: number }>)
-    .map((r) => ({ ...r, blocked: r.blocked === 1 }));
+    .get({ id }) as (Omit<AnalysisDetail, "materials"> & { materials: string | null }) | undefined;
+  if (!row) return null;
+  return { ...row, materials: parseJson<AnalysisMaterials>(row.materials) };
+}
+
+/** Finding status changes made by one analysis, new findings included. */
+export function listAnalysisChanges(analysisId: number): AnalysisChange[] {
+  return getDb()
+    .prepare(
+      `SELECT h.finding_id AS findingId, pr.number AS prNumber, f.title,
+              h.old_status AS oldStatus, h.new_status AS newStatus, h.reason
+       FROM finding_status_history h
+       JOIN findings f ON f.id = h.finding_id
+       JOIN pull_requests pr ON pr.id = f.pull_request_id
+       WHERE h.analysis_id = @analysisId
+       ORDER BY h.id`,
+    )
+    .all({ analysisId }) as unknown as AnalysisChange[];
 }
 
 // --- Admin: projects ---
@@ -611,11 +632,13 @@ export function recordAnalysis(params: {
   summary?: string | null;
   provider?: string | null;
   model?: string | null;
+  materials?: AnalysisMaterials | null;
 }): number {
   const row = getDb()
     .prepare(
-      `INSERT INTO analyses (pull_request_id, head_sha, trigger, outcome, summary, provider, model)
-       VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model)
+      `INSERT INTO analyses
+         (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials)
+       VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials)
        RETURNING id`,
     )
     .get({
@@ -626,19 +649,36 @@ export function recordAnalysis(params: {
       summary: params.summary ?? null,
       provider: params.provider ?? null,
       model: params.model ?? null,
+      materials: params.materials ? JSON.stringify(params.materials) : null,
     }) as { id: number };
   return row.id;
 }
 
+/** Remember the comment actually published to the pull request for an analysis. */
+export function setAnalysisComment(analysisId: number, comment: string): void {
+  getDb()
+    .prepare("UPDATE analyses SET comment = @comment WHERE id = @analysisId")
+    .run({ analysisId, comment });
+}
+
+/**
+ * Open findings of the whole project the PR belongs to: a later PR may fix a finding
+ * raised in an earlier one. Findings of other PRs closed without merge are left out —
+ * that code never reached the main branch. The PR's own findings are always included.
+ */
 export function loadOpenFindings(prId: number): PriorFinding[] {
-  return getDb()
+  const rows = getDb()
     .prepare(
-      `SELECT id, category, severity, title, file, lines, status
-       FROM findings
-       WHERE pull_request_id = @prId AND status IN ${OPEN_STATUSES}
-       ORDER BY id`,
+      `SELECT f.id, pr.number AS prNumber, f.area, f.severity, f.title, f.locations, f.status
+       FROM findings f
+       JOIN pull_requests pr ON pr.id = f.pull_request_id
+       WHERE pr.project_id = (SELECT project_id FROM pull_requests WHERE id = @prId)
+         AND f.status IN ${OPEN_STATUSES}
+         AND (pr.id = @prId OR COALESCE(pr.state, 'open') != 'closed')
+       ORDER BY f.id`,
     )
-    .all({ prId }) as unknown as PriorFinding[];
+    .all({ prId }) as unknown as Array<Omit<PriorFinding, "locations"> & { locations: string | null }>;
+  return rows.map((r) => ({ ...r, locations: parseJson<FindingLocation[]>(r.locations) ?? [] }));
 }
 
 export function loadStudentResponses(prId: number): StudentResponse[] {
@@ -704,22 +744,26 @@ export function applyReconciliation(
 
   const insertFinding = db.prepare(
     `INSERT INTO findings
-       (pull_request_id, category, severity, title, file, lines, evidence, impact,
+       (pull_request_id, area, severity, title, description, locations, evidence, impact,
         recommendation, status, first_analysis_id, last_analysis_id)
-     VALUES (@prId, @category, @severity, @title, @file, @lines, @evidence, @impact,
+     VALUES (@prId, @area, @severity, @title, @description, @locations, @evidence, @impact,
              @recommendation, @status, @analysisId, @analysisId)
      RETURNING id`,
   );
   const updateFinding = db.prepare(
     `UPDATE findings SET
-       category = @category, severity = @severity, title = @title, file = @file,
-       lines = @lines, evidence = @evidence, impact = @impact,
+       area = @area, severity = @severity, title = @title, description = @description,
+       locations = @locations, evidence = @evidence, impact = @impact,
        recommendation = @recommendation, status = @status,
        last_analysis_id = @analysisId, updated_at = datetime('now')
      WHERE id = @id`,
   );
+  // A prior finding may come from any PR of the same project.
   const getFinding = db.prepare(
-    `SELECT status, title FROM findings WHERE id = @id AND pull_request_id = @prId`,
+    `SELECT f.status, f.title FROM findings f
+     JOIN pull_requests pr ON pr.id = f.pull_request_id
+     WHERE f.id = @id
+       AND pr.project_id = (SELECT project_id FROM pull_requests WHERE id = @prId)`,
   );
   const insertHistory = db.prepare(
     `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason, analysis_id)
@@ -732,11 +776,11 @@ export function applyReconciliation(
       const fields = {
         prId,
         analysisId,
-        category: f.category ?? null,
+        area: f.area ?? null,
         severity: f.severity ?? null,
         title: f.title,
-        file: f.file ?? null,
-        lines: f.lines ?? null,
+        description: f.description ?? null,
+        locations: f.locations && f.locations.length > 0 ? JSON.stringify(f.locations) : null,
         evidence: f.evidence ?? null,
         impact: f.impact ?? null,
         recommendation: f.recommendation ?? null,

@@ -1,6 +1,7 @@
 import * as React from "react";
 import { cn } from "@/lib/utils";
-import { severityKey, severityLabel } from "@/lib/format";
+import type { Severity } from "@/lib/curator/finding";
+import { severityLabel } from "@/lib/format";
 
 export type Tone = "neutral" | "red" | "orange" | "amber" | "green" | "primary";
 
@@ -49,22 +50,20 @@ export function Dot({ tone, className }: { tone: Tone; className?: string }) {
   );
 }
 
-// Severity is an ordinal ramp (amber → orange → red). A status colour never
+// Severity is an ordinal ramp (neutral, amber, red). A status colour never
 // carries meaning alone, so it is always shown next to its text label.
-export function severityTone(severity: string | null): Tone {
-  switch (severityKey(severity)) {
+export function severityTone(severity: Severity | null): Tone {
+  switch (severity) {
     case "critical":
       return "red";
-    case "high":
-      return "orange";
-    case "medium":
+    case "important":
       return "amber";
     default:
       return "neutral";
   }
 }
 
-export function SeverityBadge({ severity }: { severity: string | null }) {
+export function SeverityBadge({ severity }: { severity: Severity | null }) {
   const tone = severityTone(severity);
   return (
     <Badge tone={tone}>

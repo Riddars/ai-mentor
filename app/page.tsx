@@ -1,29 +1,20 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getViewer } from "@/lib/users";
-import {
-  listProjectSummaries,
-  recentAnalysisTimestampsByProject,
-  type ProjectSummary,
-} from "@/lib/curator/store";
-import { findingsWord, outcomeLabel, parseDbDate, projectsWord, relativeDate } from "@/lib/format";
-import { weeklySeries, type WeekPoint } from "@/lib/metrics";
+import { listProjectSummaries, type ProjectSummary } from "@/lib/curator/store";
+import { parseDbDate, relativeDate } from "@/lib/format";
 import { AppHeader, PageShell } from "@/components/AppHeader";
 import { Badge } from "@/components/ui/Badge";
-import { Sparkline } from "@/components/ui/Sparkline";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
-const WEEKS = 12;
-
-type SortKey = "serious" | "open" | "analysis" | "name";
+type SortKey = "serious" | "activity" | "name";
 type Dir = "asc" | "desc";
-const SORT_KEYS: SortKey[] = ["serious", "open", "analysis", "name"];
+const SORT_KEYS: SortKey[] = ["serious", "activity", "name"];
 const DEFAULT_DIR: Record<SortKey, Dir> = {
   serious: "desc",
-  open: "desc",
-  analysis: "asc",
+  activity: "asc",
   name: "asc",
 };
 
@@ -69,20 +60,19 @@ function compare(a: ProjectSummary, b: ProjectSummary, q: Query): number {
   const byName = () => (a.name ?? a.repo).localeCompare(b.name ?? b.repo, "ru");
   switch (q.sort) {
     case "serious": {
-      // Serious count, then the oldest serious first, then the least recently analysed.
+      // Critical count, then all open, then the oldest critical first, then the
+      // least recently active.
       const d = a.seriousOpenFindings - b.seriousOpenFindings;
       if (d !== 0) return sign * d;
+      const open = a.openFindings - b.openFindings;
+      if (open !== 0) return sign * open;
       const age = ts(a.oldestSeriousOpenAt) - ts(b.oldestSeriousOpenAt);
       if (age !== 0) return q.dir === "desc" ? age : -age;
-      const last = ts(a.lastAnalysisAt) - ts(b.lastAnalysisAt);
+      const last = ts(a.lastActivityAt) - ts(b.lastActivityAt);
       return last !== 0 ? (q.dir === "desc" ? last : -last) : byName();
     }
-    case "open": {
-      const d = a.openFindings - b.openFindings;
-      return d !== 0 ? sign * d : byName();
-    }
-    case "analysis": {
-      const d = ts(a.lastAnalysisAt) - ts(b.lastAnalysisAt);
+    case "activity": {
+      const d = ts(a.lastActivityAt) - ts(b.lastActivityAt);
       return d !== 0 ? sign * d : byName();
     }
     case "name":
@@ -111,29 +101,14 @@ export default async function OverviewPage({
     return true;
   });
   const rows = [...filtered].sort((a, b) => compare(a, b, q));
-
-  const byProject = new Map<number, string[]>();
-  for (const { projectId, ts } of recentAnalysisTimestampsByProject(WEEKS, scopeId)) {
-    byProject.set(projectId, [...(byProject.get(projectId) ?? []), ts]);
-  }
-  const series = (id: number): WeekPoint[] => weeklySeries(byProject.get(id) ?? [], WEEKS);
-
   const pausedTotal = all.filter((p) => p.status === "paused").length;
-  const openTotal = rows.reduce((s, p) => s + p.openFindings, 0);
-  const seriousTotal = rows.reduce((s, p) => s + p.seriousOpenFindings, 0);
-  const blockedTotal = rows.reduce((s, p) => s + p.blockedPrs, 0);
 
   return (
     <>
       <AppHeader viewer={viewer} />
       <PageShell>
         <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Проекты</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {isHead ? "Все проекты центра." : "Проекты под вашим руководством."}
-            </p>
-          </div>
+          <h1 className="text-2xl font-semibold tracking-tight">Проекты</h1>
           <Filters q={q} isHead={isHead} supervisorLogins={supervisorLogins} pausedTotal={pausedTotal} />
         </div>
 
@@ -148,33 +123,22 @@ export default async function OverviewPage({
                     <SortHeader q={q} k="name" className="px-5">Проект</SortHeader>
                     {isHead && <th className="px-3 py-2.5 font-medium">Руководитель</th>}
                     <th className="px-3 py-2.5 font-medium">Участники</th>
-                    <SortHeader q={q} k="serious">Открытые замечания</SortHeader>
-                    <SortHeader q={q} k="analysis">Разборы</SortHeader>
-                    <th className="px-5 py-2.5 font-medium">Исход последнего</th>
+                    <SortHeader q={q} k="serious">Замечания</SortHeader>
+                    <SortHeader q={q} k="activity" className="px-5">Последняя активность</SortHeader>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.length === 0 ? (
                     <tr>
-                      <td colSpan={isHead ? 6 : 5} className="px-5 py-10 text-center text-sm text-muted-foreground">
+                      <td colSpan={isHead ? 5 : 4} className="px-5 py-10 text-center text-sm text-muted-foreground">
                         Под текущие фильтры проектов нет.
                       </td>
                     </tr>
                   ) : (
-                    rows.map((p) => (
-                      <ProjectRow key={p.id} p={p} isHead={isHead} points={series(p.id)} />
-                    ))
+                    rows.map((p) => <ProjectRow key={p.id} p={p} isHead={isHead} />)
                   )}
                 </tbody>
               </table>
-            </div>
-            <div className="border-t border-border px-5 py-2.5 text-xs text-muted-foreground">
-              {rows.length} {projectsWord(rows.length)}
-              {pausedTotal > 0 && ` · ${pausedTotal} на паузе${q.paused ? "" : " (скрыты)"}`}
-              {` · ${openTotal} открытых ${findingsWord(openTotal)}, из них серьёзных: ${seriousTotal}`}
-              {blockedTotal > 0 && (
-                <span className="text-red"> · PR с заблокированным слиянием: {blockedTotal}</span>
-              )}
             </div>
           </div>
         )}
@@ -248,17 +212,18 @@ function SortHeader({
         className={cn("inline-flex items-center gap-1 hover:text-foreground", active && "text-foreground")}
       >
         {children}
-        <span aria-hidden className={cn("text-[0.6rem]", !active && "opacity-30")}>
-          {active ? (q.dir === "asc" ? "▲" : "▼") : "▼"}
-        </span>
+        {active && (
+          <span aria-hidden className="text-[0.6rem]">
+            {q.dir === "asc" ? "▲" : "▼"}
+          </span>
+        )}
       </Link>
     </th>
   );
 }
 
-function ProjectRow({ p, isHead, points }: { p: ProjectSummary; isHead: boolean; points: WeekPoint[] }) {
-  const errored = p.lastAnalysisOutcome === "error";
-  const label = outcomeLabel(p.lastAnalysisOutcome, p.lastAnalysisTrigger);
+function ProjectRow({ p, isHead }: { p: ProjectSummary; isHead: boolean }) {
+  const failed = p.lastAnalysisOutcome === "error" || p.lastAnalysisOutcome === "parse_error";
   return (
     <tr className="border-b border-border last:border-0 hover:bg-muted/40">
       <td className="px-5 py-3 align-top">
@@ -275,6 +240,11 @@ function ProjectRow({ p, isHead, points }: { p: ProjectSummary; isHead: boolean;
             {p.owner}/{p.repo}
           </a>
           {p.status === "paused" && <Badge tone="neutral">пауза</Badge>}
+          {p.blockedPrs > 0 ? (
+            <Badge tone="red">слияние заблокировано</Badge>
+          ) : (
+            failed && <Badge tone="amber">сбой разбора</Badge>
+          )}
         </div>
       </td>
       {isHead && (
@@ -293,35 +263,13 @@ function ProjectRow({ p, isHead, points }: { p: ProjectSummary; isHead: boolean;
         {p.openFindings === 0 ? (
           <span className="text-xs text-muted-foreground">нет</span>
         ) : (
-          <div className="leading-tight">
-            <span className={cn("font-medium tabular-nums", p.seriousOpenFindings > 0 && "text-red")}>
-              {p.seriousOpenFindings}
-            </span>
-            <span className="text-muted-foreground"> / </span>
-            <span className="font-medium tabular-nums">{p.openFindings}</span>
-            <div className="text-xs text-muted-foreground">
-              {p.seriousOpenFindings > 0
-                ? `серьёзных с ${relativeDate(p.oldestSeriousOpenAt)}`
-                : `${findingsWord(p.openFindings)}, серьёзных нет`}
-            </div>
-          </div>
-        )}
-      </td>
-      <td className="px-3 py-3 align-top">
-        <div className="flex items-center gap-2.5">
-          <Sparkline points={points} />
-          <span className="text-xs text-muted-foreground whitespace-nowrap">
-            {relativeDate(p.lastAnalysisAt)}
+          <span className={cn("font-medium tabular-nums", p.seriousOpenFindings > 0 && "text-red")}>
+            {p.openFindings}
           </span>
-        </div>
-      </td>
-      <td className="px-5 py-3 align-top text-xs">
-        <span className={cn(errored ? "font-medium text-red" : p.lastAnalysisOutcome === "parse_error" ? "text-amber" : "text-muted-foreground")}>
-          {label}
-        </span>
-        {p.blockedPrs > 0 && (
-          <div className="text-red">слияние заблокировано: {p.blockedPrs} PR</div>
         )}
+      </td>
+      <td className="px-5 py-3 align-top text-xs whitespace-nowrap text-muted-foreground">
+        {relativeDate(p.lastActivityAt)}
       </td>
     </tr>
   );

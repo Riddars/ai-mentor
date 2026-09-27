@@ -51,17 +51,19 @@ CREATE TABLE IF NOT EXISTS analyses (
   summary          TEXT,
   provider         TEXT,
   model            TEXT,
+  comment          TEXT,
+  materials        TEXT,
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS findings (
   id                INTEGER PRIMARY KEY,
   pull_request_id   INTEGER NOT NULL REFERENCES pull_requests(id),
-  category          TEXT,
+  area              TEXT,
   severity          TEXT,
   title             TEXT NOT NULL,
-  file              TEXT,
-  lines             TEXT,
+  description       TEXT,
+  locations         TEXT,
   evidence          TEXT,
   impact            TEXT,
   recommendation    TEXT,
@@ -183,5 +185,43 @@ function migrate(db: DatabaseSync): void {
       db.exec("ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0");
     }
     db.exec("PRAGMA user_version = 5");
+  }
+  if (version < 6) {
+    // Universal finding shape: a fixed area instead of free-text category, a list of
+    // locations instead of a single file:lines, three severity levels. Analyses keep
+    // the published comment and the materials the model was given.
+    const findingColumns = (
+      db.prepare("PRAGMA table_info(findings)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    for (const column of ["area", "description", "locations"]) {
+      if (!findingColumns.includes(column)) {
+        db.exec(`ALTER TABLE findings ADD COLUMN ${column} TEXT`);
+      }
+    }
+    if (findingColumns.includes("file")) {
+      db.exec(`UPDATE findings SET locations = json_array(json_object(
+                 'kind', 'file', 'target', file, 'detail', lines))
+               WHERE file IS NOT NULL AND locations IS NULL`);
+      db.exec("ALTER TABLE findings DROP COLUMN file");
+      db.exec("ALTER TABLE findings DROP COLUMN lines");
+    }
+    if (findingColumns.includes("category")) {
+      db.exec("ALTER TABLE findings DROP COLUMN category");
+    }
+    db.exec(`UPDATE findings SET severity = CASE LOWER(severity)
+               WHEN 'high' THEN 'critical'
+               WHEN 'medium' THEN 'important'
+               WHEN 'low' THEN 'info'
+               ELSE severity END`);
+
+    const analysisColumns = (
+      db.prepare("PRAGMA table_info(analyses)").all() as Array<{ name: string }>
+    ).map((c) => c.name);
+    for (const column of ["comment", "materials"]) {
+      if (!analysisColumns.includes(column)) {
+        db.exec(`ALTER TABLE analyses ADD COLUMN ${column} TEXT`);
+      }
+    }
+    db.exec("PRAGMA user_version = 6");
   }
 }

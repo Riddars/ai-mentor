@@ -1,5 +1,11 @@
 import type { Role } from "@/lib/auth";
 import type { FindingStatus } from "@/lib/curator/store";
+import {
+  SEVERITIES,
+  type FindingArea,
+  type FindingLocation,
+  type Severity,
+} from "@/lib/curator/finding";
 
 /** SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) → Date; null when missing or malformed. */
 export function parseDbDate(iso: string | null): Date | null {
@@ -61,48 +67,42 @@ export function isOpenStatus(status: FindingStatus): boolean {
   return status === "open" || status === "reopened" || status === "pending";
 }
 
-export function severityLabel(severity: string | null): string {
-  switch ((severity ?? "").toLowerCase()) {
-    case "critical":
-      return "критическая";
-    case "high":
-      return "высокая";
-    case "medium":
-      return "средняя";
-    case "low":
-      return "низкая";
-    default:
-      return severity ?? "—";
-  }
-}
+const SEVERITY_LABEL: Record<Severity, string> = {
+  critical: "критично",
+  important: "важно",
+  info: "к сведению",
+};
 
-export type SeverityKey = "critical" | "high" | "medium" | "low" | "other";
-
-/** Normalise a raw severity string to one of the ordinal buckets. */
-export function severityKey(severity: string | null): SeverityKey {
-  switch ((severity ?? "").toLowerCase()) {
-    case "critical":
-      return "critical";
-    case "high":
-      return "high";
-    case "medium":
-      return "medium";
-    case "low":
-      return "low";
-    default:
-      return "other";
-  }
+export function severityLabel(severity: Severity | null): string {
+  return severity ? SEVERITY_LABEL[severity] : "—";
 }
 
 /** Higher = more serious. Used to sort findings by severity. */
-export function severityRank(severity: string | null): number {
-  return { critical: 4, high: 3, medium: 2, low: 1, other: 0 }[severityKey(severity)];
+export function severityRank(severity: Severity | null): number {
+  return severity ? SEVERITIES.length - SEVERITIES.indexOf(severity) : 0;
 }
 
-// The model writes the category as free Russian text (see the prompt in
-// review.ts), so it is shown as is — no mapping that only the seed would hit.
-export function categoryLabel(category: string | null): string {
-  return category?.trim() || "Без категории";
+const AREA_LABEL: Record<FindingArea, string> = {
+  code: "Код",
+  data: "Данные",
+  methodology: "Методология",
+  reproducibility: "Воспроизводимость",
+  problem: "Постановка задачи",
+  reasoning: "Научная логика",
+  novelty: "Новизна и контекст",
+  plan: "Расхождение с планом",
+};
+
+export function areaLabel(area: FindingArea | null): string {
+  return area ? AREA_LABEL[area] : "Без области";
+}
+
+/** "src/a.py:42-58" for a file, "RESEARCH.md — раздел «Метрики»" otherwise. */
+export function locationText(location: FindingLocation): string {
+  if (!location.detail) return location.target;
+  return location.kind === "file"
+    ? `${location.target}:${location.detail}`
+    : `${location.target} — ${location.detail}`;
 }
 
 /**
@@ -114,7 +114,7 @@ export function outcomeLabel(outcome: string | null, trigger: string | null): st
     case null:
       return "разборов не было";
     case "ok":
-      return "ok";
+      return "выполнен";
     case "parse_error":
       return "ответ модели не разобран";
     case "error":
@@ -136,8 +136,8 @@ export function prStateLabel(state: string | null): string {
 }
 
 const TRIGGER_LABEL: Record<string, string> = {
-  commit: "коммит",
-  comment: "комментарий",
+  commit: "новый коммит",
+  comment: "ответ студента",
 };
 
 export function triggerLabel(trigger: string): string {

@@ -65,7 +65,7 @@ export default async function AdminPage() {
                           </div>
                         </div>
                         <Link href={`/admin/projects/${p.id}`} className="shrink-0 text-xs text-muted-foreground hover:text-foreground">
-                          изменить →
+                          Изменить
                         </Link>
                       </li>
                     );
@@ -96,7 +96,7 @@ export default async function AdminPage() {
                       <div className="text-xs text-muted-foreground">{roleLabel(u.role)}</div>
                     </div>
                     <Link href={`/admin/users/${u.id}`} className="shrink-0 text-xs text-muted-foreground hover:text-foreground">
-                      изменить →
+                      Изменить
                     </Link>
                   </li>
                 ))}

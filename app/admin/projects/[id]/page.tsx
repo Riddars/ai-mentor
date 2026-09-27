@@ -13,6 +13,7 @@ import {
   unassignSupervisorAction,
 } from "@/app/actions/admin";
 import { AppHeader, PageShell } from "@/components/AppHeader";
+import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -47,16 +48,16 @@ export default async function AdminProjectPage({
     <>
       <AppHeader viewer={viewer} />
       <PageShell>
-        <Link href="/admin" className="text-xs text-muted-foreground hover:text-foreground">
-          ← Управление
-        </Link>
+        <Breadcrumbs
+          items={[{ label: "Управление", href: "/admin" }, { label: project.name ?? project.repo }]}
+        />
         <div className="mt-2 mb-6 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">{project.name ?? project.repo}</h1>
           <Badge tone={project.status === "active" ? "green" : "neutral"}>
             {project.status === "active" ? "активен" : "на паузе"}
           </Badge>
           <Link href={`/projects/${id}`} className="text-sm text-muted-foreground hover:underline">
-            открыть в панели →
+            Открыть в панели
           </Link>
         </div>
 

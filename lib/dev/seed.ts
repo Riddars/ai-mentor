@@ -4,16 +4,21 @@ import {
   applyReconciliation,
   assignSupervisor,
   deleteProjectCascade,
+  loadOpenFindings,
   recordAnalysis,
   saveStudentResponse,
+  setAnalysisComment,
   setProjectStatus,
   upsertParticipant,
   upsertProject,
   upsertPullRequest,
   type AnalysisOutcome,
   type PullRequestState,
+  type ReconcileResult,
   type ReconciledFinding,
+  type StatusChange,
 } from "@/lib/curator/store";
+import { renderComment, renderReplyComment } from "@/lib/curator/review";
 import { countUsersByRole, createUser, findUserByLogin, type User } from "@/lib/users";
 
 // Demo data for exercising the panel in development. Uses the owner "demo-org" so
@@ -21,7 +26,8 @@ import { countUsersByRole, createUser, findUserByLogin, type User } from "@/lib/
 // projects are deleted first, so the demo always reflects the latest scenarios and
 // dates stay anchored to "today". Every scenario mirrors a real write path of the
 // curator (webhook / review.ts): new findings are born "open" and change status
-// only through a later reconciliation, categories are free Russian text.
+// only through a later reconciliation; each analysis keeps its materials and the
+// comment the curator would have published.
 
 const DEMO_OWNER = "demo-org";
 
@@ -58,27 +64,63 @@ function alignDatesToAnalyses(): void {
 }
 
 let shaCounter = 0;
-function mkAnalysis(
+
+interface ReviewOptions {
+  files: string[];
+  trigger?: "commit" | "comment";
+  outcome?: AnalysisOutcome;
+  researchDoc?: boolean;
+}
+
+/**
+ * One analysis of a PR as review.ts records it: the analysis with its materials,
+ * the reconciliation, and the comment published to the pull request.
+ */
+function review(
   prId: number,
   daysAgo: number,
-  summary: string | null,
-  outcome: AnalysisOutcome = "ok",
-  trigger: "commit" | "comment" = "commit",
-): number {
+  result: ReconcileResult | null,
+  opts: ReviewOptions,
+): StatusChange[] {
+  const trigger = opts.trigger ?? "commit";
+  const outcome = opts.outcome ?? "ok";
+  const prior = loadOpenFindings(prId).length;
+  const responses = db()
+    .prepare("SELECT COUNT(*) AS n FROM student_responses WHERE pull_request_id = @prId")
+    .get({ prId }) as { n: number };
+
   const id = recordAnalysis({
     prId,
     headSha: `demo${(shaCounter += 1).toString(16).padStart(6, "0")}`,
     trigger,
     outcome,
-    summary,
+    summary: result?.summary || null,
+    provider: outcome === "error" ? null : "provod",
+    model: outcome === "error" ? null : "deepseek/deepseek-v4-pro",
+    materials:
+      outcome === "error"
+        ? null
+        : {
+            files: opts.files,
+            researchDoc: opts.researchDoc ?? true,
+            truncated: false,
+            priorFindings: prior,
+            studentResponses: responses.n,
+          },
   });
   backdate("analyses", id, daysAgo);
-  return id;
+  if (!result || outcome !== "ok") return [];
+
+  const { statusChanges } = applyReconciliation(prId, id, result);
+  const comment =
+    trigger === "commit" ? renderComment(result, statusChanges) : renderReplyComment(statusChanges);
+  if (comment) setAnalysisComment(id, comment);
+  return statusChanges;
 }
 
-/** Filler analyses spread over the 12-week window so the sparkline has shape. */
-function fillActivity(prId: number, daysAgoList: number[]): void {
-  for (const d of daysAgoList) mkAnalysis(prId, d, "Разбор изменений: существенных замечаний нет.");
+/** A clean analysis: nothing found, nothing changed. */
+function quiet(prId: number, daysAgo: number, files: string[]): void {
+  review(prId, daysAgo, { summary: "Разбор изменений: существенных проблем нет.", findings: [] }, { files });
 }
 
 function pr(projectId: number, number: number, author: string, title: string, state: PullRequestState): number {
@@ -93,7 +135,18 @@ function reply(prId: number, commentId: number, login: string, body: string, day
 }
 
 function finding(f: Partial<ReconciledFinding> & { title: string }): ReconciledFinding {
-  return { priorId: null, status: "open", severity: "medium", category: "Методика", ...f };
+  return { priorId: null, status: "open", severity: "important", area: "methodology", ...f };
+}
+
+/** The same finding carried to a later reconciliation with a new status. */
+function carry(
+  original: ReconciledFinding,
+  change: StatusChange,
+  status: ReconciledFinding["status"],
+  reason: string,
+  patch: Partial<ReconciledFinding> = {},
+): ReconciledFinding {
+  return { ...original, ...patch, priorId: change.findingId, status, reason };
 }
 
 async function ensureUser(
@@ -126,300 +179,414 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
 
   resetDemo();
 
-  // 1. Serious data-leakage finding open 20 days despite fresh commits; plus an
-  //    earlier PR that was MERGED with a serious finding still open (раздел 6).
+  // 1. A critical leak spread over two files, open 20 days despite fresh commits; a
+  //    reasoning finding with no single place in code; an earlier PR MERGED with a
+  //    critical data finding still open (раздел 6).
   const solubility = upsertProject(DEMO_OWNER, "solubility", "Предсказание растворимости (ESOL)");
   upsertParticipant(solubility, "student-anna");
   upsertParticipant(solubility, "student-boris");
 
   const s0 = pr(solubility, 1, "student-boris", "Загрузка и очистка датасета", "merged");
-  const s0a = mkAnalysis(s0, 34, "Разобрал загрузку данных.");
-  applyReconciliation(s0, s0a, {
-    summary: "Разобрал загрузку данных.",
-    findings: [
-      finding({
-        severity: "high",
-        category: "Качество данных",
-        title: "Дубликаты SMILES в датасете не удалены",
-        file: "src/data.py",
-        lines: "18-27",
-        evidence: "drop_duplicates() не вызывается; в ESOL ≈ 3% повторов с разными метками.",
-        impact: "Одни и те же молекулы попадают и в train, и в test — оценка завышена.",
-        recommendation: "Канонизировать SMILES и удалить дубликаты до разбиения.",
-      }),
-    ],
-  });
+  review(
+    s0,
+    34,
+    {
+      summary: "Добавлены загрузка ESOL и первичная очистка данных.",
+      findings: [
+        finding({
+          area: "data",
+          severity: "critical",
+          title: "Дубликаты молекул в датасете не удалены",
+          description:
+            "Одни и те же молекулы записаны разными строками SMILES, а часть повторов имеет разные значения растворимости. Очистка их не находит.",
+          locations: [
+            { kind: "file", target: "src/data.py", detail: "18-27" },
+            { kind: "data", target: "data/esol.csv" },
+          ],
+          evidence: "drop_duplicates() не вызывается; SMILES не канонизируются перед сравнением.",
+          impact: "Одни и те же молекулы попадают и в обучающую, и в тестовую выборку — качество модели завышено.",
+          recommendation: "Канонизировать SMILES (RDKit), удалить дубликаты до разбиения, противоречивые метки усреднить или исключить.",
+        }),
+      ],
+    },
+    { files: ["src/data.py", "data/esol.csv"] },
+  );
   setPrActivity(s0, 30);
 
   const s1 = pr(solubility, 3, "student-anna", "Добавил масштабирование признаков", "open");
-  fillActivity(s1, [72, 58, 40, 26]);
-  const s1a = mkAnalysis(s1, 20, "Разобрал добавление масштабирования признаков.");
-  applyReconciliation(s1, s1a, {
-    summary: "Разобрал добавление масштабирования признаков.",
-    findings: [
-      finding({
-        severity: "high",
-        category: "Утечка данных",
-        title: "Масштабирование признаков выполнено до разделения на train/test",
-        file: "src/features.py",
-        lines: "42-58",
-        evidence: "StandardScaler().fit_transform(X) вызывается на всём наборе до train_test_split.",
-        impact:
-          "Статистики масштабирования вобрали в себя тестовую выборку — метрика на тесте завышена и невоспроизводима на новых данных.",
-        recommendation:
-          "Разделить данные сначала, fit только на train, transform применять к train и test отдельно (через Pipeline).",
-        reason: "Обнаружено при разборе коммита.",
-      }),
-      finding({
-        severity: "medium",
-        category: "Воспроизводимость",
-        title: "Не зафиксирован random_state при разделении выборки",
-        file: "src/split.py",
-        lines: "10",
-        evidence: "train_test_split(X, y, test_size=0.2) без random_state.",
-        impact: "Разбиение меняется между запусками — результаты невоспроизводимы.",
-        recommendation: "Передать фиксированный random_state.",
-        reason: "Обнаружено при разборе коммита.",
-      }),
+  quiet(s1, 40, ["src/features.py"]);
+  quiet(s1, 26, ["src/features.py", "tests/test_features.py"]);
+  const leak = finding({
+    area: "methodology",
+    severity: "critical",
+    title: "Тестовая выборка участвует в масштабировании признаков",
+    description:
+      "Параметры масштабирования считаются по всему набору данных до разделения на обучающую и тестовую части, а разделение выполняется в другом модуле уже после.",
+    locations: [
+      { kind: "file", target: "src/features.py", detail: "42-58" },
+      { kind: "file", target: "src/train.py", detail: "10-15" },
     ],
+    evidence: "features.py: StandardScaler().fit_transform(X)\ntrain.py: train_test_split(X_scaled, y, test_size=0.2)",
+    impact: "Статистики тестовой выборки просачиваются в обучение — метрика на тесте завышена и не повторится на новых данных.",
+    recommendation: "Сначала разделить данные, затем обучать масштабирование только на обучающей части (sklearn Pipeline).",
   });
-  mkAnalysis(s1, 2, "Новый коммит: правок по утечке нет, замечания остаются открытыми.");
+  const seed = finding({
+    area: "reproducibility",
+    severity: "important",
+    title: "Разбиение выборки меняется от запуска к запуску",
+    description: "При разделении данных не зафиксирован random_state.",
+    locations: [{ kind: "file", target: "src/train.py", detail: "12" }],
+    evidence: "train_test_split(X, y, test_size=0.2) без random_state.",
+    impact: "Результаты нельзя повторить, а сравнение моделей между запусками некорректно.",
+    recommendation: "Передать фиксированный random_state и записать его в описание эксперимента.",
+  });
+  const claim = finding({
+    area: "reasoning",
+    severity: "important",
+    title: "Вывод о превосходстве над бейзлайном сделан по одному разбиению",
+    description:
+      "В описании исследования утверждается, что модель лучше линейной регрессии, но сравнение проведено на одном случайном разбиении без оценки разброса.",
+    locations: [
+      { kind: "document", target: "RESEARCH.md", detail: "раздел «Результаты»" },
+      { kind: "file", target: "notebooks/compare.ipynb" },
+    ],
+    evidence: "«Модель превосходит линейную регрессию (RMSE 0.61 против 0.68)» — одно значение без интервала.",
+    impact: "Разница может объясняться случайностью разбиения; вывод не обоснован.",
+    recommendation: "Повторить сравнение на кросс-валидации (5×5) и указать разброс метрики.",
+  });
+  review(
+    s1,
+    20,
+    { summary: "Добавлено масштабирование признаков и сравнение с бейзлайном.", findings: [leak, seed, claim] },
+    { files: ["src/features.py", "src/train.py", "notebooks/compare.ipynb", "RESEARCH.md"] },
+  );
+  quiet(s1, 2, ["src/features.py"]);
   reply(s1, 900010, "student-anna", "random_state добавлю в следующем коммите, масштабирование обсуждаю с руководителем.", 2);
   setPrActivity(s1, 2);
 
-  // 2. Medium metric finding open; a style note dismissed after the student's reply
-  //    (open at the commit analysis, dismissed by the comment reconciliation).
+  // 2. A metric finding and a plan divergence open; a style note dismissed after the
+  //    student's reply (open at the commit analysis, dismissed by the comment one).
   const toxicity = upsertProject(DEMO_OWNER, "toxicity", "Классификация токсичности молекул");
   upsertParticipant(toxicity, "student-vera");
   const t1 = pr(toxicity, 5, "student-vera", "Перешёл на accuracy как метрику", "open");
-  fillActivity(t1, [50, 33, 19, 8]);
-  const t1a = mkAnalysis(t1, 4, "Разобрал смену метрики качества.");
-  const t1r = applyReconciliation(t1, t1a, {
-    summary: "Разобрал смену метрики качества.",
-    findings: [
-      finding({
-        severity: "medium",
-        category: "Метрика",
-        title: "Accuracy на несбалансированных классах вводит в заблуждение",
-        file: "notebooks/train.ipynb",
-        evidence: "Доля положительного класса ≈ 8%, при этом выбрана accuracy.",
-        impact: "Тривиальный классификатор даст ~92% accuracy, не обнаруживая токсичные молекулы.",
-        recommendation: "Использовать ROC-AUC или PR-AUC, смотреть на recall для редкого класса.",
-      }),
-      finding({
-        severity: "low",
-        category: "Стиль",
-        title: "Закомментированный отладочный код в ячейках",
-        file: "notebooks/train.ipynb",
-        evidence: "Несколько print для отладки.",
-        impact: "На результат не влияет.",
-        recommendation: "Убрать перед слиянием.",
-      }),
-    ],
+  quiet(t1, 33, ["notebooks/train.ipynb"]);
+  quiet(t1, 19, ["notebooks/train.ipynb", "src/model.py"]);
+  const style = finding({
+    area: "code",
+    severity: "info",
+    title: "В ноутбуке остался отладочный вывод",
+    description: "В ячейках обучения остались print для отладки.",
+    locations: [{ kind: "file", target: "notebooks/train.ipynb" }],
+    evidence: "print(X.shape), print(y[:10]) в ячейках 4 и 7.",
+    impact: "На результат не влияет, затрудняет чтение.",
+    recommendation: "Убрать перед слиянием.",
   });
-  reply(t1, 900001, "student-vera", "Это временный отладочный вывод, уберу перед слиянием. На метрику не влияет.", 3);
-  const style = t1r.statusChanges.find((c) => c.title.startsWith("Закомментированный"));
-  const t1b = mkAnalysis(t1, 3, "Учёл ответ студента.", "ok", "comment");
-  if (style) {
-    applyReconciliation(t1, t1b, {
-      summary: "Учёл ответ студента.",
+  const t1changes = review(
+    t1,
+    4,
+    {
+      summary: "Метрика качества заменена на accuracy.",
       findings: [
         finding({
-          priorId: style.findingId,
-          status: "dismissed",
-          severity: "low",
-          category: "Стиль",
-          title: "Закомментированный отладочный код в ячейках",
-          file: "notebooks/train.ipynb",
-          reason: "Студент объяснил, что уберёт при финализации; на корректность не влияет.",
+          area: "methodology",
+          severity: "important",
+          title: "Accuracy на несбалансированных классах вводит в заблуждение",
+          description: "Токсичных молекул около 8%, а качество оценивается долей верных ответов.",
+          locations: [{ kind: "file", target: "notebooks/train.ipynb" }],
+          evidence: "Доля положительного класса ≈ 8%, при этом выбрана accuracy.",
+          impact: "Модель, которая всегда отвечает «нетоксично», получит ~92% и не найдёт ни одной токсичной молекулы.",
+          recommendation: "Использовать ROC-AUC или PR-AUC и отдельно смотреть recall для редкого класса.",
         }),
+        finding({
+          area: "plan",
+          severity: "important",
+          title: "Реализована бинарная классификация вместо заявленной регрессии LD50",
+          description:
+            "В описании исследования целью указано предсказание значения LD50, а в коде целевая переменная бинаризована по порогу.",
+          locations: [
+            { kind: "document", target: "RESEARCH.md", detail: "раздел «Задача»" },
+            { kind: "file", target: "src/model.py", detail: "30-44" },
+          ],
+          evidence: "RESEARCH.md: «предсказать LD50 (мг/кг)»; model.py: y = (ld50 < 300).astype(int)",
+          impact: "Результаты не отвечают на поставленный вопрос; сравнение с литературой по LD50 невозможно.",
+          recommendation: "Либо вернуться к регрессии, либо обновить описание исследования и обосновать порог.",
+        }),
+        style,
       ],
-    });
+    },
+    { files: ["notebooks/train.ipynb", "src/model.py", "RESEARCH.md"] },
+  );
+  reply(t1, 900001, "student-vera", "Это временный отладочный вывод, уберу перед слиянием. На метрику не влияет.", 3);
+  const styleChange = t1changes.find((c) => c.title === style.title);
+  if (styleChange) {
+    review(
+      t1,
+      3,
+      {
+        summary: "Учтён ответ студента.",
+        findings: [
+          carry(style, styleChange, "dismissed", "Студент объяснил, что уберёт при финализации; на корректность не влияет."),
+        ],
+      },
+      { files: ["notebooks/train.ipynb"], trigger: "comment" },
+    );
   }
   setPrActivity(t1, 3);
 
-  // 3. Quiet: merged baseline, no findings, nothing for 18 days.
+  // 3. Quiet, and fixed across PRs: the baseline PR was merged with a finding still
+  //    open; the next PR fixed it and closed it. Nothing for 18 days since.
   const yieldP = upsertProject(DEMO_OWNER, "reaction-yield", "Предсказание выхода реакции");
   upsertParticipant(yieldP, "student-grigory");
   const y1 = pr(yieldP, 2, "student-grigory", "Базовый бейзлайн", "merged");
-  fillActivity(y1, [40, 28]);
-  mkAnalysis(y1, 18, "Существенных замечаний нет.");
-  setPrActivity(y1, 18);
+  const seeds = finding({
+    area: "reproducibility",
+    severity: "important",
+    title: "Обучение бейзлайна не воспроизводится между запусками",
+    description: "Случайный лес обучается без фиксированного random_state, а результаты записаны в README как окончательные.",
+    locations: [
+      { kind: "file", target: "src/baseline.py", detail: "25" },
+      { kind: "document", target: "README.md", detail: "раздел «Результаты»" },
+    ],
+    evidence: "RandomForestRegressor(n_estimators=500) без random_state.",
+    impact: "Числа в README нельзя повторить; сравнение с будущими моделями будет шумным.",
+    recommendation: "Зафиксировать random_state и перезапустить бейзлайн.",
+  });
+  const y1changes = review(
+    y1,
+    40,
+    { summary: "Добавлен бейзлайн на случайном лесе.", findings: [seeds] },
+    { files: ["src/baseline.py", "README.md"] },
+  );
+  setPrActivity(y1, 38);
+  const y2 = pr(yieldP, 3, "student-grigory", "Фиксация сидов и перезапуск бейзлайна", "merged");
+  const seedsC = y1changes.find((c) => c.title === seeds.title);
+  review(
+    y2,
+    18,
+    {
+      summary: "Зафиксированы сиды, бейзлайн перезапущен, результаты в README обновлены.",
+      findings: seedsC
+        ? [carry(seeds, seedsC, "closed", "random_state зафиксирован в baseline.py, результаты в README пересчитаны.")]
+        : [],
+    },
+    { files: ["src/baseline.py", "README.md"] },
+  );
+  setPrActivity(y2, 18);
 
-  // 4. A serious finding found and fixed (open → closed), and one that came back
+  // 4. A critical finding found and fixed (open → closed), and one that came back
   //    (open → closed → reopened).
   const bandgap = upsertProject(DEMO_OWNER, "bandgap", "Ширина запрещённой зоны");
   upsertParticipant(bandgap, "student-dmitry");
   const b1 = pr(bandgap, 7, "student-dmitry", "Исправил разделение по структурам", "open");
-  fillActivity(b1, [60, 46, 30]);
-  const b1a = mkAnalysis(b1, 12, "Нашёл дубликаты структур между выборками.");
-  const b1r = applyReconciliation(b1, b1a, {
-    summary: "Нашёл дубликаты структур между выборками.",
-    findings: [
-      finding({
-        severity: "high",
-        category: "Утечка данных",
-        title: "Одинаковые кристаллические структуры в train и test",
-        file: "src/dataset.py",
-        lines: "77-90",
-        evidence: "Разбиение по строкам, а не по уникальным структурам.",
-        impact: "Модель видит тестовые структуры при обучении — оценка завышена.",
-        recommendation: "Группировать по структуре (GroupShuffleSplit).",
-      }),
-      finding({
-        severity: "medium",
-        category: "Оценка качества",
-        title: "Метрика считается на train, а не на hold-out",
-        file: "src/eval.py",
-        lines: "12",
-        evidence: "r2_score(y_train, model.predict(X_train)).",
-        impact: "Отчётный R² не говорит об обобщающей способности.",
-        recommendation: "Считать метрику на отложенной выборке.",
-      }),
-    ],
+  quiet(b1, 30, ["src/dataset.py"]);
+  const dup = finding({
+    area: "methodology",
+    severity: "critical",
+    title: "Одинаковые кристаллические структуры в обучающей и тестовой выборках",
+    description: "Данные делятся по строкам, а одна структура встречается в нескольких строках с разными расчётами.",
+    locations: [{ kind: "file", target: "src/dataset.py", detail: "77-90" }],
+    evidence: "train_test_split по строкам таблицы; material_id не учитывается.",
+    impact: "Модель видит тестовые структуры при обучении — оценка завышена.",
+    recommendation: "Группировать по структуре (GroupShuffleSplit по material_id).",
   });
-  const dup = b1r.statusChanges.find((c) => c.title.startsWith("Одинаковые"));
-  const evalF = b1r.statusChanges.find((c) => c.title.startsWith("Метрика"));
-  if (dup && evalF) {
-    const b1b = mkAnalysis(b1, 6, "Повторная проверка: разделение исправлено, метрика на hold-out.");
-    applyReconciliation(b1, b1b, {
-      summary: "Повторная проверка.",
-      findings: [
-        finding({ priorId: dup.findingId, status: "closed", severity: "high", category: "Утечка данных",
-          title: "Одинаковые кристаллические структуры в train и test", file: "src/dataset.py", lines: "77-90",
-          reason: "Внедрён GroupShuffleSplit — дубликаты между выборками устранены." }),
-        finding({ priorId: evalF.findingId, status: "closed", severity: "medium", category: "Оценка качества",
-          title: "Метрика считается на train, а не на hold-out", file: "src/eval.py", lines: "12",
-          reason: "Метрика переведена на отложенную выборку." }),
-      ],
-    });
-    const b1c = mkAnalysis(b1, 1, "Рефакторинг вернул старую оценку на train.");
-    applyReconciliation(b1, b1c, {
-      summary: "Рефакторинг вернул старую оценку на train.",
-      findings: [
-        finding({ priorId: evalF.findingId, status: "reopened", severity: "medium", category: "Оценка качества",
-          title: "Метрика считается на train, а не на hold-out", file: "src/eval.py", lines: "14",
-          reason: "После рефакторинга eval.py снова считает R² на обучающей выборке." }),
-      ],
-    });
+  const evalF = finding({
+    area: "methodology",
+    severity: "important",
+    title: "Качество модели считается на обучающей выборке",
+    description: "Отчётный R² вычисляется по тем же данным, на которых модель обучалась.",
+    locations: [{ kind: "file", target: "src/eval.py", detail: "12" }],
+    evidence: "r2_score(y_train, model.predict(X_train))",
+    impact: "Отчётный R² ничего не говорит о качестве на новых материалах.",
+    recommendation: "Считать метрику на отложенной выборке.",
+  });
+  const b1changes = review(
+    b1,
+    12,
+    { summary: "Изменена схема разделения данных и оценка качества.", findings: [dup, evalF] },
+    { files: ["src/dataset.py", "src/eval.py"] },
+  );
+  const dupC = b1changes.find((c) => c.title === dup.title);
+  const evalC = b1changes.find((c) => c.title === evalF.title);
+  if (dupC && evalC) {
+    review(
+      b1,
+      6,
+      {
+        summary: "Разделение переведено на группы по структурам, метрика — на отложенную выборку.",
+        findings: [
+          carry(dup, dupC, "closed", "Внедрён GroupShuffleSplit — дубликаты между выборками устранены."),
+          carry(evalF, evalC, "closed", "Метрика переведена на отложенную выборку."),
+        ],
+      },
+      { files: ["src/dataset.py", "src/eval.py"] },
+    );
+    review(
+      b1,
+      1,
+      {
+        summary: "Рефакторинг модуля оценки.",
+        findings: [
+          carry(evalF, evalC, "reopened", "После рефакторинга eval.py снова считает R² на обучающей выборке.", {
+            locations: [{ kind: "file", target: "src/eval.py", detail: "14" }],
+          }),
+        ],
+      },
+      { files: ["src/eval.py"] },
+    );
   }
   setPrActivity(b1, 1);
 
-  // 5. Stale: nothing for 40 days, one medium finding still open.
+  // 5. Stale: nothing for 40 days; a methodology finding and a novelty note open.
   const retro = upsertProject(DEMO_OWNER, "retrosynthesis", "Планирование ретросинтеза");
   upsertParticipant(retro, "student-elena");
   const r1 = pr(retro, 4, "student-elena", "Добавил перебор путей синтеза", "open");
-  mkAnalysis(r1, 68, "Разбор перебора путей синтеза.");
-  const r1a = mkAnalysis(r1, 42, "Повторный разбор.");
-  applyReconciliation(r1, r1a, {
-    summary: "Разобрал перебор путей синтеза.",
-    findings: [
-      finding({
-        severity: "medium",
-        category: "Оценка качества",
-        title: "Оценка только по top-1, без top-k",
-        file: "src/search.py",
-        lines: "120-140",
-        evidence: "Считается доля точных совпадений top-1; top-k accuracy не измеряется.",
-        impact: "Занижает практическую полезность — верный путь часто в top-5.",
-        recommendation: "Добавить top-3 и top-5 accuracy к отчёту.",
-      }),
-    ],
-  });
+  quiet(r1, 68, ["src/search.py"]);
+  review(
+    r1,
+    42,
+    {
+      summary: "Добавлен перебор путей синтеза и оценка найденных маршрутов.",
+      findings: [
+        finding({
+          area: "methodology",
+          severity: "important",
+          title: "Оценивается только первый предложенный путь",
+          description: "Считается доля точных совпадений top-1; top-k не измеряется.",
+          locations: [{ kind: "file", target: "src/search.py", detail: "120-140" }],
+          evidence: "accuracy = mean(pred[0] == true_route)",
+          impact: "Практическая полезность занижена — верный путь часто находится среди первых пяти.",
+          recommendation: "Добавить top-3 и top-5 accuracy к отчёту.",
+        }),
+        finding({
+          area: "novelty",
+          severity: "info",
+          title: "Нет сравнения с существующими инструментами ретросинтеза",
+          description:
+            "Предложенный перебор близок к известным подходам (поиск по дереву шаблонов), но в работе не сравнивается ни с одним из них.",
+          locations: [
+            { kind: "document", target: "RESEARCH.md", detail: "раздел «Методы»" },
+            { kind: "other", target: "Сравнение с AiZynthFinder или ASKCOS отсутствует" },
+          ],
+          evidence: "RESEARCH.md не упоминает существующие системы планирования синтеза.",
+          impact: "Неясно, в чём вклад работы относительно известных решений.",
+          recommendation: "Добавить сравнение хотя бы с одним открытым инструментом на том же наборе реакций.",
+        }),
+      ],
+    },
+    { files: ["src/search.py", "RESEARCH.md"] },
+  );
   setPrActivity(r1, 40);
 
-  // 6. Healthy and busy: a serious leak found earlier and fixed, a low finding open,
+  // 6. Healthy and busy: a critical leak found earlier and fixed, an info finding open,
   //    a PR closed without merge (its finding is listed apart), latest answer unparsed.
   const proteinLigand = upsertProject(DEMO_OWNER, "protein-ligand", "Аффинность белок–лиганд");
   upsertParticipant(proteinLigand, "student-fedor");
   upsertParticipant(proteinLigand, "student-galina");
   const p0 = pr(proteinLigand, 9, "student-galina", "Эксперимент с GNN (отложен)", "closed");
-  const p0a = mkAnalysis(p0, 25, "Разбор экспериментальной ветки.");
-  applyReconciliation(p0, p0a, {
-    summary: "Разбор экспериментальной ветки.",
-    findings: [
-      finding({
-        severity: "medium",
-        category: "Переобучение",
-        title: "Подбор гиперпараметров по тестовой выборке",
-        file: "experiments/gnn.py",
-        lines: "60-75",
-        evidence: "GridSearch оценивает кандидатов на X_test.",
-        impact: "Тест перестаёт быть независимой оценкой.",
-        recommendation: "Подбирать на валидации или через вложенную CV.",
-      }),
-    ],
-  });
+  review(
+    p0,
+    25,
+    {
+      summary: "Экспериментальная ветка с графовой нейросетью.",
+      findings: [
+        finding({
+          area: "methodology",
+          severity: "important",
+          title: "Гиперпараметры подбираются по тестовой выборке",
+          description: "Перебор гиперпараметров оценивает кандидатов на тестовых данных.",
+          locations: [{ kind: "file", target: "experiments/gnn.py", detail: "60-75" }],
+          evidence: "GridSearch оценивает кандидатов на X_test.",
+          impact: "Тест перестаёт быть независимой оценкой.",
+          recommendation: "Подбирать на валидации или через вложенную кросс-валидацию.",
+        }),
+      ],
+    },
+    { files: ["experiments/gnn.py"] },
+  );
   setPrActivity(p0, 24);
 
   const p1 = pr(proteinLigand, 11, "student-fedor", "Кросс-валидация по белковым семействам", "open");
-  fillActivity(p1, [78, 64, 50, 36]);
-  const p1a = mkAnalysis(p1, 22, "Разбор первой версии кросс-валидации.");
-  const p1r = applyReconciliation(p1, p1a, {
-    summary: "Разбор первой версии кросс-валидации.",
-    findings: [
-      finding({
-        severity: "high",
-        category: "Утечка данных",
-        title: "Схожие лиганды попадали в train и test",
-        file: "src/cv.py",
-        lines: "30-52",
-        evidence: "Разбиение случайное по строкам; близкие по скелету лиганды оказываются по обе стороны.",
-        impact: "Оценка завышена.",
-        recommendation: "Кластеризация по скелету и разбиение по кластерам.",
-      }),
-    ],
+  quiet(p1, 50, ["src/cv.py"]);
+  const ligands = finding({
+    area: "methodology",
+    severity: "critical",
+    title: "Похожие лиганды попадают и в обучение, и в тест",
+    description: "Разбиение случайное по строкам; лиганды с общим скелетом оказываются по обе стороны.",
+    locations: [{ kind: "file", target: "src/cv.py", detail: "30-52" }],
+    evidence: "KFold(shuffle=True) по строкам таблицы.",
+    impact: "Оценка завышена: модель запоминает скелеты, а не учится обобщать.",
+    recommendation: "Кластеризовать по скелету (Bemis–Murcko) и делить по кластерам.",
   });
-  fillActivity(p1, [15, 9]);
-  const leak = p1r.statusChanges[0];
-  const p1b = mkAnalysis(p1, 5, "Разбор схемы кросс-валидации по семействам.");
-  applyReconciliation(p1, p1b, {
-    summary: "Разбор схемы кросс-валидации по семействам.",
-    findings: [
-      ...(leak
-        ? [
-            finding({ priorId: leak.findingId, status: "closed", severity: "high", category: "Утечка данных",
-              title: "Схожие лиганды попадали в train и test", file: "src/cv.py", lines: "30-52",
-              reason: "Исправлено в этом PR — разбиение по семействам." }),
-          ]
-        : []),
-      finding({
-        severity: "low",
-        category: "Воспроизводимость",
-        title: "Версии зависимостей не зафиксированы",
-        file: "requirements.txt",
-        evidence: "Пакеты указаны без версий.",
-        impact: "Окружение может не воспроизвестись.",
-        recommendation: "Зафиксировать версии (pip freeze).",
-      }),
-    ],
-  });
-  mkAnalysis(p1, 2, null, "parse_error");
+  const p1changes = review(
+    p1,
+    22,
+    { summary: "Первая версия кросс-валидации.", findings: [ligands] },
+    { files: ["src/cv.py"] },
+  );
+  quiet(p1, 9, ["src/cv.py", "tests/test_cv.py"]);
+  const ligandsC = p1changes.find((c) => c.title === ligands.title);
+  review(
+    p1,
+    5,
+    {
+      summary: "Кросс-валидация переведена на разбиение по белковым семействам.",
+      findings: [
+        ...(ligandsC ? [carry(ligands, ligandsC, "closed", "Исправлено в этом PR — разбиение по семействам.")] : []),
+        finding({
+          area: "reproducibility",
+          severity: "info",
+          title: "Версии зависимостей не зафиксированы",
+          description: "Пакеты в requirements.txt указаны без версий.",
+          locations: [{ kind: "file", target: "requirements.txt" }],
+          evidence: "rdkit\ntorch\nscikit-learn",
+          impact: "Окружение может не воспроизвестись через несколько месяцев.",
+          recommendation: "Зафиксировать версии (pip freeze).",
+        }),
+      ],
+    },
+    { files: ["src/cv.py", "requirements.txt"] },
+  );
+  review(p1, 2, null, { files: ["src/cv.py"], outcome: "parse_error" });
   setPrActivity(p1, 2);
 
-  // 7. Unassigned and active: high finding open 5 days, and the latest commit
-  //    analysis FAILED — the PR's merge stays blocked. Visible to the head only.
+  // 7. Unassigned and active: a critical finding open 5 days, a problem-statement
+  //    finding, and the latest commit analysis FAILED — the PR's merge stays blocked.
   const spectra = upsertProject(DEMO_OWNER, "spectra", "Предсказание ИК-спектров");
   upsertParticipant(spectra, "student-igor");
   const sp1 = pr(spectra, 1, "student-igor", "Первая версия модели спектров", "open");
-  fillActivity(sp1, [16, 7]);
-  const sp1a = mkAnalysis(sp1, 5, "Разбор первой версии модели.");
-  applyReconciliation(sp1, sp1a, {
-    summary: "Разбор первой версии модели.",
-    findings: [
-      finding({
-        severity: "high",
-        category: "Оценка качества",
-        title: "Тестовая выборка использована для ранней остановки",
-        file: "src/train.py",
-        lines: "88-95",
-        evidence: "EarlyStopping отслеживает val_loss, посчитанный на тестовом наборе.",
-        impact: "Модель косвенно подгоняется под тест — итоговая оценка оптимистична.",
-        recommendation: "Выделить отдельный валидационный набор для ранней остановки.",
-      }),
-    ],
-  });
-  mkAnalysis(sp1, 1, null, "error");
+  quiet(sp1, 16, ["src/train.py"]);
+  review(
+    sp1,
+    5,
+    {
+      summary: "Первая версия модели предсказания спектров.",
+      findings: [
+        finding({
+          area: "methodology",
+          severity: "critical",
+          title: "Тестовая выборка используется для ранней остановки",
+          description: "Остановка обучения ориентируется на ошибку, посчитанную на тестовом наборе.",
+          locations: [{ kind: "file", target: "src/train.py", detail: "88-95" }],
+          evidence: "EarlyStopping(monitor='val_loss') с validation_data=(X_test, y_test).",
+          impact: "Модель косвенно подгоняется под тест — итоговая оценка оптимистична.",
+          recommendation: "Выделить отдельный валидационный набор для ранней остановки.",
+        }),
+        finding({
+          area: "problem",
+          severity: "important",
+          title: "Не определено, как сравнивать предсказанный спектр с настоящим",
+          description:
+            "Цель сформулирована как «предсказать ИК-спектр», но не выбрано, что считать хорошим предсказанием: положение пиков, форма или корреляция.",
+          locations: [{ kind: "document", target: "RESEARCH.md", detail: "раздел «Цель»" }],
+          evidence: "RESEARCH.md: «цель — предсказание ИК-спектров по структуре»; критерий качества не указан.",
+          impact: "Без критерия невозможно сравнить модели и сделать вывод об успехе работы.",
+          recommendation: "Выбрать метрику сходства спектров (например, косинусную по бинам) и зафиксировать её в описании.",
+        }),
+      ],
+    },
+    { files: ["src/train.py", "RESEARCH.md"] },
+  );
+  review(sp1, 1, null, { files: [], outcome: "error" });
   setPrActivity(sp1, 1);
 
   // 8. Paused project.

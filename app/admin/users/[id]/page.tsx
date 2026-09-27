@@ -5,6 +5,7 @@ import { listAllProjects, listProjectSupervisors } from "@/lib/curator/store";
 import { deleteUserAction } from "@/app/actions/admin";
 import { roleLabel } from "@/lib/format";
 import { AppHeader, PageShell } from "@/components/AppHeader";
+import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EditUserForm, SetPasswordForm, ToggleDisabledForm } from "@/components/admin/EditUserForm";
@@ -32,9 +33,7 @@ export default async function AdminUserPage({
     <>
       <AppHeader viewer={viewer} />
       <PageShell>
-        <Link href="/admin" className="text-xs text-muted-foreground hover:text-foreground">
-          ← Управление
-        </Link>
+        <Breadcrumbs items={[{ label: "Управление", href: "/admin" }, { label: user.name ?? user.login }]} />
         <div className="mt-2 mb-6 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">{user.name ?? user.login}</h1>
           <Badge tone="primary">{roleLabel(user.role)}</Badge>

@@ -43,7 +43,7 @@ export async function POST(req: Request) {
       return Response.json({ ok: true, duplicate: true });
     }
   }
-  // A 500 asks GitHub to redeliver; forget the delivery so the retry is not a duplicate.
+  // On a 500, forget the delivery so a manual redelivery is not treated as a duplicate.
   const failed = (message: string, error: unknown) => {
     console.error(`[webhook] ${message}:`, error);
     if (dedup) forgetEvent(dedup);
