@@ -474,11 +474,11 @@ export function queueSettings() {
     return Number.isFinite(value) && value >= 0 ? value : fallback;
   };
   return {
-    debounceMs: num("REVIEW_DEBOUNCE_MS", 120_000),
+    debounceMs: num("REVIEW_DEBOUNCE_MS", 10_000),
     deadlineMs: num("REVIEW_DEADLINE_MS", 30 * 60_000),
     dailyLimit: num("REVIEW_DAILY_LIMIT", 50),
     retryWindowMs: num("REVIEW_RETRY_WINDOW_MS", 24 * 60 * 60_000),
-    concurrency: Math.max(1, num("REVIEW_CONCURRENCY", 3)),
+    concurrency: Math.max(1, num("REVIEW_CONCURRENCY", 1)),
   };
 }
 
