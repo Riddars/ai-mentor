@@ -104,6 +104,8 @@ async function callOpenAICompatible(
       stream: false,
       max_tokens: numberEnv("LLM_MAX_TOKENS", 8000),
       temperature: Number(process.env.LLM_TEMPERATURE ?? "0.2"),
+      // Router-style switch (selectel, openrouter); sent only when explicitly disabled.
+      ...(process.env.LLM_REASONING === "off" ? { reasoning: { enabled: false } } : {}),
     }),
     // A hung provider must not keep the required check "in progress" forever.
     signal: AbortSignal.timeout(numberEnv("LLM_TIMEOUT_MS", 300_000)),
