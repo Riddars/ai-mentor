@@ -17,6 +17,20 @@ export type Reviewer = "simulate" | "llm";
 
 const REVIEWERS: readonly Reviewer[] = ["simulate", "llm"];
 
+// Как разбирается коммит при CURATOR_REVIEWER=llm: `diff` — один запрос по изменениям,
+// `agent` — агент над копией репозитория (lib/agent). Ответы на комментарии всегда идут по diff.
+export type ReviewMode = "diff" | "agent";
+
+const REVIEW_MODES: readonly ReviewMode[] = ["diff", "agent"];
+
+export function reviewMode(): ReviewMode {
+  const raw = process.env.REVIEW_MODE ?? "diff";
+  if (!REVIEW_MODES.includes(raw as ReviewMode)) {
+    throw new Error(`Invalid REVIEW_MODE "${raw}", expected one of: ${REVIEW_MODES.join(", ")}`);
+  }
+  return raw as ReviewMode;
+}
+
 export interface Config {
   appId: string;
   privateKey: string;

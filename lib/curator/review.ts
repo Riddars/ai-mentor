@@ -2,8 +2,12 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { chat, type ChatMessage } from "@/lib/llm/chat";
+import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
+import { reviewMode } from "@/lib/config";
+import { AGENT_RULES } from "@/lib/agent/prompt";
+import { withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext } from "@/lib/curator/context";
+import { verifyFindings } from "@/lib/curator/verify";
 import {
   FINDING_AREAS,
   LOCATION_KINDS,
@@ -385,16 +389,22 @@ async function runReview(
   context: { isCurrent?: () => boolean; fixesFinal?: () => boolean } = {},
 ): Promise<ReviewOutcome> {
   const { prompt, materials, priorIds } = await collectReviewContext(params, prId);
-  const messages: ChatMessage[] = [
-    { role: "system", content: SYSTEM_PROMPT },
-    { role: "user", content: prompt },
-  ];
-  // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
-  let answer = await chat(messages);
-  let parsed = parseModelJson(answer.content);
-  if (!parsed) {
+  let answer: ChatResult;
+  let parsed: ReconcileResult | null;
+  if (trigger === "commit" && reviewMode() === "agent") {
+    ({ answer, parsed } = await reviewWithAgent(params, prompt, materials.files, context.isCurrent));
+  } else {
+    const messages: ChatMessage[] = [
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: prompt },
+    ];
+    // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
     answer = await chat(messages);
     parsed = parseModelJson(answer.content);
+    if (!parsed) {
+      answer = await chat(messages);
+      parsed = parseModelJson(answer.content);
+    }
   }
   const record = {
     prId,
@@ -444,6 +454,45 @@ async function runReview(
     statusChanges,
     kept,
   };
+}
+
+/**
+ * Agent review over a copy of the repository at the PR head, with the new findings checked
+ * against the real file text. The raw answer keeps a trailer for the supervisor: what the
+ * agent read and which findings the check dropped.
+ */
+async function reviewWithAgent(
+  params: ReviewParams,
+  prompt: string,
+  changed: string[],
+  isCurrent?: () => boolean,
+): Promise<{ answer: ChatResult; parsed: ReconcileResult | null }> {
+  return withAgentRun(
+    params,
+    { systemPrompt: `${SYSTEM_PROMPT}\n${AGENT_RULES}`, userPrompt: prompt, changed },
+    async ({ reply, provider, model }, root) => {
+      if (isCurrent && !isCurrent()) throw new StaleReviewError();
+      if (reply.error) throw new Error(`Agent review failed: ${reply.error}`);
+      const trailer = [
+        `[agent] шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, ` +
+          `токенов: ${reply.tokensIn}/${reply.tokensOut}`,
+        `[agent] прочитано: ${reply.viewed.join(", ") || "—"}`,
+        ...(reply.partialCopy ? [`[agent] копия неполная: ${reply.partialCopy}`] : []),
+      ];
+      const label = { provider, model: `${model} (agent)` };
+      const parsed = parseModelJson(reply.text);
+      if (!parsed) {
+        return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed: null };
+      }
+      const verified = await verifyFindings(parsed, root);
+      trailer.push(
+        verified.checked ? "[verify] находки перепроверены" : "[verify] перепроверка не удалась, находки оставлены",
+        ...verified.dropped.map((d) => `[verify] отброшено: ${d.title} — ${d.reason}`),
+      );
+      return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed: verified.result };
+    },
+    isCurrent,
+  );
 }
 
 /**

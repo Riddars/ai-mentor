@@ -23,6 +23,12 @@ const OPENAI_COMPATIBLE: Record<string, OpenAICompatProvider> = {
   openrouter: { baseURL: "https://openrouter.ai/api/v1", keyEnv: "OPENROUTER_API_KEY" },
 };
 
+/** Address and key of an OpenAI-compatible provider; null for an unknown one. */
+export function openAICompatibleEndpoint(provider: string): { baseURL: string; apiKey: string | undefined } | null {
+  const entry = OPENAI_COMPATIBLE[provider];
+  return entry ? { baseURL: entry.baseURL, apiKey: process.env[entry.keyEnv] } : null;
+}
+
 /** Дефолтная модель провайдера, если LLM_MODEL / LLM_FALLBACK_MODEL не заданы. */
 const DEFAULT_MODEL: Record<string, string> = {
   provod: "deepseek/deepseek-v4-pro",
