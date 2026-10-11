@@ -406,6 +406,8 @@ async function runReview(
     }
   }
   if (!result) {
+    // The agent failed on a PR that moved on meanwhile: the fallback would be wasted.
+    if (agentNote && context.isCurrent && !context.isCurrent()) throw new StaleReviewError();
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: prompt },
@@ -510,10 +512,9 @@ async function reviewWithAgent(
           ...(reply.partialCopy ? [`[agent] копия неполная: ${reply.partialCopy}`] : []),
         ];
         const parsed = parseModelJson(reply.text);
-        // An unreadable answer is not worth a verification request; a stale one is not applied.
-        if (!parsed || stale) {
-          return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed };
-        }
+        // A stale answer is not applied: returned unverified for the caller to record.
+        if (stale) return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed };
+        if (!parsed) return { failure: `[agent] ответ не удалось разобрать; ${usage}` };
         const verified = await verifyFindings(parsed, root);
         trailer.push(
           verified.checked ? "[verify] находки перепроверены" : "[verify] перепроверка не удалась, находки оставлены",

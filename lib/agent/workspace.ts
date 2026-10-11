@@ -160,6 +160,7 @@ export function repoMap(files: RepoFile[], extracted: ExtractResult, maxLines = 
   if (extracted.skipped.length > 0) {
     lines.push("", "Не распаковано:");
     lines.push(...extracted.skipped.slice(0, 50).map((s) => `${s.path} — ${s.reason}`));
+    if (extracted.skipped.length > 50) lines.push(`… и другие записи (${extracted.skipped.length - 50} в списке)`);
   }
   if (extracted.stoppedOn) {
     lines.push("", `Копия неполная: распаковка остановлена (${extracted.stoppedOn}).`);

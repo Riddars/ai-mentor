@@ -133,10 +133,11 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
       if (message.type === "result") finish(null, message);
     });
     child.on("error", (error) => finish(error));
-    child.on("exit", (code) => {
+    child.on("exit", () => {
       exited = true;
-      finish(new Error(`The agent process exited with code ${code}`));
     });
+    // "close" comes after the IPC channel is drained, so a reply sent just before exiting is not lost.
+    child.on("close", (code) => finish(new Error(`The agent process exited with code ${code}`)));
     child.send(request);
   });
 }
@@ -196,7 +197,8 @@ function sleep(ms: number): Promise<void> {
  */
 export async function removeStaleAgentDirs(): Promise<void> {
   const base = tmpdir();
-  const maxAgeMs = agentLimits().timeoutMs + CHILD_GRACE_MS + DOWNLOAD_TIMEOUT_MS;
+  // Twice the longest run, which leaves room for the verification request after it.
+  const maxAgeMs = 2 * (agentLimits().timeoutMs + CHILD_GRACE_MS + DOWNLOAD_TIMEOUT_MS);
   let entries: string[];
   try {
     entries = await readdir(base);
