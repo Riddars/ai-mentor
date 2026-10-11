@@ -14,6 +14,7 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxThinkin
 import { runAgent } from "@/lib/agent/agent.mjs";
 import { childEnv, runAgentProcess } from "@/lib/agent/run";
 import { createToolLog, createTools } from "@/lib/agent/tools.mjs";
+import { transcript } from "@/lib/agent/transcript.mjs";
 import { extractTarball, listRepoFiles, relatedFiles } from "@/lib/agent/workspace";
 import { verifyFindings } from "@/lib/curator/verify";
 import type { ReconcileResult } from "@/lib/curator/store";
@@ -176,6 +177,11 @@ async function agentChecks(): Promise<void> {
   check("agent: final answer returned", result.text === FINAL_JSON && result.error === null, String(result.error));
   check("agent: tool was used", result.log.viewed.has("src/splits.py"));
   check("agent: reasoning not sent back to the model", !replayedThinking);
+  const log = transcript("case", result.messages, ["note"]);
+  check(
+    "transcript: shows request, tool call, tool result and answer",
+    ["## Запрос", "→ `read_file`", "← `read_file`", "src/splits.py", FINAL_JSON, "- note"].every((s) => log.includes(s)),
+  );
 
   faux.setResponses(
     Array.from({ length: 12 }, () => fauxAssistantMessage(fauxToolCall("list_files", {}), { stopReason: "toolUse" })),

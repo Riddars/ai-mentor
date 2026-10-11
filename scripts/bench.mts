@@ -1,26 +1,28 @@
 /**
  * Run the review agent over the curator-bench cases and score the answers.
  *
- *   npx tsx --env-file=.env.local scripts/bench.mts [--cases S01,D] [--dry] [--no-verify] [--out file.json]
+ *   npx tsx --env-file=.env.local scripts/bench.mts [--cases S01,D] [--dry] [--no-verify] [--out file.json] [--log dir]
  *
  * BENCH_DIR points at a checkout of RiddarsCorp/curator-bench (default: ../curator-bench).
  * --dry builds every case and prompt without calling the model (free).
+ * --log writes the agent's whole conversation of each case to <dir>/<case>.md.
  * Each case is built in a temporary git repository: the project, then `before/`, a commit,
  * then `files/`; the staged diff is the PR. The prompt is built by the service code.
  */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AGENT_KEY_ENV, openAICompatibleModel, runAgent } from "@/lib/agent/agent.mjs";
 import { AGENT_RULES, repositorySection } from "@/lib/agent/prompt";
+import { transcript } from "@/lib/agent/transcript.mjs";
 import { agentLimits } from "@/lib/agent/run";
 import { listRepoFiles, relatedFiles, repoMap } from "@/lib/agent/workspace";
 import { buildReviewPrompt, formatChanges, selectPriorFindings, type PrFile } from "@/lib/curator/context";
 import { SYSTEM_PROMPT, parseModelJson } from "@/lib/curator/review";
 import type { PriorFinding, ReconciledFinding, StudentResponse } from "@/lib/curator/store";
 import { verifyFindings } from "@/lib/curator/verify";
-import { openAICompatibleEndpoint } from "@/lib/llm/chat";
+import { chat, openAICompatibleEndpoint, type ChatMessage } from "@/lib/llm/chat";
 
 interface ExpectedFinding {
   area: string[];
@@ -169,6 +171,8 @@ async function main() {
   const dry = process.argv.includes("--dry");
   const verify = !process.argv.includes("--no-verify");
   const outFile = arg("out");
+  const logDir = arg("log");
+  if (logDir) mkdirSync(logDir, { recursive: true });
   const ids = readdirSync(join(benchDir, "cases"))
     .filter((id) => filters.length === 0 || filters.some((f) => id.startsWith(f)))
     .sort();
@@ -211,7 +215,14 @@ async function main() {
       });
       const parsed = result.error ? null : parseModelJson(result.text);
       const raw = parsed ? score(built.spec, parsed.findings) : null;
-      const verified = parsed && verify ? await verifyFindings(parsed, built.root) : null;
+      const verifyTokens = { input: 0, output: 0 };
+      const ask = async (messages: ChatMessage[]) => {
+        const answer = await chat(messages);
+        verifyTokens.input += answer.usage?.input ?? 0;
+        verifyTokens.output += answer.usage?.output ?? 0;
+        return answer;
+      };
+      const verified = parsed && verify ? await verifyFindings(parsed, built.root, ask) : null;
       const final = verified ? score(built.spec, verified.result.findings) : raw;
       const findings = (verified?.result ?? parsed)?.findings ?? [];
       const row = {
@@ -227,7 +238,13 @@ async function main() {
         toolCalls: result.log.calls.length,
         viewed: [...result.log.viewed],
         tokens: `${result.tokensIn}/${result.tokensOut}`,
-        cost: Number((result.tokensIn * pricing.prompt + result.tokensOut * pricing.completion).toFixed(2)),
+        verifyTokens: `${verifyTokens.input}/${verifyTokens.output}`,
+        cost: Number(
+          (
+            (result.tokensIn + verifyTokens.input) * pricing.prompt +
+            (result.tokensOut + verifyTokens.output) * pricing.completion
+          ).toFixed(2),
+        ),
         seconds: Math.round((Date.now() - started) / 1000),
         findings: findings.map((f) => `${f.priorId ?? "new"} ${f.status} [${f.area}/${f.severity}] ${f.title}`),
       };
@@ -239,6 +256,15 @@ async function main() {
       );
       for (const f of row.findings) console.log(`    ${f}`);
       for (const d of row.dropped) console.log(`    dropped: ${d.title} — ${d.reason}`);
+      if (logDir) {
+        const notes = [
+          ...(result.error ? [`Ошибка агента: ${result.error}`] : []),
+          ...(verified ? [`Проверено моделью: ${verified.checked ? "да" : "нет"}`] : []),
+          ...row.dropped.map((d) => `Отброшена «${d.title}»: ${d.reason}`),
+          ...row.findings.map((f) => `Итог: ${f}`),
+        ];
+        writeFileSync(join(logDir, `${id}.md`), transcript(id, result.messages, notes));
+      }
       if (outFile) writeFileSync(outFile, JSON.stringify(rows, null, 2));
     } finally {
       rmSync(built.root, { recursive: true, force: true });

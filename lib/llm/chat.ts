@@ -66,6 +66,12 @@ function fallbackTarget(): Target | null {
 
 interface ChatCompletionResponse {
   choices?: { message?: { content?: string }; finish_reason?: string }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+export interface ChatUsage {
+  input: number;
+  output: number;
 }
 
 /** A model answer together with who actually produced it (the fallback may have). */
@@ -73,6 +79,8 @@ export interface ChatResult {
   content: string;
   provider: string;
   model: string;
+  /** Token counts, when the provider reports them. */
+  usage?: ChatUsage;
 }
 
 function numberEnv(name: string, fallback: number): number {
@@ -88,7 +96,7 @@ function numberEnv(name: string, fallback: number): number {
 async function callOpenAICompatible(
   target: Target,
   messages: ChatMessage[],
-): Promise<string> {
+): Promise<{ content: string; usage?: ChatUsage }> {
   const conn = OPENAI_COMPATIBLE[target.provider];
   if (!conn) {
     throw new Error(`Unknown or unsupported LLM provider: "${target.provider}"`);
@@ -131,13 +139,16 @@ async function callOpenAICompatible(
   if (choice?.finish_reason === "length") {
     throw new Error(`LLM ${target.provider} answer was cut off by the token limit`);
   }
-  return content;
+  const usage = data.usage
+    ? { input: data.usage.prompt_tokens ?? 0, output: data.usage.completion_tokens ?? 0 }
+    : undefined;
+  return { content, usage };
 }
 
 /** Вызвать одного провайдера. Сюда добавится ветка на anthropic (своя схема). */
 async function callTarget(target: Target, messages: ChatMessage[]): Promise<ChatResult> {
-  const content = await callOpenAICompatible(target, messages);
-  return { content, provider: target.provider, model: target.model };
+  const { content, usage } = await callOpenAICompatible(target, messages);
+  return { content, provider: target.provider, model: target.model, usage };
 }
 
 /**

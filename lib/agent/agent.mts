@@ -44,6 +44,8 @@ export interface AgentResult {
   tokensIn: number;
   tokensOut: number;
   log: ToolLog;
+  /** The whole conversation: model texts, tool calls and tool results. */
+  messages: AgentMessage[];
 }
 
 type Models = ReturnType<typeof createModels>;
@@ -183,5 +185,13 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     last?.errorMessage ??
     agent.state.errorMessage ??
     (text === "" ? "the agent ended without a final answer" : null);
-  return { text: error ? "" : text, error, steps: assistants.length, tokensIn, tokensOut, log };
+  return {
+    text: error ? "" : text,
+    error,
+    steps: assistants.length,
+    tokensIn,
+    tokensOut,
+    log,
+    messages: agent.state.messages,
+  };
 }
