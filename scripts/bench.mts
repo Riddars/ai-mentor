@@ -43,6 +43,8 @@ interface CaseSpec {
   student_replies?: StudentResponse[];
   expected: ExpectedFinding[];
   expected_decisions?: Array<{ prior_id: number; status: string[] }>;
+  /** Real side defects of the case: reporting them is not an extra finding. */
+  allowed?: ExpectedFinding[];
   max_extra_findings: number;
 }
 
@@ -146,7 +148,10 @@ function score(spec: CaseSpec, findings: ReconciledFinding[]): Score {
       found += 1;
     }
   }
-  const extras = fresh.length - used.size;
+  // Informational findings and known real side defects of the case are not counted as extras.
+  const extras = fresh.filter(
+    (f, i) => !used.has(i) && f.severity !== "info" && !(spec.allowed ?? []).some((a) => matches(a, f)),
+  ).length;
   const decisionsOk = (spec.expected_decisions ?? []).every(({ prior_id, status }) => {
     // A prior finding the answer does not mention stays as it was, i.e. open.
     const decision = findings.find((f) => f.priorId === prior_id)?.status ?? "open";
