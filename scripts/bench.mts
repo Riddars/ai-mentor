@@ -1,11 +1,12 @@
 /**
  * Run the review agent over the curator-bench cases and score the answers.
  *
- *   npx tsx --env-file=.env.local scripts/bench.mts [--cases S01,D] [--dry] [--no-verify] [--out file.json] [--log dir]
+ *   npx tsx --env-file=.env.local scripts/bench.mts [--cases S01,D] [--dry] [--no-verify] [--out file.json] [--log dir] [--max-rub 40]
  *
  * BENCH_DIR points at a checkout of RiddarsCorp/curator-bench (default: ../curator-bench).
  * --dry builds every case and prompt without calling the model (free).
  * --log writes the agent's whole conversation of each case to <dir>/<case>.md.
+ * --max-rub stops before a case whose worst-case cost could take the total over the cap.
  * Each case is built in a temporary git repository: the project, then `before/`, a commit,
  * then `files/`; the staged diff is the PR. The prompt is built by the service code.
  */
@@ -154,6 +155,9 @@ function score(spec: CaseSpec, findings: ReconciledFinding[]): Score {
   return { pass: found === spec.expected.length && extras <= spec.max_extra_findings && decisionsOk, found, extras, decisionsOk };
 }
 
+/** Generous upper bound of a verification request: two documents plus cited excerpts. */
+const VERIFY_INPUT_TOKENS = 50_000;
+
 async function fetchPricing(baseUrl: string, apiKey: string, model: string): Promise<{ prompt: number; completion: number }> {
   try {
     const res = await fetch(`${baseUrl}/models`, { headers: { Authorization: `Bearer ${apiKey}` } });
@@ -172,6 +176,7 @@ async function main() {
   const verify = !process.argv.includes("--no-verify");
   const outFile = arg("out");
   const logDir = arg("log");
+  const maxRub = arg("max-rub") ? Number(arg("max-rub")) : null;
   if (logDir) mkdirSync(logDir, { recursive: true });
   const ids = readdirSync(join(benchDir, "cases"))
     .filter((id) => filters.length === 0 || filters.some((f) => id.startsWith(f)))
@@ -190,8 +195,25 @@ async function main() {
     console.log(`model: ${provider} ${modelId}; cases: ${ids.length}; verify: ${verify}`);
   }
 
+  // The most one case can cost: the token budget is checked after each step, so the last step
+  // may overrun it by one full context; then one verification request.
+  const limits = agentLimits();
+  const worstCase = runner
+    ? limits.maxTokens * pricing.completion +
+      runner.model.contextWindow * pricing.prompt +
+      runner.model.maxTokens * pricing.completion +
+      (VERIFY_INPUT_TOKENS * pricing.prompt + runner.model.maxTokens * pricing.completion)
+    : 0;
+  if (maxRub !== null && runner && pricing.prompt === 0) throw new Error("--max-rub needs model pricing, which is unavailable");
+  if (maxRub !== null && runner) console.log(`spend cap ${maxRub} ₽; worst case per case ≈${worstCase.toFixed(2)} ₽`);
+
   const rows: Array<Record<string, unknown>> = [];
+  let spent = 0;
   for (const id of ids) {
+    if (maxRub !== null && runner && spent + worstCase > maxRub) {
+      console.log(`stopped before ${id}: spent ≈${spent.toFixed(2)} ₽, the next case could exceed the ${maxRub} ₽ cap`);
+      break;
+    }
     const built = await buildCase(benchDir, id);
     try {
       const files = await listRepoFiles(built.root);
@@ -211,7 +233,7 @@ async function main() {
         userPrompt,
         models: runner.models,
         model: runner.model,
-        limits: agentLimits(),
+        limits,
       });
       const parsed = result.error ? null : parseModelJson(result.text);
       const raw = parsed ? score(built.spec, parsed.findings) : null;
@@ -249,6 +271,7 @@ async function main() {
         findings: findings.map((f) => `${f.priorId ?? "new"} ${f.status} [${f.area}/${f.severity}] ${f.title}`),
       };
       rows.push(row);
+      spent += row.cost;
       console.log(
         `${id}: ${row.pass ? "PASS" : "FAIL"} found ${row.found} extras ${row.extras} decisions ${row.decisionsOk} ` +
           `(before verify: ${row.passBeforeVerify ? "pass" : "fail"}) tools ${row.toolCalls} ` +
