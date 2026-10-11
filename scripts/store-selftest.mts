@@ -84,14 +84,12 @@ const reconcile = (
   findings: ReturnType<typeof finding>[],
   changed: Map<string, Set<number> | null>,
   fixesFinal = false,
-  allowFixes = true,
 ) =>
   store.applyReconciliation(prId, analysis(prId), { summary: "", findings }, {
     allowedPriorIds: new Set(findings.map((f) => f.priorId).filter((id): id is number => id !== null)),
     allowNew: true,
     fixesFinal,
     changed,
-    allowFixes,
   });
 const row = (id: number) =>
   db.prepare("SELECT status, scope, pull_request_id AS prId, resolved_by_pr_id AS resolvedBy FROM findings WHERE id = @id").get({ id }) as {
@@ -193,13 +191,6 @@ const countBefore = (db.prepare("SELECT COUNT(*) AS n FROM findings").get() as {
 reconcile(prI, [finding("race finding", [file("src/i.py", "1")], "closed", race)], changes(["src/i.py", [1]]));
 const countAfter = (db.prepare("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n;
 check("a prior finding closed meanwhile is not duplicated", countAfter === countBefore && row(race).status === "dismissed");
-
-// A reply on a PR closed without merge cannot fix anything.
-const prJ = pr(10, "feat-j");
-reconcile(prJ, [finding("old bug in j", [file("src/j_old.py", "2")])], changes(["src/j.py", [1]]));
-const oldJ = idOf("old bug in j");
-const closedReply = reconcile(prJ, [finding("x", [], "closed", oldJ)], changes(["src/j_old.py", [2]]), false, false);
-check("a closed PR's reply does not count a fix", row(oldJ).status === "open" && closedReply.kept.some((k) => k.fixNotCounted));
 
 // A PR merged into main takes over findings of PRs merged into its branch before it.
 const prK = pr(11, "feat-k");

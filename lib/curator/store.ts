@@ -880,8 +880,6 @@ export interface ReconcileOptions {
   changed: ChangedLines;
   /** Head branch of the PR, kept with new findings for display. */
   branch?: string | null;
-  /** False when the PR's fixes can never land (closed without merge). */
-  allowFixes?: boolean;
 }
 
 /**
@@ -991,16 +989,14 @@ export function applyReconciliation(
 
       const findingId = f.priorId as number;
       const priorLocations = parseJson<FindingLocation[]>(prior.locations) ?? [];
-      const notCounted =
-        f.status !== "closed"
-          ? null
-          : options.allowFixes === false
-            ? "pull request закрыт без слияния — исправление не попадёт в основную ветку"
-            : !fixVisible(priorLocations, changedFiles)
-              ? "исправление не видно в изменениях этого pull request"
-              : null;
-      if (notCounted) {
-        kept.push({ findingId, title: prior.title, status: prior.status, reason: notCounted, fixNotCounted: true });
+      if (f.status === "closed" && !fixVisible(priorLocations, changedFiles)) {
+        kept.push({
+          findingId,
+          title: prior.title,
+          status: prior.status,
+          reason: "исправление не видно в изменениях этого pull request",
+          fixNotCounted: true,
+        });
         continue;
       }
       const status: FindingStatus =

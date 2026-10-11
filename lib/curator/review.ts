@@ -428,7 +428,6 @@ async function runReview(
   context: {
     isCurrent?: () => boolean;
     fixesFinal?: () => boolean;
-    allowFixes?: boolean;
     attempt?: number;
   } = {},
 ): Promise<ReviewOutcome> {
@@ -540,7 +539,6 @@ async function runReview(
     fixesFinal: context.fixesFinal?.() ?? false,
     changed,
     branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
-    allowFixes: context.allowFixes,
   });
 
   return {
@@ -933,13 +931,15 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
   };
   const prId = persistPrContext(reviewParams);
   try {
+    // Closed without merge: its fixes never land and its branch findings no longer count,
+    // so a reply there is kept but not reconciled — the model is not called.
+    if (reviewParams.state === "closed") return;
     if (loadOpenFindings(prId).length === 0) {
       return; // сверять нечего — модель не вызываем
     }
 
     const outcome = await runReview(reviewParams, prId, "comment", {
       fixesFinal: () => reviewParams.mergedIntoDefault ?? false,
-      allowFixes: reviewParams.state !== "closed",
     });
     const body = renderReplyComment(outcome.statusChanges, outcome.kept);
     if (!body) {
