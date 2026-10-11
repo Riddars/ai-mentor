@@ -37,6 +37,14 @@ export interface ExtractResult {
 }
 
 const WRITABLE = new Set(["File", "OldFile", "ContiguousFile", "Directory"]);
+const MAX_SKIPPED = 200;
+const MAX_PATH_CHARS = 200;
+const MAX_RELATED_SOURCE_BYTES = 1024 * 1024;
+
+/** Paths and link targets come from the student; they are shortened before being shown. */
+function shorten(value: string): string {
+  return value.length > MAX_PATH_CHARS ? `${value.slice(0, MAX_PATH_CHARS)}…` : value;
+}
 
 /** Archive path without the top-level `owner-repo-sha/` directory, or null if unsafe. */
 function safeRelativePath(raw: string): string | null {
@@ -55,6 +63,11 @@ export async function extractTarball(
   limits: ExtractLimits = DEFAULT_LIMITS,
 ): Promise<ExtractResult> {
   const skipped: SkippedEntry[] = [];
+  let skippedMore = 0;
+  const skip = (path: string, reason: string) => {
+    if (skipped.length < MAX_SKIPPED) skipped.push({ path: shorten(path), reason });
+    else skippedMore += 1;
+  };
   let files = 0;
   let written = 0;
   let read = 0;
@@ -75,18 +88,18 @@ export async function extractTarball(
     }
     const path = safeRelativePath(raw);
     if (path === null) {
-      skipped.push({ path: raw, reason: "unsafe path" });
+      skip(raw, "unsafe path");
       return false;
     }
     if (path === "") return false;
     if (!WRITABLE.has(e.type)) {
-      const target = e.linkpath ? ` → ${e.linkpath}` : "";
-      skipped.push({ path, reason: `${e.type}${target}, not unpacked` });
+      const target = e.linkpath ? ` → ${shorten(e.linkpath)}` : "";
+      skip(path, `${e.type}${target}, not unpacked`);
       return false;
     }
     if (e.type === "Directory") return true;
     if (e.size > limits.maxFileBytes) {
-      skipped.push({ path, reason: `file of ${formatSize(e.size)}, larger than the limit` });
+      skip(path, `file of ${formatSize(e.size)}, larger than the limit`);
       return false;
     }
     files += 1;
@@ -107,6 +120,7 @@ export async function extractTarball(
   } catch (error) {
     if (stoppedOn === null) throw error;
   }
+  if (skippedMore > 0) skipped.push({ path: "…", reason: `${skippedMore} more entries not unpacked` });
   return { skipped, stoppedOn };
 }
 
@@ -139,7 +153,7 @@ export async function listRepoFiles(root: string): Promise<RepoFile[]> {
 
 /** The repository map shown to the agent: files with sizes and entries left out. */
 export function repoMap(files: RepoFile[], extracted: ExtractResult, maxLines = 300): string {
-  const lines = files.slice(0, maxLines).map((f) => `${f.path} (${formatSize(f.size)})`);
+  const lines = files.slice(0, maxLines).map((f) => `${shorten(f.path)} (${formatSize(f.size)})`);
   if (files.length > maxLines) {
     lines.push(`… ещё ${files.length - maxLines} файлов — смотри через list_files`);
   }
@@ -153,23 +167,27 @@ export function repoMap(files: RepoFile[], extracted: ExtractResult, maxLines = 
   return lines.join("\n");
 }
 
-const PY_IMPORT = /^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))/gm;
+// Indentation only: `\s*` would also swallow line breaks and make the scan quadratic.
+const PY_IMPORT = /^[ \t]*(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))/gm;
 
 /**
  * Repository files imported by the changed Python files and notebooks: the code a change
  * most likely depends on.
  */
 export async function relatedFiles(root: string, changed: string[], files: RepoFile[]): Promise<string[]> {
-  const known = new Set(files.map((f) => f.path));
+  const sizes = new Map(files.map((f) => [f.path, f.size]));
   // Modules imported through sys.path tweaks: matched by file name when it is unique.
   const byName = new Map<string, string[]>();
   for (const f of files) {
     const name = posix.basename(f.path);
-    byName.set(name, [...(byName.get(name) ?? []), f.path]);
+    const same = byName.get(name);
+    if (same) same.push(f.path);
+    else byName.set(name, [f.path]);
   }
   const related = new Set<string>();
   for (const path of changed) {
-    if (!known.has(path) || !/\.(py|ipynb)$/i.test(path)) continue;
+    const size = sizes.get(path);
+    if (size === undefined || size > MAX_RELATED_SOURCE_BYTES || !/\.(py|ipynb)$/i.test(path)) continue;
     const raw = await readFile(join(root, path), "utf8");
     const text = path.toLowerCase().endsWith(".ipynb") ? (notebookCells(raw) ?? "") : raw;
     const dir = posix.dirname(path);
@@ -177,7 +195,7 @@ export async function relatedFiles(root: string, changed: string[], files: RepoF
       const modulePath = (match[1] ?? match[2]).replace(/\./g, "/");
       const candidates = [`${modulePath}.py`, `${modulePath}/__init__.py`, posix.join(dir, `${modulePath}.py`)]
         .map((c) => posix.normalize(c))
-        .filter((c) => known.has(c));
+        .filter((c) => sizes.has(c));
       const sameName = byName.get(`${posix.basename(modulePath)}.py`) ?? [];
       if (candidates.length === 0 && sameName.length === 1) candidates.push(sameName[0]);
       for (const candidate of candidates) {

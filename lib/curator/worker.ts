@@ -1,3 +1,4 @@
+import { removeStaleAgentDirs } from "@/lib/agent/run";
 import { backupDatabase } from "@/lib/db";
 import { parseDbDate } from "@/lib/format";
 import { getConfig } from "@/lib/config";
@@ -47,7 +48,7 @@ export interface WorkerDeps {
 
 const realDeps: WorkerDeps = {
   runCommit: (job) =>
-    executeCommitJob(job.payload as ReviewParams, job.prId, job.id),
+    executeCommitJob(job.payload as ReviewParams, job.prId, job.id, job.attempts),
   runComment: (job) => executeCommentJob(job.payload as CommentReviewParams),
   concludeUnreviewed: (job, summary) =>
     concludeCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
@@ -240,6 +241,7 @@ export function startWorker(): void {
   state.started = true;
   const requeued = requeueRunningJobs();
   if (requeued > 0) console.log(`[queue] ${requeued} interrupted job(s) back in the queue`);
+  void removeStaleAgentDirs();
   setInterval(() => {
     if (state.busy) return;
     state.busy = true;

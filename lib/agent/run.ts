@@ -1,6 +1,6 @@
 import { fork } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
@@ -14,8 +14,11 @@ import type { AgentLimitsSpec, AgentReply, AgentRequest } from "@/lib/agent/prot
 // time limit and removes the copy afterwards.
 
 const MAX_ARCHIVE_BYTES = 300 * 1024 * 1024;
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const CHILD_GRACE_MS = 60_000;
+const CHILD_EXIT_WAIT_MS = 5_000;
 const CURRENT_CHECK_MS = 5_000;
+const TEMP_PREFIX = "curator-agent-";
 
 export interface AgentTarget {
   owner: string;
@@ -58,6 +61,8 @@ async function downloadTarball(target: AgentTarget, dest: string): Promise<void>
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
       },
+      // Covers the body as well: a stalled download must not hold the queue.
+      signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS),
     },
   );
   if (!response.ok || !response.body) {
@@ -100,14 +105,17 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
       stdio: ["ignore", "inherit", "inherit", "ipc"],
     });
     let settled = false;
+    let exited = false;
+    const exit = new Promise<void>((done) => child.once("exit", () => done()));
+    // The caller removes the copy next, so the process must be gone before the promise settles.
     const finish = (error: Error | null, reply?: AgentReply) => {
       if (settled) return;
       settled = true;
       clearTimeout(killTimer);
       clearInterval(currentTimer);
-      if (child.exitCode === null) child.kill("SIGKILL");
-      if (error) reject(error);
-      else resolve(reply!);
+      if (!exited) child.kill("SIGKILL");
+      const waited = exited ? Promise.resolve() : Promise.race([exit, sleep(CHILD_EXIT_WAIT_MS)]);
+      void waited.then(() => (error ? reject(error) : resolve(reply!)));
     };
     const killTimer = setTimeout(
       () => finish(new Error(`The agent process did not finish in ${request.limits.timeoutMs + CHILD_GRACE_MS} ms`)),
@@ -115,13 +123,20 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
     );
     // A new commit or a closed PR cancels the run between agent steps.
     const currentTimer = setInterval(() => {
-      if (isCurrent && !isCurrent() && child.connected) child.send({ type: "cancel" });
+      try {
+        if (isCurrent && !isCurrent() && child.connected) child.send({ type: "cancel" });
+      } catch (error) {
+        console.warn("[agent] the currency check failed:", error);
+      }
     }, CURRENT_CHECK_MS);
     child.on("message", (message: AgentReply) => {
       if (message.type === "result") finish(null, message);
     });
     child.on("error", (error) => finish(error));
-    child.on("exit", (code) => finish(new Error(`The agent process exited with code ${code}`)));
+    child.on("exit", (code) => {
+      exited = true;
+      finish(new Error(`The agent process exited with code ${code}`));
+    });
     child.send(request);
   });
 }
@@ -143,7 +158,7 @@ export async function withAgentRun<T>(
   isCurrent?: () => boolean,
 ): Promise<T> {
   const { provider, baseUrl, model, apiKey } = agentModel();
-  const dir = await mkdtemp(join(tmpdir(), "curator-agent-"));
+  const dir = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
   try {
     const tarPath = join(dir, "repo.tar.gz");
     const root = join(dir, "repo");
@@ -164,6 +179,39 @@ export async function withAgentRun<T>(
     );
     return await consume({ reply, provider, model }, root);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // A failed removal must not replace the result or the original error.
+    await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch((error) =>
+      console.warn(`[agent] failed to remove ${dir}:`, error),
+    );
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, ms));
+}
+
+/**
+ * Remove repository copies left by runs that did not clean up (the service was stopped mid-run).
+ * Only copies older than the longest possible run are touched.
+ */
+export async function removeStaleAgentDirs(): Promise<void> {
+  const base = tmpdir();
+  const maxAgeMs = agentLimits().timeoutMs + CHILD_GRACE_MS + DOWNLOAD_TIMEOUT_MS;
+  let entries: string[];
+  try {
+    entries = await readdir(base);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (!name.startsWith(TEMP_PREFIX)) continue;
+    const dir = join(base, name);
+    try {
+      if (Date.now() - (await stat(dir)).mtimeMs < maxAgeMs) continue;
+      await rm(dir, { recursive: true, force: true, maxRetries: 3 });
+      console.log(`[agent] removed a stale repository copy: ${dir}`);
+    } catch (error) {
+      console.warn(`[agent] failed to remove ${dir}:`, error);
+    }
   }
 }

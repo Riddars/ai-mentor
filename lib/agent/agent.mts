@@ -107,6 +107,11 @@ export function withoutReasoning(messages: AgentMessage[]): Message[] {
     });
 }
 
+/** Upper-side token estimate: about three characters per token for mixed Russian and code. */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3);
+}
+
 export interface RunAgentOptions {
   root: string;
   systemPrompt: string;
@@ -150,9 +155,16 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   };
   agent.subscribe((event) => {
     if (event.type !== "turn_end") return;
-    const usage = (event.message as AssistantMessage).usage;
-    tokensIn += (usage?.input ?? 0) + (usage?.cacheRead ?? 0);
-    tokensOut += usage?.output ?? 0;
+    const message = event.message as AssistantMessage;
+    const usage = message.usage;
+    if (usage && usage.input + usage.cacheRead + usage.output > 0) {
+      tokensIn += usage.input + usage.cacheRead;
+      tokensOut += usage.output;
+    } else {
+      // Without reported usage the budget still holds: a rough estimate from the text size.
+      tokensIn += estimateTokens(options.systemPrompt) + estimateTokens(JSON.stringify(agent.state.messages));
+      tokensOut += estimateTokens(JSON.stringify(message.content));
+    }
     if (tokensIn + tokensOut > limits.maxTokens) abort(`token budget of ${limits.maxTokens} exceeded`);
     // A model that keeps calling tools after the limit is stopped for good.
     if (toolCalls > limits.maxToolCalls + 3) abort(`more than ${limits.maxToolCalls} tool calls`);

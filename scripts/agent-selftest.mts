@@ -6,16 +6,16 @@
  *
  * BENCH_DIR points at a checkout of RiddarsCorp/curator-bench (default: ../curator-bench).
  */
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { runAgent } from "@/lib/agent/agent.mjs";
-import { childEnv, runAgentProcess } from "@/lib/agent/run";
+import { childEnv, removeStaleAgentDirs, runAgentProcess } from "@/lib/agent/run";
 import { createToolLog, createTools } from "@/lib/agent/tools.mjs";
 import { transcript } from "@/lib/agent/transcript.mjs";
-import { extractTarball, listRepoFiles, relatedFiles } from "@/lib/agent/workspace";
+import { extractTarball, listRepoFiles, relatedFiles, repoMap } from "@/lib/agent/workspace";
 import { verifyFindings } from "@/lib/curator/verify";
 import type { ReconcileResult } from "@/lib/curator/store";
 
@@ -196,6 +196,19 @@ async function agentChecks(): Promise<void> {
   });
   check("agent: tool call limit stops a looping model", limited.error !== null && limited.text === "", String(limited.error));
 
+  faux.setResponses(
+    Array.from({ length: 12 }, () => fauxAssistantMessage(fauxToolCall("read_file", { path: "src/train.py" }), { stopReason: "toolUse" })),
+  );
+  const budget = await runAgent({
+    root,
+    systemPrompt: "review",
+    userPrompt: "go",
+    models,
+    model: faux.getModel(),
+    limits: { maxToolCalls: 100, maxTokens: 2_000, timeoutMs: 60_000 },
+  });
+  check("agent: token budget stops the run", budget.error?.includes("token budget") === true, String(budget.error));
+
   const controller = new AbortController();
   controller.abort();
   faux.setResponses([fauxAssistantMessage(fauxText(FINAL_JSON))]);
@@ -287,6 +300,88 @@ async function verifyChecks(): Promise<void> {
   );
 }
 
+// --- hostile repository content ---------------------------------------------------------
+
+async function hardeningChecks(work: string): Promise<void> {
+  const repo = join(work, "hostile");
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "b.py"), "X = 1\n");
+  writeFileSync(join(repo, "src", "a.py"), `${"\n".repeat(200_000)}x = 1\nimport src.b\n`);
+  writeFileSync(join(repo, "src", "big.py"), `import src.b\n${"#".repeat(2 * 1024 * 1024)}\n`);
+  const files = await listRepoFiles(repo);
+  const started = Date.now();
+  const related = await relatedFiles(repo, ["src/a.py"], files);
+  const elapsed = Date.now() - started;
+  check("hostile: import scan is linear on blank lines", related.includes("src/b.py") && elapsed < 2_000, `${elapsed} ms`);
+  check("hostile: oversized changed source not scanned", (await relatedFiles(repo, ["src/big.py"], files)).length === 0);
+
+  const map = repoMap([{ path: "a/".repeat(3_000), size: 1 }], { skipped: [], stoppedOn: null });
+  check("hostile: long paths shortened in the map", map.length < 400, `${map.length} chars`);
+
+  const links = tarball(work, [
+    tarEntry("r/", "5"),
+    ...Array.from({ length: 250 }, (_, i) => tarEntry(`r/l${i}`, "2", "", "/etc/passwd")),
+  ]);
+  const linksDest = join(work, "links");
+  mkdirSync(linksDest);
+  const linksResult = await extractTarball(links, linksDest);
+  check(
+    "hostile: list of skipped entries is bounded",
+    linksResult.skipped.length === 201 && linksResult.skipped.at(-1)!.reason.includes("50 more"),
+    `${linksResult.skipped.length} entries`,
+  );
+
+  const header = Array.from({ length: 5_000 }, (_, i) => `column_${i}_${"x".repeat(200)}`).join(",");
+  writeFileSync(join(repo, "wide.csv"), `${header}\n${"1,".repeat(4_999)}1\n`);
+  const names = Array.from({ length: 600 }, (_, i) => `${String(i).padStart(4, "0")}_${"n".repeat(120)}.txt`);
+  mkdirSync(join(repo, "many"));
+  for (const name of names) writeFileSync(join(repo, "many", name), "");
+  const tools = Object.fromEntries(createTools(repo, createToolLog()).map((t) => [t.name, t]));
+  const call = (name: string, args: Record<string, unknown>) => tools[name].execute("call", args as never);
+  const textOf = (r: Awaited<ReturnType<typeof call>>) => r.content.map((c) => ("text" in c ? c.text : "")).join("");
+  const wide = textOf(await call("table_info", { path: "wide.csv" }));
+  check("hostile: table_info bounds a huge header", wide.length < 45_000 && wide.includes("… ещё 4900"), `${wide.length} chars`);
+  const listing = textOf(await call("list_files", { dir: "many" }));
+  check("hostile: tool output capped", listing.length <= 40_100 && listing.includes("вывод обрезан"), `${listing.length} chars`);
+  const dirError = (await rejects(call("read_file", { path: "many" }))) ?? "";
+  check("hostile: file system errors do not reveal host paths", dirError !== "" && !dirError.includes(work), dirError);
+
+  writeFileSync(join(repo, "src", "min.py"), `${"y".repeat(100_000)}\n`);
+  let seen = "";
+  await verifyFindings(
+    {
+      summary: "",
+      findings: [
+        {
+          priorId: null,
+          status: "open",
+          area: "code",
+          severity: "important",
+          title: "minified",
+          description: "minified",
+          locations: [{ kind: "file", target: "src/min.py", detail: "1" }],
+        },
+      ],
+    },
+    repo,
+    async (messages) => {
+      seen = messages[1].content;
+      return { content: '{"verdicts": []}', provider: "stub", model: "stub" };
+    },
+  );
+  check("hostile: verification clips long cited lines", seen.length < 20_000, `${seen.length} chars`);
+
+  const stale = join(tmpdir(), `curator-agent-selftest-${Date.now()}`);
+  const fresh = `${stale}-fresh`;
+  mkdirSync(stale);
+  mkdirSync(fresh);
+  const old = new Date(Date.now() - 24 * 60 * 60_000);
+  utimesSync(stale, old, old);
+  await removeStaleAgentDirs();
+  check("process: stale repository copies removed, fresh ones kept", !existsSync(stale) && existsSync(fresh));
+  rmSync(fresh, { recursive: true, force: true });
+}
+
 async function main() {
   if (!existsSync(join(benchDir, "projects"))) throw new Error(`curator-bench not found at ${benchDir}`);
   const work = mkdtempSync(join(tmpdir(), "agent-selftest-"));
@@ -296,6 +391,7 @@ async function main() {
     await agentChecks();
     await processChecks(work);
     await verifyChecks();
+    await hardeningChecks(work);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

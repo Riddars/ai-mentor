@@ -42,6 +42,9 @@ function reply(message: AgentReply): void {
   process.send?.(message, () => process.exit(0));
 }
 
+// The service went away: nobody will read the result, so stop spending tokens.
+process.on("disconnect", () => process.exit(1));
+
 process.on("message", (message: AgentRequest | { type: "cancel" }) => {
   if (message.type === "cancel") {
     controller.abort();

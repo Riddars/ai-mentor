@@ -17,8 +17,10 @@ const MAX_OUTPUT_CHARS = 40_000;
 const MAX_LIST_ENTRIES = 500;
 const MAX_GREP_MATCHES = 50;
 const MAX_GREP_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_NOTEBOOK_BYTES = 20 * 1024 * 1024;
 const TABLE_SAMPLE = 5;
 const TABLE_CELL_CHARS = 100;
+const TABLE_MAX_COLUMNS = 100;
 
 /** What the agent looked at: shown in the review and used to check its claims. */
 export interface ToolLog {
@@ -66,6 +68,7 @@ function isNotebook(path: string): boolean {
 /** Text lines of a file as the agent sees it: notebooks as their cells, other files as is. */
 async function textLines(full: string, rel: string): Promise<string[]> {
   if (isNotebook(rel)) {
+    if ((await stat(full)).size > MAX_NOTEBOOK_BYTES) throw new Error(`Notebook is too large to read: ${rel}`);
     const cells = notebookCells(await readFile(full, "utf8"));
     if (cells === null) throw new Error(`Not a valid notebook: ${rel}`);
     return cells.split("\n");
@@ -99,7 +102,15 @@ function numbered(lines: string[], from: number): string {
 }
 
 function text(value: string): AgentToolResult<undefined> {
-  return { content: [{ type: "text", text: value }], details: undefined };
+  const bounded = value.length > MAX_OUTPUT_CHARS ? `${value.slice(0, MAX_OUTPUT_CHARS)}\n… (вывод обрезан)` : value;
+  return { content: [{ type: "text", text: bounded }], details: undefined };
+}
+
+/** File system errors carry host paths; the model gets a neutral message instead. */
+function neutralError(error: unknown, path: unknown): Error {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code !== "string") return error instanceof Error ? error : new Error(String(error));
+  return new Error(`Cannot read ${typeof path === "string" && path ? clip(path, 200) : "this path"} (${code})`);
 }
 
 function splitCsvLine(line: string, delimiter: string): string[] {
@@ -159,8 +170,10 @@ export function createTools(root: string, log: ToolLog): AgentTool[] {
         return result;
       },
       (error: unknown) => {
-        log.calls.push({ tool, args, error: error instanceof Error ? error.message : String(error) });
-        throw error;
+        const { path, dir } = args as { path?: unknown; dir?: unknown };
+        const neutral = neutralError(error, path ?? dir);
+        log.calls.push({ tool, args, error: neutral.message });
+        throw neutral;
       },
     );
 
@@ -297,13 +310,16 @@ export function createTools(root: string, log: ToolLog): AgentTool[] {
         log.viewed.add(rel);
         const row = (line: string) =>
           splitCsvLine(line, delimiter)
+            .slice(0, TABLE_MAX_COLUMNS)
             .map((cell) => clip(cell, TABLE_CELL_CHARS))
             .join(" | ");
+        const columns = (header ?? []).slice(0, TABLE_MAX_COLUMNS).map((name) => clip(name, TABLE_CELL_CHARS));
+        const more = (header?.length ?? 0) > TABLE_MAX_COLUMNS ? `, … ещё ${header!.length - TABLE_MAX_COLUMNS}` : "";
         const size = formatSize((await stat(full)).size);
         return text(
           [
             `${rel}: ${size}, строк данных: ${rows}, столбцов: ${header?.length ?? 0}`,
-            `Столбцы: ${(header ?? []).join(", ")}`,
+            `Столбцы: ${columns.join(", ")}${more}`,
             "Первые строки:",
             ...first.map(row),
             "Случайные строки:",

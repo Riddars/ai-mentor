@@ -11,6 +11,8 @@ import type { ReconcileResult, ReconciledFinding } from "@/lib/curator/store";
 
 const CONTEXT_LINES = 3;
 const MAX_EXCERPT_LINES = 60;
+const MAX_LINE_CHARS = 500;
+const MAX_FINDINGS_CHARS = 120_000;
 const MAX_TEXT_BYTES = 5 * 1024 * 1024;
 const DOC_CHARS = 6_000;
 
@@ -75,7 +77,7 @@ async function checkCitations(root: string, finding: ReconciledFinding): Promise
     const to = Math.min(lines.length, (range?.to ?? MAX_EXCERPT_LINES) + CONTEXT_LINES, from + MAX_EXCERPT_LINES - 1);
     const body = lines
       .slice(from - 1, to)
-      .map((line, i) => `${from + i}\t${line}`)
+      .map((line, i) => `${from + i}\t${line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line}`)
       .join("\n");
     out.excerpts.push(`--- ${location.target}, строки ${from}–${to} ---\n${body}`);
   }
@@ -163,7 +165,9 @@ export async function verifyFindings(
         role: "user",
         content:
           `${await readDoc(root, "RESEARCH.md")}\n\n${await readDoc(root, "PLAN.md")}\n\n` +
-          `=== НАХОДКИ ===\n\n${findingsText}`,
+          `=== НАХОДКИ ===\n\n${
+            findingsText.length > MAX_FINDINGS_CHARS ? `${findingsText.slice(0, MAX_FINDINGS_CHARS)}\n…(обрезано)` : findingsText
+          }`,
       },
     ];
     try {

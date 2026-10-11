@@ -390,26 +390,37 @@ async function runReview(
   params: ReviewParams,
   prId: number,
   trigger: "commit" | "comment",
-  context: { isCurrent?: () => boolean; fixesFinal?: () => boolean } = {},
+  context: { isCurrent?: () => boolean; fixesFinal?: () => boolean; attempt?: number } = {},
 ): Promise<ReviewOutcome> {
   const { prompt, materials, priorIds } = await collectReviewContext(params, prId);
-  let answer: ChatResult;
-  let parsed: ReconcileResult | null;
+  let result: { answer: ChatResult; parsed: ReconcileResult | null } | null = null;
+  let agentNote: string | null = null;
   if (trigger === "commit" && reviewMode() === "agent") {
-    ({ answer, parsed } = await reviewWithAgent(params, prompt, materials.files, context.isCurrent));
-  } else {
+    const attempt = context.attempt ?? 0;
+    if (attempt < MAX_AGENT_ATTEMPTS) {
+      const agent = await reviewWithAgent(params, prompt, materials.files, context.isCurrent);
+      if ("failure" in agent) agentNote = agent.failure;
+      else result = agent;
+    } else {
+      agentNote = `[agent] не запускался: попытка ${attempt + 1}, агент уже запускался ${MAX_AGENT_ATTEMPTS} раза`;
+    }
+  }
+  if (!result) {
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: prompt },
     ];
     // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
-    answer = await chat(messages);
-    parsed = parseModelJson(answer.content);
+    let answer = await chat(messages);
+    let parsed = parseModelJson(answer.content);
     if (!parsed) {
       answer = await chat(messages);
       parsed = parseModelJson(answer.content);
     }
+    if (agentNote) answer = { ...answer, content: `${answer.content}\n\n${agentNote}; разбор выполнен по diff` };
+    result = { answer, parsed };
   }
+  const { answer, parsed } = result;
   const record = {
     prId,
     headSha: params.headSha,
@@ -461,42 +472,61 @@ async function runReview(
 }
 
 /**
+ * Agent runs per commit job. A failed run is not repeated by the queue's backoff: the same job
+ * falls back to the diff review, and later attempts (infrastructure failures) skip the agent.
+ */
+const MAX_AGENT_ATTEMPTS = 2;
+
+/**
  * Agent review over a copy of the repository at the PR head, with the new findings checked
  * against the real file text. The raw answer keeps a trailer for the supervisor: what the
- * agent read and which findings the check dropped.
+ * agent read and which findings the check dropped. A failed run returns `failure` (a trailer
+ * line for the raw answer) instead of throwing, so the caller can fall back to the diff review.
+ * A run that became stale returns its answer unverified: the caller records it as stale.
  */
 async function reviewWithAgent(
   params: ReviewParams,
   prompt: string,
   changed: string[],
   isCurrent?: () => boolean,
-): Promise<{ answer: ChatResult; parsed: ReconcileResult | null }> {
-  return withAgentRun(
-    params,
-    { systemPrompt: `${SYSTEM_PROMPT}\n${AGENT_RULES}`, userPrompt: prompt, changed },
-    async ({ reply, provider, model }, root) => {
-      if (isCurrent && !isCurrent()) throw new StaleReviewError();
-      if (reply.error) throw new Error(`Agent review failed: ${reply.error}`);
-      const trailer = [
-        `[agent] шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, ` +
-          `токенов: ${reply.tokensIn}/${reply.tokensOut}`,
-        `[agent] прочитано: ${reply.viewed.join(", ") || "—"}`,
-        ...(reply.partialCopy ? [`[agent] копия неполная: ${reply.partialCopy}`] : []),
-      ];
-      const label = { provider, model: `${model} (agent)` };
-      const parsed = parseModelJson(reply.text);
-      if (!parsed) {
-        return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed: null };
-      }
-      const verified = await verifyFindings(parsed, root);
-      trailer.push(
-        verified.checked ? "[verify] находки перепроверены" : "[verify] перепроверка не удалась, находки оставлены",
-        ...verified.dropped.map((d) => `[verify] отброшено: ${d.title} — ${d.reason}`),
-      );
-      return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed: verified.result };
-    },
-    isCurrent,
-  );
+): Promise<{ answer: ChatResult; parsed: ReconcileResult | null } | { failure: string }> {
+  try {
+    return await withAgentRun(
+      params,
+      { systemPrompt: `${SYSTEM_PROMPT}\n${AGENT_RULES}`, userPrompt: prompt, changed },
+      async ({ reply, provider, model }, root) => {
+        const usage =
+          `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, ` +
+          `токенов: ${reply.tokensIn}/${reply.tokensOut}`;
+        const label = { provider, model: `${model} (agent)` };
+        const stale = isCurrent !== undefined && !isCurrent();
+        if (reply.error) {
+          if (stale) return { answer: { ...label, content: `[agent] отменён: ${reply.error}; ${usage}` }, parsed: null };
+          return { failure: `[agent] сбой: ${reply.error}; ${usage}` };
+        }
+        const trailer = [
+          `[agent] ${usage}`,
+          `[agent] прочитано: ${reply.viewed.join(", ") || "—"}`,
+          ...(reply.partialCopy ? [`[agent] копия неполная: ${reply.partialCopy}`] : []),
+        ];
+        const parsed = parseModelJson(reply.text);
+        // An unreadable answer is not worth a verification request; a stale one is not applied.
+        if (!parsed || stale) {
+          return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed };
+        }
+        const verified = await verifyFindings(parsed, root);
+        trailer.push(
+          verified.checked ? "[verify] находки перепроверены" : "[verify] перепроверка не удалась, находки оставлены",
+          ...verified.dropped.map((d) => `[verify] отброшено: ${d.title} — ${d.reason}`),
+        );
+        return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed: verified.result };
+      },
+      isCurrent,
+    );
+  } catch (error) {
+    // Download, unpacking or the process itself failed: the caller falls back to the diff review.
+    return { failure: `[agent] сбой: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 /**
@@ -649,6 +679,7 @@ export async function executeCommitJob(
   params: ReviewParams,
   prId: number,
   jobId: number,
+  attempt = 0,
 ): Promise<void> {
   const isCurrent = () => {
     const pr = getPullRequest(prId);
@@ -658,6 +689,7 @@ export async function executeCommitJob(
   const { analysisId, comment } = await runReview(params, prId, "commit", {
     isCurrent,
     fixesFinal: () => getPullRequest(prId)?.state === "merged",
+    attempt,
   });
   await postIssueComment({
     owner: params.owner,
