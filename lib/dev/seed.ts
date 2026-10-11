@@ -6,7 +6,7 @@ import {
   deleteProjectCascade,
   loadOpenFindings,
   recordAnalysis,
-  resolvePendingOnClose,
+  recordPullRequestClosed,
   setFindingStatusByPerson,
   saveStudentResponse,
   setAnalysisComment,
@@ -126,6 +126,7 @@ function review(
   const { statusChanges, kept } = applyReconciliation(prId, id, result, {
     allowedPriorIds: new Set(prior.map((f) => f.id)),
     allowNew: trigger === "commit",
+    changed: new Map(opts.files.map((f) => [f, null])),
   });
   const comment =
     trigger === "commit"
@@ -141,7 +142,7 @@ function quiet(prId: number, daysAgo: number, files: string[]): void {
 }
 
 function pr(projectId: number, number: number, author: string, title: string, state: PullRequestState): number {
-  return upsertPullRequest(projectId, number, { author, title, state });
+  return upsertPullRequest(projectId, number, { author, title, state, mergedIntoDefault: state === "merged" });
 }
 
 function reply(prId: number, commentId: number, login: string, body: string, daysAgo: number): void {
@@ -388,7 +389,7 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
     },
     { files: ["src/baseline.py", "README.md"] },
   );
-  resolvePendingOnClose(y2, "merged-default");
+  recordPullRequestClosed(y2, "merged-default");
   if (seedsC) backdateLastChange(seedsC.findingId, 18);
   setPrActivity(y2, 18);
 
@@ -643,6 +644,13 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
   // spectra intentionally left unassigned.
 
   alignDatesToAnalyses();
+  // Demo PRs are created already merged: their findings are the project's.
+  db()
+    .prepare(
+      `UPDATE findings SET scope = 'project'
+       WHERE pull_request_id IN (SELECT id FROM pull_requests WHERE state = 'merged')`,
+    )
+    .run();
 
   return {
     seeded: true,

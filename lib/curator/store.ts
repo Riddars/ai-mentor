@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import type { FindingArea, FindingLocation, Severity } from "@/lib/curator/finding";
+import { findingScope, fixVisible, type ChangedLines, type FindingScope } from "@/lib/curator/scope";
 
 // Репозиторий памяти проекта (этап 3). Тонкие функции над getDb(); никакой SQL за
 // пределами этого файла и lib/db/index.ts. Работает синхронно — node:sqlite
@@ -73,6 +74,9 @@ export type PullRequestState = "open" | "merged" | "closed";
 /** `stale`: the model answered, but the PR had moved on (new commit, closed) — not applied. */
 export type AnalysisOutcome = "ok" | "parse_error" | "error" | "stale";
 
+/** `agent_fallback`: the agent failed and the same job reviewed the diff. */
+export type AnalysisMode = "diff" | "agent" | "agent_fallback";
+
 /** A project row with the aggregates the overview table shows. */
 export interface ProjectSummary {
   id: number;
@@ -119,6 +123,8 @@ export interface FindingRow {
   impact: string | null;
   recommendation: string | null;
   status: FindingStatus;
+  /** `branch`: the problem exists only in the changes of its unmerged PR. */
+  scope: FindingScope;
   /** Reason recorded with the latest status change, if any. */
   lastReason: string | null;
   /** When the finding was last reopened (from history), if ever. */
@@ -150,6 +156,12 @@ export interface AnalysisDetail extends AnalysisRow {
   materials: AnalysisMaterials | null;
   /** The model answer as received. */
   rawResponse: string | null;
+  mode: AnalysisMode | null;
+  /** Tokens of all model requests of the analysis (agent, review, verification). */
+  tokensIn: number | null;
+  tokensOut: number | null;
+  /** Repository files the agent read. */
+  viewedFiles: string[] | null;
 }
 
 /** A finding status change made by one analysis (a new finding has no old status). */
@@ -179,6 +191,11 @@ const PARTICIPANTS_SQL = `
   SELECT github_login FROM participants WHERE project_id = @id ORDER BY first_seen_at`;
 
 const OPEN_STATUSES = "('open', 'reopened', 'pending')";
+
+/** An open finding (`f`) that a review of PR `@prId` may reconcile. */
+const RECONCILABLE = `f.status IN ${OPEN_STATUSES}
+  AND (f.pull_request_id = @prId OR f.scope = 'project')
+  AND NOT (f.status = 'pending' AND f.resolved_by_pr_id IS NOT @prId)`;
 
 // --- Scope ---
 //
@@ -232,7 +249,7 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
         .all({ id: p.id }) as Array<{ login: string }>
     ).map((r) => r.login);
 
-    // Findings in PRs closed without merge never reached the main branch, so they
+    // Branch findings of PRs closed without merge never reached the main branch, so they
     // are not "open" for the project (see принятые решения.md).
     const counts = db
       .prepare(
@@ -244,7 +261,7 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
          JOIN pull_requests pr ON pr.id = f.pull_request_id
          WHERE pr.project_id = @id
            AND f.status IN ${OPEN_STATUSES}
-           AND COALESCE(pr.state, 'open') != 'closed'`,
+           AND (f.scope = 'project' OR COALESCE(pr.state, 'open') != 'closed')`,
       )
       .get({ id: p.id }) as {
       openFindings: number;
@@ -363,7 +380,7 @@ const FINDING_SELECT = `
   SELECT f.id, f.pull_request_id AS pullRequestId, pr.number AS prNumber, pr.state AS prState,
          pr.project_id AS projectId, f.area, f.severity, f.title, f.description, f.locations,
          f.verify,
-         f.evidence, f.impact, f.recommendation, f.status,
+         f.evidence, f.impact, f.recommendation, f.status, f.scope,
          (SELECT h.reason FROM finding_status_history h WHERE h.finding_id = f.id
             ORDER BY h.created_at DESC, h.id DESC LIMIT 1) AS lastReason,
          (SELECT h.created_at FROM finding_status_history h WHERE h.finding_id = f.id
@@ -435,15 +452,25 @@ export function getAnalysis(id: number): AnalysisDetail | null {
     .prepare(
       `SELECT a.id, pr.number AS prNumber, pr.project_id AS projectId, a.head_sha AS headSha,
               a.trigger, a.outcome, a.summary, a.provider, a.model, a.comment, a.materials,
-              a.raw_response AS rawResponse,
+              a.raw_response AS rawResponse, a.mode, a.tokens_in AS tokensIn,
+              a.tokens_out AS tokensOut, a.viewed_files AS viewedFiles,
               a.created_at AS createdAt
        FROM analyses a
        JOIN pull_requests pr ON pr.id = a.pull_request_id
        WHERE a.id = @id`,
     )
-    .get({ id }) as (Omit<AnalysisDetail, "materials"> & { materials: string | null }) | undefined;
+    .get({ id }) as
+    | (Omit<AnalysisDetail, "materials" | "viewedFiles"> & {
+        materials: string | null;
+        viewedFiles: string | null;
+      })
+    | undefined;
   if (!row) return null;
-  return { ...row, materials: parseJson<AnalysisMaterials>(row.materials) };
+  return {
+    ...row,
+    materials: parseJson<AnalysisMaterials>(row.materials),
+    viewedFiles: parseJson<string[]>(row.viewedFiles),
+  };
 }
 
 /** Finding status changes made by one analysis, new findings included. */
@@ -609,18 +636,27 @@ export function upsertPullRequest(
     title?: string | null;
     state?: PullRequestState | null;
     headSha?: string | null;
+    baseRef?: string | null;
+    headRef?: string | null;
+    mergedIntoDefault?: boolean | null;
   } = {},
 ): number {
   const db = getDb();
   const row = db
     .prepare(
-      `INSERT INTO pull_requests (project_id, number, author_login, title, state, head_sha)
-       VALUES (@projectId, @number, @author, @title, @state, @headSha)
+      `INSERT INTO pull_requests
+         (project_id, number, author_login, title, state, head_sha, base_ref, head_ref,
+          merged_into_default)
+       VALUES (@projectId, @number, @author, @title, @state, @headSha, @baseRef, @headRef,
+               COALESCE(@merged, 0))
        ON CONFLICT (project_id, number) DO UPDATE SET
          author_login = COALESCE(@author, pull_requests.author_login),
          title = COALESCE(@title, pull_requests.title),
          state = COALESCE(@state, pull_requests.state),
          head_sha = COALESCE(@headSha, pull_requests.head_sha),
+         base_ref = COALESCE(@baseRef, pull_requests.base_ref),
+         head_ref = COALESCE(@headRef, pull_requests.head_ref),
+         merged_into_default = COALESCE(@merged, pull_requests.merged_into_default),
          updated_at = datetime('now')
        RETURNING id`,
     )
@@ -631,8 +667,23 @@ export function upsertPullRequest(
       title: info.title ?? null,
       state: info.state ?? null,
       headSha: info.headSha ?? null,
+      baseRef: info.baseRef ?? null,
+      headRef: info.headRef ?? null,
+      merged: info.mergedIntoDefault == null ? null : Number(info.mergedIntoDefault),
     }) as { id: number };
   return row.id;
+}
+
+/** Numbers of the project's PRs that are open in memory (to catch missed close events). */
+export function listOpenPullRequestNumbers(projectId: number): number[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT number FROM pull_requests
+         WHERE project_id = @projectId AND COALESCE(state, 'open') = 'open'`,
+      )
+      .all({ projectId }) as Array<{ number: number }>
+  ).map((r) => r.number);
 }
 
 /** Forget a delivery so GitHub's retry of a failed handling is not treated as a duplicate. */
@@ -682,14 +733,18 @@ export function recordAnalysis(params: {
   model?: string | null;
   materials?: AnalysisMaterials | null;
   rawResponse?: string | null;
+  mode?: AnalysisMode | null;
+  tokensIn?: number;
+  tokensOut?: number;
+  viewedFiles?: string[] | null;
 }): number {
   const row = getDb()
     .prepare(
       `INSERT INTO analyses
          (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
-          raw_response)
+          raw_response, mode, tokens_in, tokens_out, viewed_files)
        VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
-               @rawResponse)
+               @rawResponse, @mode, @tokensIn, @tokensOut, @viewedFiles)
        RETURNING id`,
     )
     .get({
@@ -702,8 +757,28 @@ export function recordAnalysis(params: {
       model: params.model ?? null,
       materials: params.materials ? JSON.stringify(params.materials) : null,
       rawResponse: params.rawResponse ?? null,
+      mode: params.mode ?? null,
+      tokensIn: params.tokensIn ?? 0,
+      tokensOut: params.tokensOut ?? 0,
+      viewedFiles: params.viewedFiles ? JSON.stringify(params.viewedFiles) : null,
     }) as { id: number };
   return row.id;
+}
+
+/**
+ * Tokens spent in the last 24 hours, by one project or by all (null). Every outcome
+ * counts: the money is spent anyway.
+ */
+export function recentTokens(projectId: number | null): number {
+  const row = getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)), 0) AS tokens
+       FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE a.created_at > datetime('now', '-1 day')
+         AND (@projectId IS NULL OR pr.project_id = @projectId)`,
+    )
+    .get({ projectId }) as { tokens: number };
+  return row.tokens;
 }
 
 /** Remember the comment actually published to the pull request for an analysis. */
@@ -714,9 +789,11 @@ export function setAnalysisComment(analysisId: number, comment: string): void {
 }
 
 /**
- * Open findings of the whole project the PR belongs to: a later PR may fix a finding
- * raised in an earlier one. Findings of other PRs closed without merge are left out —
- * that code never reached the main branch. The PR's own findings are always included.
+ * Open findings a review of the PR may reconcile: its own findings and the project's
+ * (a later PR may fix a problem of the main branch). Branch findings of other PRs are left
+ * out — that code is not in this PR — and so are findings another PR already fixed
+ * (pending its merge): only that PR may change them. applyReconciliation checks the same
+ * rule again.
  */
 export function loadOpenFindings(prId: number): PriorFinding[] {
   const rows = getDb()
@@ -726,8 +803,7 @@ export function loadOpenFindings(prId: number): PriorFinding[] {
        FROM findings f
        JOIN pull_requests pr ON pr.id = f.pull_request_id
        WHERE pr.project_id = (SELECT project_id FROM pull_requests WHERE id = @prId)
-         AND f.status IN ${OPEN_STATUSES}
-         AND (pr.id = @prId OR COALESCE(pr.state, 'open') != 'closed')
+         AND ${RECONCILABLE}
        ORDER BY f.id`,
     )
     .all({ prId }) as unknown as Array<Omit<PriorFinding, "locations"> & { locations: string | null }>;
@@ -786,6 +862,8 @@ export interface KeptFinding {
   title: string;
   status: FindingStatus;
   reason: string | null;
+  /** The model called it fixed, but none of its cited files is changed by the PR. */
+  fixNotVisible?: boolean;
 }
 
 export interface ReconcileOptions {
@@ -793,17 +871,27 @@ export interface ReconcileOptions {
   allowedPriorIds: ReadonlySet<number>;
   /** False for a reconciliation after a comment: it only changes statuses. */
   allowNew: boolean;
-  /** The PR is already merged: a fix is final (`closed`), not waiting for a merge. */
+  /**
+   * The PR is already merged into the main branch: a fix is final (`closed`), not waiting
+   * for a merge, and new findings belong to the project.
+   */
   fixesFinal?: boolean;
+  /** Changed files of the PR with their added lines. */
+  changed: ChangedLines;
+  /** Head branch of the PR, kept with new findings for display. */
+  branch?: string | null;
 }
 
 /**
  * Применить результат сверки модели в одной транзакции. Правила:
- * - prior_id принимается только из переданного модели набора;
+ * - prior_id принимается только из переданного модели набора и только если этот PR
+ *   всё ещё вправе менять находку (своя или находка проекта, не чужой `pending`);
+ * - новая находка получает вид (`branch` / `project`) по местам относительно изменений PR;
+ * - «исправлено» принимается, только если PR меняет один из файлов находки;
  * - у прошлой находки модель меняет статус и причину; серьёзность, область и суть
  *   фиксируются при создании, остальные поля обновляются только непустыми значениями;
  * - «исправлено» по diff PR — это `pending` (ждёт слияния PR в основную ветку, см.
- *   resolvePendingOnClose), а не окончательное `closed`;
+ *   recordPullRequestClosed), а не окончательное `closed`;
  * - находки, которых модель не упомянула, не трогаем.
  * Возвращает смены статусов и оставленные открытыми прошлые находки — по ним
  * вызывающий пишет комментарий.
@@ -819,12 +907,13 @@ export function applyReconciliation(
   const kept: KeptFinding[] = [];
   let created = 0;
 
+  const changedFiles = new Set(options.changed.keys());
   const insertFinding = db.prepare(
     `INSERT INTO findings
        (pull_request_id, area, severity, title, description, locations, verify, evidence,
-        impact, recommendation, status, first_analysis_id, last_analysis_id)
+        impact, recommendation, status, scope, branch, first_analysis_id, last_analysis_id)
      VALUES (@prId, @area, @severity, @title, @description, @locations, @verify, @evidence,
-             @impact, @recommendation, 'open', @analysisId, @analysisId)
+             @impact, @recommendation, 'open', @scope, @branch, @analysisId, @analysisId)
      RETURNING id`,
   );
   const updateFinding = db.prepare(
@@ -839,7 +928,9 @@ export function applyReconciliation(
        last_analysis_id = @analysisId, updated_at = datetime('now')
      WHERE id = @id`,
   );
-  const getPrior = db.prepare("SELECT status, title FROM findings WHERE id = @id");
+  const getPrior = db.prepare(
+    `SELECT f.status, f.title, f.locations FROM findings f WHERE f.id = @id AND ${RECONCILABLE}`,
+  );
   const insertHistory = db.prepare(
     `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason, analysis_id)
      VALUES (@findingId, @oldStatus, @newStatus, @reason, @analysisId)`,
@@ -857,7 +948,9 @@ export function applyReconciliation(
       };
       const prior =
         f.priorId != null && options.allowedPriorIds.has(f.priorId)
-          ? (getPrior.get({ id: f.priorId }) as { status: FindingStatus; title: string } | undefined)
+          ? (getPrior.get({ id: f.priorId, prId }) as
+              | { status: FindingStatus; title: string; locations: string | null }
+              | undefined)
           : undefined;
 
       if (!prior) {
@@ -869,6 +962,8 @@ export function applyReconciliation(
           severity: f.severity ?? null,
           title: f.title,
           verify: f.verify ?? null,
+          scope: findingScope(f.locations ?? [], options.changed, options.fixesFinal ?? false),
+          branch: options.branch ?? null,
           ...text,
         }) as { id: number };
         created += 1;
@@ -890,6 +985,17 @@ export function applyReconciliation(
       }
 
       const findingId = f.priorId as number;
+      const priorLocations = parseJson<FindingLocation[]>(prior.locations) ?? [];
+      if (f.status === "closed" && !fixVisible(priorLocations, changedFiles)) {
+        kept.push({
+          findingId,
+          title: prior.title,
+          status: prior.status,
+          reason: "исправление не видно в изменениях этого pull request",
+          fixNotVisible: true,
+        });
+        continue;
+      }
       const status: FindingStatus =
         f.status === "closed" ? (options.fixesFinal ? "closed" : "pending") : f.status;
       updateFinding.run({ id: findingId, prId, analysisId, status, ...text });
@@ -921,17 +1027,31 @@ export function applyReconciliation(
   return { created, statusChanges, kept };
 }
 
+export type CloseOutcome = "merged-default" | "merged-other" | "closed";
+
 /**
- * Second step of closing: when the PR whose diff showed a fix is closed, its `pending`
- * findings become `closed` if it was merged into the default branch, go back to `open`
- * if it was closed without merge, and stay `pending` if it was merged elsewhere.
+ * A PR was closed. Merged into the main branch: its `pending` fixes become `closed` and its
+ * findings belong to the project from now on. Closed without merge: its `pending` fixes go
+ * back to `open`. Merged into another branch: its findings and fixes pass to the open PR of
+ * that branch (see adoptMergedBranchFindings); they wait for one if there is none yet.
  */
-export function resolvePendingOnClose(
-  prId: number,
-  outcome: "merged-default" | "merged-other" | "closed",
-): void {
-  if (outcome === "merged-other") return;
+export function recordPullRequestClosed(prId: number, outcome: CloseOutcome): void {
   const db = getDb();
+  if (outcome === "merged-other") {
+    const pr = db
+      .prepare("SELECT project_id AS projectId, base_ref AS baseRef FROM pull_requests WHERE id = @prId")
+      .get({ prId }) as { projectId: number; baseRef: string | null } | undefined;
+    const successor = pr?.baseRef
+      ? (db
+          .prepare(
+            `SELECT id FROM pull_requests WHERE project_id = @projectId AND head_ref = @baseRef
+               AND COALESCE(state, 'open') = 'open' ORDER BY number DESC LIMIT 1`,
+          )
+          .get({ projectId: pr.projectId, baseRef: pr.baseRef }) as { id: number } | undefined)
+      : undefined;
+    if (successor) adoptMergedBranchFindings(successor.id);
+    return;
+  }
   const newStatus: FindingStatus = outcome === "merged-default" ? "closed" : "open";
   const reason =
     outcome === "merged-default"
@@ -942,7 +1062,6 @@ export function resolvePendingOnClose(
       .prepare("SELECT id FROM findings WHERE status = 'pending' AND resolved_by_pr_id = @prId")
       .all({ prId }) as Array<{ id: number }>
   ).map((r) => r.id);
-  if (ids.length === 0) return;
 
   const update = db.prepare(
     `UPDATE findings SET status = @newStatus,
@@ -960,11 +1079,77 @@ export function resolvePendingOnClose(
       update.run({ id, newStatus });
       history.run({ id, newStatus, reason });
     }
+    if (outcome === "merged-default") {
+      db.prepare(
+        "UPDATE findings SET scope = 'project' WHERE pull_request_id = @prId AND scope = 'branch'",
+      ).run({ prId });
+    }
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+/**
+ * The PR's branch received merges of other PRs (PR into PR): their open branch findings and
+ * their pending fixes become this PR's, since that code now lives in this branch. Returns
+ * the number of findings taken over.
+ */
+export function adoptMergedBranchFindings(prId: number): number {
+  const db = getDb();
+  const pr = db
+    .prepare("SELECT project_id AS projectId, number, head_ref AS headRef FROM pull_requests WHERE id = @prId")
+    .get({ prId }) as { projectId: number; number: number; headRef: string | null } | undefined;
+  if (!pr?.headRef) return 0;
+  const sources = (
+    db
+      .prepare(
+        `SELECT id FROM pull_requests WHERE project_id = @projectId AND id != @prId
+           AND state = 'merged' AND merged_into_default = 0 AND base_ref = @headRef`,
+      )
+      .all({ projectId: pr.projectId, prId, headRef: pr.headRef }) as Array<{ id: number }>
+  ).map((r) => r.id);
+  if (sources.length === 0) return 0;
+
+  const reason = `Передано в PR #${pr.number}: pull request слит в его ветку.`;
+  const history = db.prepare(
+    `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason)
+     VALUES (@id, @status, @status, @reason)`,
+  );
+  let moved = 0;
+  db.exec("BEGIN");
+  try {
+    for (const source of sources) {
+      const owned = db
+        .prepare(
+          `SELECT id, status FROM findings WHERE pull_request_id = @source AND scope = 'branch'
+             AND status IN ${OPEN_STATUSES}`,
+        )
+        .all({ source }) as Array<{ id: number; status: FindingStatus }>;
+      const fixed = db
+        .prepare(
+          `SELECT id, status FROM findings WHERE resolved_by_pr_id = @source AND status = 'pending'`,
+        )
+        .all({ source }) as Array<{ id: number; status: FindingStatus }>;
+      db.prepare(
+        `UPDATE findings SET pull_request_id = @prId, updated_at = datetime('now')
+         WHERE pull_request_id = @source AND scope = 'branch' AND status IN ${OPEN_STATUSES}`,
+      ).run({ prId, source });
+      db.prepare(
+        `UPDATE findings SET resolved_by_pr_id = @prId, updated_at = datetime('now')
+         WHERE resolved_by_pr_id = @source AND status = 'pending'`,
+      ).run({ prId, source });
+      const ids = new Map([...owned, ...fixed].map((f) => [f.id, f.status]));
+      for (const [id, status] of ids) history.run({ id, status, reason });
+      moved += ids.size;
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return moved;
 }
 
 /** A person (supervisor or head) overrides the model: reopen, or dismiss as a false finding. */
@@ -1395,12 +1580,19 @@ export function getPullRequest(prId: number): {
   author: string | null;
   title: string | null;
   state: PullRequestState | null;
+  headRef: string | null;
+  mergedIntoDefault: boolean;
 } | null {
   const row = getDb()
     .prepare(
       `SELECT id, project_id AS projectId, number, head_sha AS headSha, author_login AS author,
-              title, state FROM pull_requests WHERE id = @prId`,
+              title, state, head_ref AS headRef, merged_into_default AS merged
+       FROM pull_requests WHERE id = @prId`,
     )
-    .get({ prId }) as ReturnType<typeof getPullRequest> | undefined;
-  return row ?? null;
+    .get({ prId }) as
+    | (Omit<NonNullable<ReturnType<typeof getPullRequest>>, "mergedIntoDefault"> & { merged: number })
+    | undefined;
+  if (!row) return null;
+  const { merged, ...rest } = row;
+  return { ...rest, mergedIntoDefault: merged === 1 };
 }

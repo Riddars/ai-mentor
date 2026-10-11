@@ -1,7 +1,8 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
+import { chat, type ChatMessage, type ChatResult, type ChatUsage } from "@/lib/llm/chat";
 import { notebookCells } from "@/lib/curator/notebook";
+import { lineRange } from "@/lib/curator/scope";
 import type { ReconcileResult, ReconciledFinding } from "@/lib/curator/store";
 
 // Second look at new findings against the real repository text. First our code checks that
@@ -26,14 +27,8 @@ export interface VerifyOutcome {
   dropped: DroppedFinding[];
   /** False when the model check did not run or its answer could not be read. */
   checked: boolean;
-}
-
-function lineRange(detail: string | null | undefined): { from: number; to: number } | null {
-  const match = detail?.match(/(\d+)(?:\s*[-–—]\s*(\d+))?/);
-  if (!match) return null;
-  const from = Number(match[1]);
-  const to = match[2] ? Number(match[2]) : from;
-  return from >= 1 && to >= from ? { from, to } : null;
+  /** Tokens spent by the model check. */
+  tokens: ChatUsage;
 }
 
 /** Lines of a repository file as the agent saw them; null if missing or not text. */
@@ -147,6 +142,7 @@ export async function verifyFindings(
   }
 
   let checkedByModel = candidates.length === 0;
+  let tokens: ChatUsage = { input: 0, output: 0 };
   if (candidates.length > 0) {
     const findingsText = candidates
       .map(({ finding, excerpts }, n) =>
@@ -171,7 +167,9 @@ export async function verifyFindings(
       },
     ];
     try {
-      const verdicts = parseVerdicts((await ask(messages)).content);
+      const answer = await ask(messages);
+      tokens = answer.usage;
+      const verdicts = parseVerdicts(answer.content);
       if (verdicts) {
         checkedByModel = true;
         candidates.forEach(({ index, finding }, n) => {
@@ -191,5 +189,6 @@ export async function verifyFindings(
     result: { ...result, findings: result.findings.filter((_, index) => !drop.has(index)) },
     dropped,
     checked: checkedByModel,
+    tokens,
   };
 }

@@ -283,11 +283,12 @@ async function verifyChecks(): Promise<void> {
   let seen = "";
   const outcome = await verifyFindings(result, root, async (messages) => {
     seen = messages[1].content;
-    return { content: JSON.stringify({ verdicts: [{ index: 0, keep: false, reason: "no" }, { index: 1, keep: true }] }), provider: "stub", model: "stub" };
+    return { content: JSON.stringify({ verdicts: [{ index: 0, keep: false, reason: "no" }, { index: 1, keep: true }] }), provider: "stub", model: "stub", usage: { input: 100, output: 10 } };
   });
   const titles = outcome.result.findings.map((f) => f.title);
   check("verify: citations that lead nowhere dropped", !titles.includes("made-up file") && !titles.includes("line beyond the end"));
   check("verify: model verdict applied", !titles.includes("real but rejected") && titles.includes("real and kept"), titles.join(", "));
+  check("verify: tokens of the model check reported", outcome.tokens.input === 100 && outcome.tokens.output === 10);
   check("verify: prior findings not touched", titles.includes("prior finding untouched"));
   check("verify: model sees the real cited lines", seen.includes("def scaffold_split") && seen.includes("RESEARCH.md"));
 
@@ -366,7 +367,7 @@ async function hardeningChecks(work: string): Promise<void> {
     repo,
     async (messages) => {
       seen = messages[1].content;
-      return { content: '{"verdicts": []}', provider: "stub", model: "stub" };
+      return { content: '{"verdicts": []}', provider: "stub", model: "stub", usage: { input: 1, output: 1 } };
     },
   );
   check("hostile: verification clips long cited lines", seen.length < 20_000, `${seen.length} chars`);

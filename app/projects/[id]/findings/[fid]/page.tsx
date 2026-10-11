@@ -91,6 +91,9 @@ export default async function FindingPage({
             <SeverityBadge severity={finding.severity} />
             <Badge tone="primary">{areaLabel(finding.area)}</Badge>
             <Badge tone={statusTone}>{findingStatusLabel(finding.status)}</Badge>
+            {finding.scope === "branch" && finding.prNumber !== null && (
+              <Badge tone="neutral">в ветке PR #{finding.prNumber}</Badge>
+            )}
           </div>
           <h1 className="mt-3 text-2xl font-semibold tracking-tight">{finding.title}</h1>
           <p className="mt-1 text-sm text-muted-foreground">

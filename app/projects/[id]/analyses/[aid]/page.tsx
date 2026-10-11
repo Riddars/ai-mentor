@@ -1,7 +1,13 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getViewer } from "@/lib/users";
-import { getAnalysis, getProject, isSupervisorOf, listAnalysisChanges } from "@/lib/curator/store";
+import {
+  getAnalysis,
+  getProject,
+  isSupervisorOf,
+  listAnalysisChanges,
+  type AnalysisMode,
+} from "@/lib/curator/store";
 import { findingStatusLabel, fullDate, outcomeLabel, triggerLabel } from "@/lib/format";
 import { AppHeader, PageShell } from "@/components/AppHeader";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
@@ -11,6 +17,12 @@ import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CollapsibleCard } from "@/components/ui/Collapsible";
 
 export const dynamic = "force-dynamic";
+
+const MODE_LABEL: Record<AnalysisMode, string> = {
+  diff: "по изменениям",
+  agent: "агент",
+  agent_fallback: "по изменениям после сбоя агента",
+};
 
 export default async function AnalysisPage({
   params,
@@ -182,7 +194,35 @@ export default async function AnalysisPage({
                   <dd className="tabular-nums">{materials.priorFindings}</dd>
                   <dt className="text-muted-foreground">Ответы студента</dt>
                   <dd className="tabular-nums">{materials.studentResponses}</dd>
+                  {analysis.mode && (
+                    <>
+                      <dt className="text-muted-foreground">Режим</dt>
+                      <dd>{MODE_LABEL[analysis.mode]}</dd>
+                    </>
+                  )}
+                  {analysis.tokensIn !== null && (
+                    <>
+                      <dt className="text-muted-foreground">Токены, вход / выход</dt>
+                      <dd className="tabular-nums">
+                        {analysis.tokensIn.toLocaleString("ru-RU")} / {(analysis.tokensOut ?? 0).toLocaleString("ru-RU")}
+                      </dd>
+                    </>
+                  )}
                 </dl>
+                {analysis.viewedFiles && (
+                  <div>
+                    <p className="mb-1 text-xs text-muted-foreground">
+                      Прочитано агентом ({analysis.viewedFiles.length})
+                    </p>
+                    <ul className="flex flex-col gap-0.5">
+                      {analysis.viewedFiles.map((f) => (
+                        <li key={f} className="font-mono text-xs break-all">
+                          {f}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </CardBody>
             </Card>
           )}

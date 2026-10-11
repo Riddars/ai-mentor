@@ -9,6 +9,7 @@ import {
   concludeCheck,
   executeCommentJob,
   executeCommitJob,
+  handlePullRequestClosed,
   queueSettings,
   reportReviewFailure,
   StaleReviewError,
@@ -21,10 +22,12 @@ import {
   getProject,
   listAllProjects,
   listDueJobs,
+  listOpenPullRequestNumbers,
   listOverdueJobs,
   markCheckConcluded,
   markJobRunning,
   recentAnalysesOfProject,
+  recentTokens,
   requeueRunningJobs,
   requeueStrayRunningJobs,
   rescheduleJob,
@@ -64,6 +67,12 @@ const NOT_REVIEWED_FAILED =
 const NOT_REVIEWED_LIMIT =
   "Не разобрано: исчерпан дневной лимит разборов проекта. Слияние разрешено, разбор будет " +
   "выполнен, когда лимит обновится.";
+const NOT_REVIEWED_PROJECT_TOKENS =
+  "Не разобрано: исчерпан дневной бюджет токенов проекта. Слияние разрешено, разбор будет " +
+  "выполнен, когда бюджет обновится.";
+const NOT_REVIEWED_TOKENS =
+  "Не разобрано: исчерпан общий дневной бюджет токенов. Слияние разрешено, разбор будет " +
+  "выполнен, когда бюджет обновится.";
 
 /** Conclude checks whose jobs missed the deadline; the jobs keep retrying. */
 export async function concludeOverdue(deps: WorkerDeps = realDeps): Promise<void> {
@@ -89,7 +98,11 @@ async function concludeIfOpen(job: ReviewJob, summary: string, deps: WorkerDeps)
   }
 }
 
-/** Run one job: pause, daily limit, execution, retries with backoff, final failure. */
+/**
+ * Run one job: pause, daily limits, execution, retries with backoff, final failure. Over a
+ * limit there is no review at all: the check is concluded "not reviewed" and the job waits.
+ * Budgets are checked before a run, so one run may overshoot by its own budget at most.
+ */
 export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promise<void> {
   const settings = queueSettings();
 
@@ -100,9 +113,18 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   }
 
   const recent = recentAnalysesOfProject(job.projectId);
-  if (recent.count >= settings.dailyLimit) {
-    if (await concludeIfOpen(job, NOT_REVIEWED_LIMIT, deps)) markCheckConcluded(job.id, "limit");
-    rescheduleJob(job.id, { at: recent.freeAt ?? undefined, delayMs: 60 * 60_000 });
+  const overLimit =
+    recent.count >= settings.dailyLimit
+      ? NOT_REVIEWED_LIMIT
+      : settings.projectDailyTokens > 0 && recentTokens(job.projectId) >= settings.projectDailyTokens
+        ? NOT_REVIEWED_PROJECT_TOKENS
+        : settings.dailyTokens > 0 && recentTokens(null) >= settings.dailyTokens
+          ? NOT_REVIEWED_TOKENS
+          : null;
+  if (overLimit) {
+    if (await concludeIfOpen(job, overLimit, deps)) markCheckConcluded(job.id, "limit");
+    const at = overLimit === NOT_REVIEWED_LIMIT ? (recent.freeAt ?? undefined) : undefined;
+    rescheduleJob(job.id, { at, delayMs: 60 * 60_000 });
     return;
   }
 
@@ -141,7 +163,10 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   }
 }
 
-/** Open PRs of active projects without a finished review of their head get a job. */
+/**
+ * Open PRs of active projects without a finished review of their head get a job; PRs open
+ * in memory but not on GitHub had their close event lost and are closed now.
+ */
 async function syncOpenPullRequests(): Promise<void> {
   for (const project of listAllProjects()) {
     if (project.status !== "active") continue;
@@ -155,9 +180,17 @@ async function syncOpenPullRequests(): Promise<void> {
           author_association: string;
           title: string;
           user: { login: string } | null;
-          head: { sha: string };
+          head: { sha: string; ref: string };
+          base: { ref: string };
         }>
       >(`/repos/${project.owner}/${project.repo}/pulls?state=open&per_page=100`, { token });
+      // A page shorter than 100 lists every open PR; a full one may continue on the next page.
+      if (pulls.length < 100) {
+        const open = new Set(pulls.map((pr) => pr.number));
+        for (const number of listOpenPullRequestNumbers(project.id)) {
+          if (!open.has(number)) await handlePullRequestClosed(project, number, installationId);
+        }
+      }
       for (const pr of pulls) {
         if (pr.draft) continue;
         const member = await isProjectMember({
@@ -177,6 +210,8 @@ async function syncOpenPullRequests(): Promise<void> {
             installationId,
             author: pr.user?.login ?? null,
             title: pr.title,
+            baseRef: pr.base.ref,
+            headRef: pr.head.ref,
           },
           "sync",
         );

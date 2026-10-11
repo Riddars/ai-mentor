@@ -3,14 +3,12 @@ import { verifySignature } from "@/lib/github/verify";
 import { CHECK_NAME, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { isProjectMember } from "@/lib/github/members";
 import { handlePullRequest } from "@/lib/curator/simulate";
-import { startCommitReview } from "@/lib/curator/review";
+import { handlePullRequestClosed, startCommitReview } from "@/lib/curator/review";
 import {
   findProjectForRepository,
   forgetEvent,
   recordEventOnce,
-  resolvePendingOnClose,
   saveReplyAndEnqueue,
-  supersedeCommitJobs,
   upsertPullRequest,
 } from "@/lib/curator/store";
 
@@ -78,33 +76,17 @@ export async function POST(req: Request) {
   if (isPullRequest && payload.action === "closed") {
     // Состояние PR нужно панели (слит / закрыт без слияния); разбора здесь нет. Второй
     // шаг закрытия замечаний: исправление окончательно только после слияния в основную ветку.
-    const pr = payload.pull_request;
-    const prId = upsertPullRequest(project.id, pr.number, {
-      author: pr.user?.login ?? null,
-      title: pr.title ?? null,
-      state: pr.merged ? "merged" : "closed",
-    });
-    resolvePendingOnClose(
-      prId,
-      !pr.merged
-        ? "closed"
-        : pr.base?.ref === payload.repository?.default_branch
-          ? "merged-default"
-          : "merged-other",
-    );
-    // Closed without merge: its code never lands, a waiting review is pointless. A merged
-    // PR keeps its queued review — the findings still matter.
-    if (!pr.merged && payload.installation?.id !== undefined) {
-      for (const checkRunId of supersedeCommitJobs(prId)) {
-        await concludeCheckRun({
-          owner: project.owner,
-          repo: project.repo,
-          installationId: payload.installation.id,
-          checkRunId,
-          conclusion: "success",
-          output: { title: "AI Curator", summary: "Pull request закрыт без слияния — разбор не нужен." },
-        }).catch((error) => console.error(`[webhook] failed to conclude check ${checkRunId}:`, error));
-      }
+    // A merged PR keeps its queued review — the findings still matter.
+    if (payload.installation?.id === undefined) {
+      return Response.json({ ok: true, ignored: "no installation" });
+    }
+    try {
+      await handlePullRequestClosed(project, payload.pull_request.number, payload.installation.id, {
+        ...payload.pull_request,
+        state: "closed",
+      });
+    } catch (error) {
+      return failed("failed to handle a closed pull request", error);
     }
     return Response.json({ ok: true, closed: true });
   }
@@ -118,6 +100,9 @@ export async function POST(req: Request) {
       title: payload.pull_request.title ?? null,
       state: "open",
       headSha: payload.pull_request.head?.sha ?? null,
+      baseRef: payload.pull_request.base?.ref ?? null,
+      headRef: payload.pull_request.head?.ref ?? null,
+      mergedIntoDefault: false,
     });
   }
 

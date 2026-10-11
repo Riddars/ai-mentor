@@ -3,6 +3,7 @@ import { getInstallationToken } from "@/lib/github/auth";
 import { SEVERITIES } from "@/lib/curator/finding";
 import { locationText } from "@/lib/format";
 import { notebookCells } from "@/lib/curator/notebook";
+import { changedLines, type ChangedLines } from "@/lib/curator/scope";
 import {
   loadOpenFindings,
   loadStudentResponses,
@@ -46,6 +47,8 @@ export interface ReviewContext {
   materials: AnalysisMaterials;
   /** Ids of the prior findings given to the model: only these may be referenced back. */
   priorIds: Set<number>;
+  /** Changed files of the PR with the lines it adds. */
+  changed: ChangedLines;
 }
 
 function cut(text: string, limit: number, what: string): string {
@@ -256,6 +259,7 @@ export async function collectReviewContext(
   return {
     prompt,
     priorIds: new Set(prior.map((f) => f.id)),
+    changed: changedLines(files),
     materials: {
       files: files.map((f) => f.filename),
       omitted: changes.omitted,

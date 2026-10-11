@@ -60,12 +60,13 @@ export default async function ProjectPage({
       })()
     : [];
 
-  // "Open" means open for the project: findings in PRs closed without merge never
+  // "Open" means open for the project: branch findings of PRs closed without merge never
   // reached the main branch and are listed apart (see принятые решения.md).
+  const inClosedBranch = (f: FindingRow) => f.scope === "branch" && f.prState === "closed";
   const open = findings
-    .filter((f) => isOpenStatus(f.status) && f.prState !== "closed")
+    .filter((f) => isOpenStatus(f.status) && !inClosedBranch(f))
     .sort(compareOpen);
-  const openInClosedPr = findings.filter((f) => isOpenStatus(f.status) && f.prState === "closed");
+  const openInClosedPr = findings.filter((f) => isOpenStatus(f.status) && inClosedBranch(f));
   const dismissed = findings.filter((f) => f.status === "dismissed");
   const closed = findings.filter((f) => f.status === "closed");
 
@@ -236,6 +237,9 @@ function FindingList({
             </div>
             {!closed && (
               <div className="flex shrink-0 items-center gap-1.5">
+                {f.scope === "branch" && f.prNumber !== null && (
+                  <Badge tone="neutral">в ветке PR #{f.prNumber}</Badge>
+                )}
                 {f.status !== "open" && (
                   <Badge tone={f.status === "reopened" ? "red" : "amber"}>
                     {findingStatusLabel(f.status)}

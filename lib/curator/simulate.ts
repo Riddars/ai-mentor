@@ -15,7 +15,8 @@ interface PullRequestPayload {
   repository: { name: string; owner: { login: string } };
   pull_request: {
     number: number;
-    head: { sha: string };
+    head: { sha: string; ref?: string };
+    base?: { ref: string };
     user?: { login: string };
     title?: string;
   };
@@ -45,6 +46,8 @@ export async function handlePullRequest(
         installationId,
         author: payload.pull_request.user?.login ?? null,
         title: payload.pull_request.title ?? null,
+        baseRef: payload.pull_request.base?.ref ?? null,
+        headRef: payload.pull_request.head.ref ?? null,
       },
       "webhook",
     );

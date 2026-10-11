@@ -2,10 +2,10 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
+import { chat, type ChatMessage, type ChatResult, type ChatUsage } from "@/lib/llm/chat";
 import { reviewMode } from "@/lib/config";
 import { AGENT_RULES } from "@/lib/agent/prompt";
-import { withAgentRun } from "@/lib/agent/run";
+import { AgentProcessError, agentLimits, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext } from "@/lib/curator/context";
 import { verifyFindings } from "@/lib/curator/verify";
 import {
@@ -18,6 +18,7 @@ import {
 } from "@/lib/curator/finding";
 import { areaLabel, locationText, severityLabel } from "@/lib/format";
 import {
+  adoptMergedBranchFindings,
   applyReconciliation,
   enqueueCommitJob,
   finishJob,
@@ -30,10 +31,13 @@ import {
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
   recordAnalysis,
+  recordPullRequestClosed,
   setAnalysisComment,
+  supersedeCommitJobs,
   upsertParticipant,
   upsertPullRequest,
   type AnalysisMaterials,
+  type AnalysisMode,
   type FindingStatus,
   type KeptFinding,
   type PullRequestState,
@@ -53,6 +57,11 @@ export interface ReviewParams {
   title?: string | null;
   /** Real PR state; defaults to "open" (commit events only arrive for open PRs). */
   state?: PullRequestState;
+  /** Branches of the PR: the one it merges into and its own. */
+  baseRef?: string | null;
+  headRef?: string | null;
+  /** The PR is merged into the repository's default branch. */
+  mergedIntoDefault?: boolean;
 }
 
 const COMMENT_MARKER = "🤖 **AI Curator**";
@@ -275,6 +284,17 @@ export function parseModelJson(raw: string): ReconcileResult | null {
   return { summary, findings };
 }
 
+/**
+ * Model text for a public comment: no @-mentions (GitHub would notify those people) and no
+ * links (the text may come from the student's materials).
+ */
+export function publicText(text: string): string {
+  return text
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\b(?:https?:\/\/|www\.)[^\s`]*[^\s`.,;:!?)»"']/gi, (url) => `\`${url}\``)
+    .replace(/(^|[^\w`])@(?=[A-Za-z0-9])/g, "$1@\u200b");
+}
+
 /** What part of the PR the model saw, when not all of it. */
 function coverageNote(materials: AnalysisMaterials): string | null {
   const omitted = materials.omitted ?? [];
@@ -294,6 +314,7 @@ export function renderComment(
   result: ReconcileResult,
   changes: StatusChange[],
   materials?: AnalysisMaterials,
+  extra: { kept?: KeptFinding[]; viewed?: string[] | null } = {},
 ): string {
   const open = result.findings.filter(
     (f) => f.status === "open" || f.status === "reopened",
@@ -301,10 +322,11 @@ export function renderComment(
 
   const parts: string[] = [COMMENT_MARKER, ""];
   if (result.summary) {
-    parts.push(result.summary, "");
+    parts.push(publicText(result.summary), "");
   }
   const coverage = materials ? coverageNote(materials) : null;
   if (coverage) parts.push(coverage, "");
+  if (extra.viewed) parts.push(`_Просмотрено файлов репозитория: ${extra.viewed.length}._`, "");
 
   if (open.length === 0) {
     parts.push(
@@ -316,28 +338,30 @@ export function renderComment(
     parts.push(`**Существенные находки (${open.length}):**`, "");
     for (const f of open) {
       const badge = f.status === "reopened" ? " (открыта повторно)" : "";
-      parts.push(`### ${f.title}${badge}`);
+      parts.push(`### ${publicText(f.title)}${badge}`);
       parts.push(`_${areaLabel(f.area ?? null)} · ${severityLabel(f.severity ?? null)}_`, "");
-      if (f.description) parts.push(f.description, "");
-      if (f.impact) parts.push(`**Почему это важно:** ${f.impact}`, "");
+      if (f.description) parts.push(publicText(f.description), "");
+      if (f.impact) parts.push(`**Почему это важно:** ${publicText(f.impact)}`, "");
       if (f.locations && f.locations.length > 0) {
         parts.push("**Основания:**");
         for (const l of f.locations) {
-          parts.push(`- ${l.kind === "other" ? locationText(l) : `\`${locationText(l)}\``}`);
+          parts.push(`- ${l.kind === "other" ? publicText(locationText(l)) : `\`${locationText(l).replace(/`/g, "")}\``}`);
         }
         parts.push("");
       }
-      if (f.evidence) parts.push(`**Подтверждение:** ${f.evidence}`, "");
-      if (f.verify) parts.push(`**Как проверить исправление:** ${f.verify}`, "");
-      if (f.recommendation) parts.push(`**Что сделать:** ${f.recommendation}`, "");
+      if (f.evidence) parts.push(`**Подтверждение:** ${publicText(f.evidence)}`, "");
+      if (f.verify) parts.push(`**Как проверить исправление:** ${publicText(f.verify)}`, "");
+      if (f.recommendation) parts.push(`**Что сделать:** ${publicText(f.recommendation)}`, "");
     }
   }
 
   const resolved = changes.filter((c) => RESOLVED_LABEL[c.newStatus]);
-  if (resolved.length > 0) {
+  const notFixed = (extra.kept ?? []).filter((k) => k.fixNotVisible);
+  if (resolved.length > 0 || notFixed.length > 0) {
     parts.push("---", "**С прошлой проверки:**");
-    for (const c of resolved) {
-      parts.push(`- ${c.title} — ${RESOLVED_LABEL[c.newStatus]}${c.reason ? ` (${c.reason})` : ""}`);
+    for (const c of resolved) parts.push(resolvedLine(c));
+    for (const k of notFixed) {
+      parts.push(`- ${publicText(k.title)} — не засчитано как исправленное: ${k.reason}`);
     }
     parts.push("");
   }
@@ -353,17 +377,19 @@ export function renderReplyComment(changes: StatusChange[], kept: KeptFinding[])
   const parts: string[] = [COMMENT_MARKER, "", "Учёл ответ."];
   if (resolved.length > 0) {
     parts.push("", "**Обновления по находкам:**");
-    for (const c of resolved) {
-      parts.push(`- ${c.title} — ${RESOLVED_LABEL[c.newStatus]}${c.reason ? ` (${c.reason})` : ""}`);
-    }
+    for (const c of resolved) parts.push(resolvedLine(c));
   }
   if (kept.length > 0) {
     parts.push("", "**Остаются открытыми:**");
     for (const k of kept) {
-      parts.push(`- ${k.title}${k.reason ? ` — ${k.reason}` : ""}`);
+      parts.push(`- ${publicText(k.title)}${k.reason ? ` — ${publicText(k.reason)}` : ""}`);
     }
   }
   return parts.join("\n");
+}
+
+function resolvedLine(c: StatusChange): string {
+  return `- ${publicText(c.title)} — ${RESOLVED_LABEL[c.newStatus]}${c.reason ? ` (${publicText(c.reason)})` : ""}`;
 }
 
 // What the student is told about a finding that stopped being open.
@@ -384,7 +410,8 @@ interface ReviewOutcome {
 
 /**
  * Собрать контекст, спросить модель, сохранить находки и вернуть готовый комментарий.
- * Персист (analyses / findings / история статусов) происходит здесь.
+ * Персист (analyses / findings / история статусов) происходит здесь. Каждый разбор
+ * записывает потраченные токены — и неудачный тоже, если обращения к модели были.
  */
 async function runReview(
   params: ReviewParams,
@@ -392,58 +419,95 @@ async function runReview(
   trigger: "commit" | "comment",
   context: { isCurrent?: () => boolean; fixesFinal?: () => boolean; attempt?: number } = {},
 ): Promise<ReviewOutcome> {
-  const { prompt, materials, priorIds } = await collectReviewContext(params, prId);
+  const { prompt, materials, priorIds, changed } = await collectReviewContext(params, prId);
+  const tokens: ChatUsage = { input: 0, output: 0 };
+  const spend = (usage: ChatUsage) => {
+    tokens.input += usage.input;
+    tokens.output += usage.output;
+  };
+  let mode: AnalysisMode = "diff";
+  let viewed: string[] | null = null;
   let result: { answer: ChatResult; parsed: ReconcileResult | null } | null = null;
   let agentNote: string | null = null;
   if (trigger === "commit" && reviewMode() === "agent") {
     const attempt = context.attempt ?? 0;
+    mode = "agent_fallback";
     if (attempt < MAX_AGENT_ATTEMPTS) {
       const agent = await reviewWithAgent(params, prompt, materials.files, context.isCurrent);
-      if ("failure" in agent) agentNote = agent.failure;
-      else result = agent;
+      spend(agent.tokens);
+      if ("failure" in agent) {
+        agentNote = agent.failure;
+      } else {
+        result = agent;
+        mode = "agent";
+        viewed = agent.viewed;
+      }
     } else {
       agentNote = `[agent] не запускался: попытка ${attempt + 1}, агент уже запускался ${MAX_AGENT_ATTEMPTS} раза`;
     }
   }
+  const record = (
+    outcome: "ok" | "parse_error" | "stale" | "error",
+    answer: ChatResult | null,
+    summary: string | null = null,
+  ) =>
+    recordAnalysis({
+      prId,
+      headSha: params.headSha,
+      trigger,
+      outcome,
+      summary,
+      provider: answer?.provider ?? null,
+      model: answer?.model ?? null,
+      materials,
+      rawResponse: answer?.content ?? agentNote,
+      mode,
+      tokensIn: tokens.input,
+      tokensOut: tokens.output,
+      viewedFiles: viewed,
+    });
+
   if (!result) {
     // The agent failed on a PR that moved on meanwhile: the fallback would be wasted.
-    if (agentNote && context.isCurrent && !context.isCurrent()) throw new StaleReviewError();
+    if (agentNote && context.isCurrent && !context.isCurrent()) {
+      if (tokens.input + tokens.output > 0) record("stale", null);
+      throw new StaleReviewError();
+    }
     const messages: ChatMessage[] = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: prompt },
     ];
-    // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
-    let answer = await chat(messages);
-    let parsed = parseModelJson(answer.content);
-    if (!parsed) {
-      answer = await chat(messages);
-      parsed = parseModelJson(answer.content);
+    try {
+      // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
+      let answer = await chat(messages);
+      spend(answer.usage);
+      let parsed = parseModelJson(answer.content);
+      if (!parsed) {
+        answer = await chat(messages);
+        spend(answer.usage);
+        parsed = parseModelJson(answer.content);
+      }
+      if (agentNote) answer = { ...answer, content: `${answer.content}\n\n${agentNote}; разбор выполнен по diff` };
+      result = { answer, parsed };
+    } catch (error) {
+      // The job is retried later; what was already spent stays on the record.
+      if (tokens.input + tokens.output > 0) record("error", null);
+      throw error;
     }
-    if (agentNote) answer = { ...answer, content: `${answer.content}\n\n${agentNote}; разбор выполнен по diff` };
-    result = { answer, parsed };
   }
   const { answer, parsed } = result;
-  const record = {
-    prId,
-    headSha: params.headSha,
-    trigger,
-    provider: answer.provider,
-    model: answer.model,
-    materials,
-    rawResponse: answer.content,
-  };
 
   if (context.isCurrent && !context.isCurrent()) {
     // Пока модель думала, пришёл новый коммит или PR закрыли без слияния: результат не
     // применяем, но обращение к модели учитываем (дневной лимит, панель).
-    recordAnalysis({ ...record, outcome: "stale", summary: parsed?.summary || null });
+    record("stale", answer, parsed?.summary || null);
     throw new StaleReviewError();
   }
 
   if (!parsed) {
     // Память не портим; сырой ответ сохранён в разборе и виден руководителю в панели,
     // в публичный PR он не попадает.
-    const analysisId = recordAnalysis({ ...record, outcome: "parse_error" });
+    const analysisId = record("parse_error", answer);
     return {
       analysisId,
       comment:
@@ -456,16 +520,18 @@ async function runReview(
     };
   }
 
-  const analysisId = recordAnalysis({ ...record, outcome: "ok", summary: parsed.summary || null });
+  const analysisId = record("ok", answer, parsed.summary || null);
   const { statusChanges, kept } = applyReconciliation(prId, analysisId, parsed, {
     allowedPriorIds: priorIds,
     allowNew: trigger === "commit",
     fixesFinal: context.fixesFinal?.() ?? false,
+    changed,
+    branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
   });
 
   return {
     analysisId,
-    comment: renderComment(parsed, statusChanges, materials),
+    comment: renderComment(parsed, statusChanges, materials, { kept, viewed }),
     outcome: "ok",
     summary: parsed.summary,
     statusChanges,
@@ -479,32 +545,41 @@ async function runReview(
  */
 const MAX_AGENT_ATTEMPTS = 2;
 
+type AgentOutcome =
+  | { answer: ChatResult; parsed: ReconcileResult | null; tokens: ChatUsage; viewed: string[] }
+  | { failure: string; tokens: ChatUsage };
+
 /**
  * Agent review over a copy of the repository at the PR head, with the new findings checked
  * against the real file text. The raw answer keeps a trailer for the supervisor: what the
  * agent read and which findings the check dropped. A failed run returns `failure` (a trailer
  * line for the raw answer) instead of throwing, so the caller can fall back to the diff review.
  * A run that became stale returns its answer unverified: the caller records it as stale.
+ * `tokens` covers the agent and the verification; a process that died or hung is charged its
+ * whole budget, since what it spent is unknown.
  */
 async function reviewWithAgent(
   params: ReviewParams,
   prompt: string,
   changed: string[],
   isCurrent?: () => boolean,
-): Promise<{ answer: ChatResult; parsed: ReconcileResult | null } | { failure: string }> {
+): Promise<AgentOutcome> {
   try {
     return await withAgentRun(
       params,
       { systemPrompt: `${SYSTEM_PROMPT}\n${AGENT_RULES}`, userPrompt: prompt, changed },
-      async ({ reply, provider, model }, root) => {
+      async ({ reply, provider, model }, root): Promise<AgentOutcome> => {
+        const tokens = { input: reply.tokensIn, output: reply.tokensOut };
         const usage =
           `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, ` +
           `токенов: ${reply.tokensIn}/${reply.tokensOut}`;
-        const label = { provider, model: `${model} (agent)` };
+        const label = { provider, model: `${model} (agent)`, usage: tokens };
         const stale = isCurrent !== undefined && !isCurrent();
         if (reply.error) {
-          if (stale) return { answer: { ...label, content: `[agent] отменён: ${reply.error}; ${usage}` }, parsed: null };
-          return { failure: `[agent] сбой: ${reply.error}; ${usage}` };
+          if (stale) {
+            return { answer: { ...label, content: `[agent] отменён: ${reply.error}; ${usage}` }, parsed: null, tokens, viewed: reply.viewed };
+          }
+          return { failure: `[agent] сбой: ${reply.error}; ${usage}`, tokens };
         }
         const trailer = [
           `[agent] ${usage}`,
@@ -513,20 +588,32 @@ async function reviewWithAgent(
         ];
         const parsed = parseModelJson(reply.text);
         // A stale answer is not applied: returned unverified for the caller to record.
-        if (stale) return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed };
-        if (!parsed) return { failure: `[agent] ответ не удалось разобрать; ${usage}` };
+        if (stale) {
+          return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed, tokens, viewed: reply.viewed };
+        }
+        if (!parsed) return { failure: `[agent] ответ не удалось разобрать; ${usage}`, tokens };
         const verified = await verifyFindings(parsed, root);
+        tokens.input += verified.tokens.input;
+        tokens.output += verified.tokens.output;
         trailer.push(
           verified.checked ? "[verify] находки перепроверены" : "[verify] перепроверка не удалась, находки оставлены",
           ...verified.dropped.map((d) => `[verify] отброшено: ${d.title} — ${d.reason}`),
         );
-        return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed: verified.result };
+        return {
+          answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` },
+          parsed: verified.result,
+          tokens,
+          viewed: reply.viewed,
+        };
       },
       isCurrent,
     );
   } catch (error) {
     // Download, unpacking or the process itself failed: the caller falls back to the diff review.
-    return { failure: `[agent] сбой: ${error instanceof Error ? error.message : String(error)}` };
+    const tokens = error instanceof AgentProcessError
+      ? { input: agentLimits().maxTokens, output: 0 }
+      : { input: 0, output: 0 };
+    return { failure: `[agent] сбой: ${error instanceof Error ? error.message : String(error)}`, tokens };
   }
 }
 
@@ -543,12 +630,18 @@ function persistPrContext(params: ReviewParams): number {
   if (params.author) {
     upsertParticipant(project.id, params.author);
   }
-  return upsertPullRequest(project.id, params.prNumber, {
+  const prId = upsertPullRequest(project.id, params.prNumber, {
     author: params.author,
     title: params.title,
     state: params.state ?? "open",
     headSha: params.headSha,
+    baseRef: params.baseRef,
+    headRef: params.headRef,
+    mergedIntoDefault: params.mergedIntoDefault,
   });
+  // PRs merged into this PR's branch hand their findings over before it is reviewed.
+  if (params.headRef) adoptMergedBranchFindings(prId);
+  return prId;
 }
 
 /** Timing of the review queue; overridable from the environment. */
@@ -561,6 +654,9 @@ export function queueSettings() {
     debounceMs: num("REVIEW_DEBOUNCE_MS", 10_000),
     deadlineMs: num("REVIEW_DEADLINE_MS", 30 * 60_000),
     dailyLimit: num("REVIEW_DAILY_LIMIT", 50),
+    /** Tokens of model requests in 24 hours, per project and for all; 0 — no limit. */
+    projectDailyTokens: num("TOKENS_PER_PROJECT_DAY", 2_000_000),
+    dailyTokens: num("TOKENS_PER_DAY", 10_000_000),
     retryWindowMs: num("REVIEW_RETRY_WINDOW_MS", 24 * 60 * 60_000),
     concurrency: Math.max(1, num("REVIEW_CONCURRENCY", 1)),
   };
@@ -664,6 +760,54 @@ export async function concludeCheck(
   });
 }
 
+/** A closed PR as GitHub describes it (webhook payload or GET pulls/N). */
+export interface ClosedPullRequest {
+  number: number;
+  state: string;
+  merged: boolean;
+  title?: string | null;
+  user?: { login: string } | null;
+  head: { ref: string };
+  base: { ref: string; repo: { default_branch: string } };
+}
+
+/**
+ * A PR was closed: remember its final state and branches, settle its findings (see
+ * recordPullRequestClosed) and, if it was not merged, drop its waiting review — its code
+ * never lands. Without `pr` the PR is fetched from GitHub (a close event that was missed).
+ */
+export async function handlePullRequestClosed(
+  project: { id: number; owner: string; repo: string },
+  number: number,
+  installationId: number,
+  pr?: ClosedPullRequest,
+): Promise<void> {
+  const data =
+    pr ??
+    (await githubRequest<ClosedPullRequest>(`/repos/${project.owner}/${project.repo}/pulls/${number}`, {
+      token: await getInstallationToken(installationId),
+    }));
+  if (data.state === "open") return;
+  const mergedIntoDefault = data.merged && data.base.ref === data.base.repo.default_branch;
+  const prId = upsertPullRequest(project.id, number, {
+    author: data.user?.login ?? null,
+    title: data.title ?? null,
+    state: data.merged ? "merged" : "closed",
+    baseRef: data.base.ref,
+    headRef: data.head.ref,
+    mergedIntoDefault,
+  });
+  recordPullRequestClosed(prId, !data.merged ? "closed" : mergedIntoDefault ? "merged-default" : "merged-other");
+  if (data.merged) return;
+  for (const checkRunId of supersedeCommitJobs(prId)) {
+    await concludeCheck(
+      { owner: project.owner, repo: project.repo, installationId },
+      checkRunId,
+      "Pull request закрыт без слияния — разбор не нужен.",
+    ).catch((error) => console.error(`[curator] failed to conclude check ${checkRunId}:`, error));
+  }
+}
+
 /** The PR moved on (new commit) or was closed without merge while it was being reviewed. */
 export class StaleReviewError extends Error {
   constructor() {
@@ -674,7 +818,7 @@ export class StaleReviewError extends Error {
 /**
  * Выполнить разбор коммита из очереди: разбор, комментарий, завершение проверки. Если head
  * PR сменился или PR закрыт без слияния, результат не применяется — StaleReviewError. Если
- * PR уже слит, исправления закрываются сразу (второго шага закрытия уже не будет).
+ * PR уже слит в основную ветку, исправления закрываются сразу (второго шага уже не будет).
  */
 export async function executeCommitJob(
   params: ReviewParams,
@@ -689,7 +833,7 @@ export async function executeCommitJob(
   if (!isCurrent()) throw new StaleReviewError();
   const { analysisId, comment } = await runReview(params, prId, "commit", {
     isCurrent,
-    fixesFinal: () => getPullRequest(prId)?.state === "merged",
+    fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
     attempt,
   });
   await postIssueComment({
@@ -754,7 +898,8 @@ export interface CommentReviewParams {
 export async function executeCommentJob(params: CommentReviewParams): Promise<void> {
   const token = await getInstallationToken(params.installationId);
   const pr = await githubRequest<{
-    head: { sha: string };
+    head: { sha: string; ref: string };
+    base: { ref: string; repo: { default_branch: string } };
     user: { login: string };
     title: string;
     state: "open" | "closed";
@@ -771,6 +916,9 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
     title: pr.title,
     // Comments arrive for merged/closed PRs too — keep the real state in memory.
     state: pr.state === "open" ? "open" : pr.merged ? "merged" : "closed",
+    baseRef: pr.base.ref,
+    headRef: pr.head.ref,
+    mergedIntoDefault: pr.merged && pr.base.ref === pr.base.repo.default_branch,
   };
   const prId = persistPrContext(reviewParams);
   if (loadOpenFindings(prId).length === 0) {
@@ -778,7 +926,7 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
   }
 
   const outcome = await runReview(reviewParams, prId, "comment", {
-    fixesFinal: () => reviewParams.state === "merged",
+    fixesFinal: () => reviewParams.mergedIntoDefault ?? false,
   });
   const body = renderReplyComment(outcome.statusChanges, outcome.kept);
   if (!body) {

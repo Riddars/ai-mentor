@@ -79,8 +79,8 @@ export interface ChatResult {
   content: string;
   provider: string;
   model: string;
-  /** Token counts, when the provider reports them. */
-  usage?: ChatUsage;
+  /** Token counts as reported by the provider, or estimated from the text size. */
+  usage: ChatUsage;
 }
 
 function numberEnv(name: string, fallback: number): number {
@@ -96,7 +96,7 @@ function numberEnv(name: string, fallback: number): number {
 async function callOpenAICompatible(
   target: Target,
   messages: ChatMessage[],
-): Promise<{ content: string; usage?: ChatUsage }> {
+): Promise<{ content: string; usage: ChatUsage }> {
   const conn = OPENAI_COMPATIBLE[target.provider];
   if (!conn) {
     throw new Error(`Unknown or unsupported LLM provider: "${target.provider}"`);
@@ -141,8 +141,13 @@ async function callOpenAICompatible(
   }
   const usage = data.usage
     ? { input: data.usage.prompt_tokens ?? 0, output: data.usage.completion_tokens ?? 0 }
-    : undefined;
+    : { input: estimateTokens(JSON.stringify(messages)), output: estimateTokens(content) };
   return { content, usage };
+}
+
+/** Rough token count of a text, for providers that do not report usage. */
+export function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 3);
 }
 
 /** Вызвать одного провайдера. Сюда добавится ветка на anthropic (своя схема). */

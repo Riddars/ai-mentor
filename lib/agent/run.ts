@@ -95,6 +95,9 @@ function childEntry(): string {
   return [process.cwd(), "lib", "agent", "child.mts"].join(sep);
 }
 
+/** The agent process died, hung or could not be talked to: what it spent is unknown. */
+export class AgentProcessError extends Error {}
+
 /** Run the agent process for one request; it is killed if it outlives the time limit. */
 export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent?: () => boolean): Promise<AgentReply> {
   return new Promise((resolve, reject) => {
@@ -118,7 +121,7 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
       void waited.then(() => (error ? reject(error) : resolve(reply!)));
     };
     const killTimer = setTimeout(
-      () => finish(new Error(`The agent process did not finish in ${request.limits.timeoutMs + CHILD_GRACE_MS} ms`)),
+      () => finish(new AgentProcessError(`The agent process did not finish in ${request.limits.timeoutMs + CHILD_GRACE_MS} ms`)),
       request.limits.timeoutMs + CHILD_GRACE_MS,
     );
     // A new commit or a closed PR cancels the run between agent steps.
@@ -132,12 +135,12 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
     child.on("message", (message: AgentReply) => {
       if (message.type === "result") finish(null, message);
     });
-    child.on("error", (error) => finish(error));
+    child.on("error", (error) => finish(new AgentProcessError(error.message)));
     child.on("exit", () => {
       exited = true;
     });
     // "close" comes after the IPC channel is drained, so a reply sent just before exiting is not lost.
-    child.on("close", (code) => finish(new Error(`The agent process exited with code ${code}`)));
+    child.on("close", (code) => finish(new AgentProcessError(`The agent process exited with code ${code}`)));
     child.send(request);
   });
 }

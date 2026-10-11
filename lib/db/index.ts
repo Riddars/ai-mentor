@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { databasePath } from "@/lib/config";
+import type { FindingLocation } from "@/lib/curator/finding";
+import { findingScope, type ChangedLines } from "@/lib/curator/scope";
 
 // Единственная точка доступа к SQLite. node:sqlite — встроенный драйвер (Node 22+,
 // помечен experimental). Весь остальной код ходит в БД только через getDb() и
@@ -286,6 +288,49 @@ function migrate(db: DatabaseSync): void {
     // How to check that a finding is fixed: set when the finding is created, like its title.
     addColumns(db, "findings", { verify: "TEXT" });
     db.exec("PRAGMA user_version = 8");
+  }
+  if (version < 9) {
+    // How an analysis was made and what it cost; the scope of a finding (the main branch
+    // or only its PR's branch) and the branch it was raised on; the branches of a PR.
+    addColumns(db, "analyses", {
+      mode: "TEXT",
+      tokens_in: "INTEGER",
+      tokens_out: "INTEGER",
+      viewed_files: "TEXT",
+    });
+    addColumns(db, "findings", { scope: "TEXT NOT NULL DEFAULT 'project'", branch: "TEXT" });
+    addColumns(db, "pull_requests", {
+      base_ref: "TEXT",
+      head_ref: "TEXT",
+      merged_into_default: "INTEGER NOT NULL DEFAULT 0",
+    });
+    // The base branch was not stored before: merged PRs are taken as merged into the main one.
+    db.exec("UPDATE pull_requests SET merged_into_default = 1 WHERE state = 'merged'");
+    // Findings of unmerged PRs, by the files of the analysis that raised them (lines unknown).
+    const rows = db
+      .prepare(
+        `SELECT f.id, f.locations, a.materials FROM findings f
+         JOIN pull_requests pr ON pr.id = f.pull_request_id
+         LEFT JOIN analyses a ON a.id = f.first_analysis_id
+         WHERE COALESCE(pr.state, 'open') != 'merged'`,
+      )
+      .all() as Array<{ id: number; locations: string | null; materials: string | null }>;
+    const setBranch = db.prepare("UPDATE findings SET scope = 'branch' WHERE id = @id");
+    for (const row of rows) {
+      const files = parseJsonOr<{ files?: string[] }>(row.materials, {}).files ?? [];
+      const changed: ChangedLines = new Map(files.map((f) => [f, null]));
+      const locations = parseJsonOr<FindingLocation[]>(row.locations, []);
+      if (findingScope(locations, changed, false) === "branch") setBranch.run({ id: row.id });
+    }
+    db.exec("PRAGMA user_version = 9");
+  }
+}
+
+function parseJsonOr<T>(raw: string | null, fallback: T): T {
+  try {
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
   }
 }
 
