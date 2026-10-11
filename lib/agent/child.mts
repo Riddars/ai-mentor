@@ -3,7 +3,7 @@
 
 import { mkdir } from "node:fs/promises";
 import { openAICompatibleModel, runAgent } from "@/lib/agent/agent.mjs";
-import type { AgentReply, AgentRequest } from "@/lib/agent/protocol";
+import type { AgentProgress, AgentReply, AgentRequest } from "@/lib/agent/protocol";
 import { repositorySection } from "@/lib/agent/prompt";
 import { extractTarball, listRepoFiles, relatedFiles, repoMap } from "@/lib/agent/workspace";
 
@@ -23,6 +23,10 @@ async function handle(request: AgentRequest): Promise<AgentReply> {
     model,
     limits: request.limits,
     signal: controller.signal,
+    onUsage: (tokensIn, tokensOut) => {
+      const progress: AgentProgress = { type: "progress", tokensIn, tokensOut };
+      process.send?.(progress);
+    },
   });
   return {
     type: "result",

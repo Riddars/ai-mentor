@@ -5,7 +5,7 @@ import { postIssueComment } from "@/lib/github/comments";
 import { chat, type ChatMessage, type ChatResult, type ChatUsage } from "@/lib/llm/chat";
 import { reviewMode } from "@/lib/config";
 import { AGENT_RULES } from "@/lib/agent/prompt";
-import { AgentProcessError, agentLimits, withAgentRun } from "@/lib/agent/run";
+import { AgentProcessError, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext } from "@/lib/curator/context";
 import { verifyFindings } from "@/lib/curator/verify";
 import {
@@ -286,13 +286,21 @@ export function parseModelJson(raw: string): ReconcileResult | null {
 
 /**
  * Model text for a public comment: no @-mentions (GitHub would notify those people) and no
- * links (the text may come from the student's materials).
+ * links (the text may come from the student's materials). Code spans and blocks are left as
+ * they are: GitHub neither links nor mentions inside them.
  */
 export function publicText(text: string): string {
   return text
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\b(?:https?:\/\/|www\.)[^\s`]*[^\s`.,;:!?)»"']/gi, (url) => `\`${url}\``)
-    .replace(/(^|[^\w`])@(?=[A-Za-z0-9])/g, "$1@\u200b");
+    .split(/(```[\s\S]*?```|`[^`\n]*`)/)
+    .map((part, i) =>
+      i % 2 === 1
+        ? part
+        : part
+            .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+            .replace(/\b(?:https?:\/\/|www\.)[^\s`]*[^\s`.,;:!?)»"']/gi, (url) => `\`${url}\``)
+            .replace(/(^|[^\w])@(?=[A-Za-z0-9])/g, "$1@\u200b"),
+    )
+    .join("");
 }
 
 /** What part of the PR the model saw, when not all of it. */
@@ -356,7 +364,7 @@ export function renderComment(
   }
 
   const resolved = changes.filter((c) => RESOLVED_LABEL[c.newStatus]);
-  const notFixed = (extra.kept ?? []).filter((k) => k.fixNotVisible);
+  const notFixed = (extra.kept ?? []).filter((k) => k.fixNotCounted);
   if (resolved.length > 0 || notFixed.length > 0) {
     parts.push("---", "**С прошлой проверки:**");
     for (const c of resolved) parts.push(resolvedLine(c));
@@ -417,7 +425,12 @@ async function runReview(
   params: ReviewParams,
   prId: number,
   trigger: "commit" | "comment",
-  context: { isCurrent?: () => boolean; fixesFinal?: () => boolean; attempt?: number } = {},
+  context: {
+    isCurrent?: () => boolean;
+    fixesFinal?: () => boolean;
+    allowFixes?: boolean;
+    attempt?: number;
+  } = {},
 ): Promise<ReviewOutcome> {
   const { prompt, materials, priorIds, changed } = await collectReviewContext(params, prId);
   const tokens: ChatUsage = { input: 0, output: 0 };
@@ -527,6 +540,7 @@ async function runReview(
     fixesFinal: context.fixesFinal?.() ?? false,
     changed,
     branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
+    allowFixes: context.allowFixes,
   });
 
   return {
@@ -555,8 +569,8 @@ type AgentOutcome =
  * agent read and which findings the check dropped. A failed run returns `failure` (a trailer
  * line for the raw answer) instead of throwing, so the caller can fall back to the diff review.
  * A run that became stale returns its answer unverified: the caller records it as stale.
- * `tokens` covers the agent and the verification; a process that died or hung is charged its
- * whole budget, since what it spent is unknown.
+ * `tokens` covers the agent and the verification; a process that died is charged what it
+ * reported, one that hung — its whole budget (see AgentProcessError).
  */
 async function reviewWithAgent(
   params: ReviewParams,
@@ -610,9 +624,7 @@ async function reviewWithAgent(
     );
   } catch (error) {
     // Download, unpacking or the process itself failed: the caller falls back to the diff review.
-    const tokens = error instanceof AgentProcessError
-      ? { input: agentLimits().maxTokens, output: 0 }
-      : { input: 0, output: 0 };
+    const tokens = error instanceof AgentProcessError ? error.spent : { input: 0, output: 0 };
     return { failure: `[agent] сбой: ${error instanceof Error ? error.message : String(error)}`, tokens };
   }
 }
@@ -844,6 +856,9 @@ export async function executeCommitJob(
     installationId: params.installationId,
   });
   setAnalysisComment(analysisId, comment);
+  // Reviewed after a merge into another PR's branch: what it found passes to that PR.
+  const reviewed = getPullRequest(prId);
+  if (reviewed?.state === "merged" && !reviewed.mergedIntoDefault) recordPullRequestClosed(prId, "merged-other");
   // The comment is out: from here on a failure must not repeat the review. The check is
   // updated also after an early "not reviewed" conclusion; if this fails, it stays as is.
   const checkRunId = getJobCheckRun(jobId);
@@ -897,14 +912,10 @@ export interface CommentReviewParams {
  */
 export async function executeCommentJob(params: CommentReviewParams): Promise<void> {
   const token = await getInstallationToken(params.installationId);
-  const pr = await githubRequest<{
-    head: { sha: string; ref: string };
-    base: { ref: string; repo: { default_branch: string } };
-    user: { login: string };
-    title: string;
-    state: "open" | "closed";
-    merged: boolean;
-  }>(`/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`, { token });
+  const pr = await githubRequest<ClosedPullRequest & { head: { sha: string; ref: string }; user: { login: string } }>(
+    `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`,
+    { token },
+  );
 
   const reviewParams: ReviewParams = {
     owner: params.owner,
@@ -921,23 +932,33 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
     mergedIntoDefault: pr.merged && pr.base.ref === pr.base.repo.default_branch,
   };
   const prId = persistPrContext(reviewParams);
-  if (loadOpenFindings(prId).length === 0) {
-    return; // сверять нечего — модель не вызываем
-  }
+  try {
+    if (loadOpenFindings(prId).length === 0) {
+      return; // сверять нечего — модель не вызываем
+    }
 
-  const outcome = await runReview(reviewParams, prId, "comment", {
-    fixesFinal: () => reviewParams.mergedIntoDefault ?? false,
-  });
-  const body = renderReplyComment(outcome.statusChanges, outcome.kept);
-  if (!body) {
-    return; // модель ничего не сказала о прошлых находках — не шумим в PR
+    const outcome = await runReview(reviewParams, prId, "comment", {
+      fixesFinal: () => reviewParams.mergedIntoDefault ?? false,
+      allowFixes: reviewParams.state !== "closed",
+    });
+    const body = renderReplyComment(outcome.statusChanges, outcome.kept);
+    if (!body) {
+      return; // модель ничего не сказала о прошлых находках — не шумим в PR
+    }
+    await postIssueComment({
+      owner: params.owner,
+      repo: params.repo,
+      issueNumber: params.prNumber,
+      body,
+      installationId: params.installationId,
+    });
+    setAnalysisComment(outcome.analysisId, body);
+  } finally {
+    // A reply on a closed PR: settle its findings as its close does — the close event may
+    // have been missed, and a fix accepted after a merge into another branch moves on.
+    if (pr.state !== "open") {
+      const project = getProjectByRepo(params.owner, params.repo);
+      if (project) await handlePullRequestClosed(project, params.prNumber, params.installationId, { ...pr, number: params.prNumber });
+    }
   }
-  await postIssueComment({
-    owner: params.owner,
-    repo: params.repo,
-    issueNumber: params.prNumber,
-    body,
-    installationId: params.installationId,
-  });
-  setAnalysisComment(outcome.analysisId, body);
 }

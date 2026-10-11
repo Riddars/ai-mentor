@@ -120,6 +120,8 @@ export interface RunAgentOptions {
   model: Model<string>;
   limits?: AgentLimits;
   signal?: AbortSignal;
+  /** Called after every step with the tokens spent so far. */
+  onUsage?: (tokensIn: number, tokensOut: number) => void;
 }
 
 export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
@@ -165,6 +167,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       tokensIn += estimateTokens(options.systemPrompt) + estimateTokens(JSON.stringify(agent.state.messages));
       tokensOut += estimateTokens(JSON.stringify(message.content));
     }
+    options.onUsage?.(tokensIn, tokensOut);
     if (tokensIn + tokensOut > limits.maxTokens) abort(`token budget of ${limits.maxTokens} exceeded`);
     // A model that keeps calling tools after the limit is stopped for good.
     if (toolCalls > limits.maxToolCalls + 3) abort(`more than ${limits.maxToolCalls} tool calls`);

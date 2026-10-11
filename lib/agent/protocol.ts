@@ -31,6 +31,13 @@ export interface AgentCancel {
   type: "cancel";
 }
 
+/** Tokens spent so far, sent after every agent step. */
+export interface AgentProgress {
+  type: "progress";
+  tokensIn: number;
+  tokensOut: number;
+}
+
 export interface AgentReply {
   type: "result";
   text: string;

@@ -59,6 +59,9 @@ check("public text: mention defused", cleaned.includes("@​student") && !/(^|\s
 check("public text: markdown link reduced to its text", cleaned.includes("ссылку") && !cleaned.includes("evil.example"), cleaned);
 check("public text: bare URLs not linked", cleaned.includes("`https://x.example`") && cleaned.includes("`www.y.example`"), cleaned);
 check("public text: e-mail left as is", cleaned.includes("a@b.ru"), cleaned);
+const code = publicText("Код `@torch.no_grad()` и `https://a.example`, затем `x`@alice\n```\n@decorator\n```");
+check("public text: code spans and blocks untouched", code.includes("`@torch.no_grad()`") && code.includes("`https://a.example`") && code.includes("\n@decorator\n"), code);
+check("public text: mention right after a code span defused", code.includes("`x`@\u200balice"), code);
 
 // --- memory: parallel PRs --------------------------------------------------------------
 
@@ -81,12 +84,14 @@ const reconcile = (
   findings: ReturnType<typeof finding>[],
   changed: Map<string, Set<number> | null>,
   fixesFinal = false,
+  allowFixes = true,
 ) =>
   store.applyReconciliation(prId, analysis(prId), { summary: "", findings }, {
     allowedPriorIds: new Set(findings.map((f) => f.priorId).filter((id): id is number => id !== null)),
     allowNew: true,
     fixesFinal,
     changed,
+    allowFixes,
   });
 const row = (id: number) =>
   db.prepare("SELECT status, scope, pull_request_id AS prId, resolved_by_pr_id AS resolvedBy FROM findings WHERE id = @id").get({ id }) as {
@@ -126,7 +131,7 @@ check("another PR cannot reopen a pending fix", row(oldBug).status === "pending"
 
 // B calls the second project finding fixed without touching its file: not accepted.
 const result = reconcile(prB, [finding("x", [], "closed", second)], changes(["src/other.py", [1]]));
-check("fix not visible in the PR's changes is not accepted", row(second).status === "open" && result.kept.some((k) => k.fixNotVisible));
+check("fix not visible in the PR's changes is not accepted", row(second).status === "open" && result.kept.some((k) => k.fixNotCounted));
 const comment = renderComment({ summary: "s", findings: [] }, result.statusChanges, undefined, { kept: result.kept });
 check("comment says the fix was not counted", comment.includes("не засчитано как исправленное"), comment);
 
@@ -176,6 +181,37 @@ store.upsertPullRequest(projectId, 7, { state: "closed" });
 store.recordPullRequestClosed(prG, "closed");
 const after = store.listProjectSummaries()[0].openFindings;
 check("closing without merge drops only its branch findings from the counters", after === before - 1, `${before} → ${after}`);
+
+// --- review fixes ----------------------------------------------------------------------
+
+// A finding given to the model but closed meanwhile is not raised again as a new one.
+const prI = pr(9, "feat-i");
+reconcile(prI, [finding("race finding", [file("src/i.py", "1")])], changes(["src/i.py", [1]]));
+const race = idOf("race finding");
+db.prepare("UPDATE findings SET status = 'dismissed' WHERE id = @id").run({ id: race });
+const countBefore = (db.prepare("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n;
+reconcile(prI, [finding("race finding", [file("src/i.py", "1")], "closed", race)], changes(["src/i.py", [1]]));
+const countAfter = (db.prepare("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n;
+check("a prior finding closed meanwhile is not duplicated", countAfter === countBefore && row(race).status === "dismissed");
+
+// A reply on a PR closed without merge cannot fix anything.
+const prJ = pr(10, "feat-j");
+reconcile(prJ, [finding("old bug in j", [file("src/j_old.py", "2")])], changes(["src/j.py", [1]]));
+const oldJ = idOf("old bug in j");
+const closedReply = reconcile(prJ, [finding("x", [], "closed", oldJ)], changes(["src/j_old.py", [2]]), false, false);
+check("a closed PR's reply does not count a fix", row(oldJ).status === "open" && closedReply.kept.some((k) => k.fixNotCounted));
+
+// A PR merged into main takes over findings of PRs merged into its branch before it.
+const prK = pr(11, "feat-k");
+const prL = pr(12, "feat-l", "feat-k");
+reconcile(prL, [finding("bug in L", [file("src/l.py", "1")])], changes(["src/l.py", [1]]));
+store.upsertPullRequest(projectId, 12, { state: "merged", mergedIntoDefault: false });
+db.prepare("UPDATE pull_requests SET state = 'merged', merged_into_default = 1 WHERE id = @id").run({ id: prK });
+store.recordPullRequestClosed(prK, "merged-default");
+const bugL = row(idOf("bug in L"));
+const branchL = (db.prepare("SELECT branch FROM findings WHERE id = @id").get({ id: idOf("bug in L") }) as { branch: string | null }).branch;
+check("merge into main collects findings left in its branch", bugL.prId === prK && bugL.scope === "project", JSON.stringify(bugL));
+check("handed-over findings carry the new branch", branchL === "feat-k", String(branchL));
 
 // --- daily token budgets ---------------------------------------------------------------
 

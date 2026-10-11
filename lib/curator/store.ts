@@ -862,8 +862,8 @@ export interface KeptFinding {
   title: string;
   status: FindingStatus;
   reason: string | null;
-  /** The model called it fixed, but none of its cited files is changed by the PR. */
-  fixNotVisible?: boolean;
+  /** The model called it fixed, but the fix was not counted (`reason` says why). */
+  fixNotCounted?: boolean;
 }
 
 export interface ReconcileOptions {
@@ -880,6 +880,8 @@ export interface ReconcileOptions {
   changed: ChangedLines;
   /** Head branch of the PR, kept with new findings for display. */
   branch?: string | null;
+  /** False when the PR's fixes can never land (closed without merge). */
+  allowFixes?: boolean;
 }
 
 /**
@@ -953,6 +955,9 @@ export function applyReconciliation(
               | undefined)
           : undefined;
 
+      // Given to the model, but no longer this PR's to change (closed, dismissed, fixed by
+      // another PR meanwhile): left as it is, not raised again as a new finding.
+      if (!prior && f.priorId != null && options.allowedPriorIds.has(f.priorId)) continue;
       if (!prior) {
         if (!options.allowNew) continue;
         const row = insertFinding.get({
@@ -986,14 +991,16 @@ export function applyReconciliation(
 
       const findingId = f.priorId as number;
       const priorLocations = parseJson<FindingLocation[]>(prior.locations) ?? [];
-      if (f.status === "closed" && !fixVisible(priorLocations, changedFiles)) {
-        kept.push({
-          findingId,
-          title: prior.title,
-          status: prior.status,
-          reason: "исправление не видно в изменениях этого pull request",
-          fixNotVisible: true,
-        });
+      const notCounted =
+        f.status !== "closed"
+          ? null
+          : options.allowFixes === false
+            ? "pull request закрыт без слияния — исправление не попадёт в основную ветку"
+            : !fixVisible(priorLocations, changedFiles)
+              ? "исправление не видно в изменениях этого pull request"
+              : null;
+      if (notCounted) {
+        kept.push({ findingId, title: prior.title, status: prior.status, reason: notCounted, fixNotCounted: true });
         continue;
       }
       const status: FindingStatus =
@@ -1052,6 +1059,9 @@ export function recordPullRequestClosed(prId: number, outcome: CloseOutcome): vo
     if (successor) adoptMergedBranchFindings(successor.id);
     return;
   }
+  // PRs merged into this one's branch may have left findings it never took over (no review
+  // since): they reach the main branch with it.
+  if (outcome === "merged-default") adoptMergedBranchFindings(prId);
   const newStatus: FindingStatus = outcome === "merged-default" ? "closed" : "open";
   const reason =
     outcome === "merged-default"
@@ -1133,9 +1143,9 @@ export function adoptMergedBranchFindings(prId: number): number {
         )
         .all({ source }) as Array<{ id: number; status: FindingStatus }>;
       db.prepare(
-        `UPDATE findings SET pull_request_id = @prId, updated_at = datetime('now')
+        `UPDATE findings SET pull_request_id = @prId, branch = @branch, updated_at = datetime('now')
          WHERE pull_request_id = @source AND scope = 'branch' AND status IN ${OPEN_STATUSES}`,
-      ).run({ prId, source });
+      ).run({ prId, source, branch: pr.headRef });
       db.prepare(
         `UPDATE findings SET resolved_by_pr_id = @prId, updated_at = datetime('now')
          WHERE resolved_by_pr_id = @source AND status = 'pending'`,

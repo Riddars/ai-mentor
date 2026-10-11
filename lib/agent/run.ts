@@ -7,7 +7,7 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { getInstallationToken } from "@/lib/github/auth";
 import { openAICompatibleEndpoint } from "@/lib/llm/chat";
-import type { AgentLimitsSpec, AgentReply, AgentRequest } from "@/lib/agent/protocol";
+import type { AgentLimitsSpec, AgentProgress, AgentReply, AgentRequest } from "@/lib/agent/protocol";
 
 // Service side of the agent review: downloads the commit archive with the app token, runs
 // the agent in a separate process whose environment holds only the model key, enforces the
@@ -95,8 +95,19 @@ function childEntry(): string {
   return [process.cwd(), "lib", "agent", "child.mts"].join(sep);
 }
 
-/** The agent process died, hung or could not be talked to: what it spent is unknown. */
-export class AgentProcessError extends Error {}
+/**
+ * The agent process died, hung or could not be talked to. `spent` is what it reported before
+ * that; a process killed on the time limit may have been in the middle of a model request, so
+ * it is charged its whole budget.
+ */
+export class AgentProcessError extends Error {
+  constructor(
+    message: string,
+    readonly spent: { input: number; output: number },
+  ) {
+    super(message);
+  }
+}
 
 /** Run the agent process for one request; it is killed if it outlives the time limit. */
 export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent?: () => boolean): Promise<AgentReply> {
@@ -109,6 +120,7 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
     });
     let settled = false;
     let exited = false;
+    const spent = { input: 0, output: 0 };
     const exit = new Promise<void>((done) => child.once("exit", () => done()));
     // The caller removes the copy next, so the process must be gone before the promise settles.
     const finish = (error: Error | null, reply?: AgentReply) => {
@@ -121,7 +133,13 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
       void waited.then(() => (error ? reject(error) : resolve(reply!)));
     };
     const killTimer = setTimeout(
-      () => finish(new AgentProcessError(`The agent process did not finish in ${request.limits.timeoutMs + CHILD_GRACE_MS} ms`)),
+      () =>
+        finish(
+          new AgentProcessError(`The agent process did not finish in ${request.limits.timeoutMs + CHILD_GRACE_MS} ms`, {
+            input: Math.max(request.limits.maxTokens - spent.output, spent.input),
+            output: spent.output,
+          }),
+        ),
       request.limits.timeoutMs + CHILD_GRACE_MS,
     );
     // A new commit or a closed PR cancels the run between agent steps.
@@ -132,15 +150,20 @@ export function runAgentProcess(request: AgentRequest, apiKey: string, isCurrent
         console.warn("[agent] the currency check failed:", error);
       }
     }, CURRENT_CHECK_MS);
-    child.on("message", (message: AgentReply) => {
-      if (message.type === "result") finish(null, message);
+    child.on("message", (message: AgentReply | AgentProgress) => {
+      if (message.type === "progress") {
+        spent.input = message.tokensIn;
+        spent.output = message.tokensOut;
+      } else if (message.type === "result") {
+        finish(null, message);
+      }
     });
-    child.on("error", (error) => finish(new AgentProcessError(error.message)));
+    child.on("error", (error) => finish(new AgentProcessError(error.message, { ...spent })));
     child.on("exit", () => {
       exited = true;
     });
     // "close" comes after the IPC channel is drained, so a reply sent just before exiting is not lost.
-    child.on("close", (code) => finish(new AgentProcessError(`The agent process exited with code ${code}`)));
+    child.on("close", (code) => finish(new AgentProcessError(`The agent process exited with code ${code}`, { ...spent })));
     child.send(request);
   });
 }
