@@ -655,8 +655,8 @@ export function queueSettings() {
     deadlineMs: num("REVIEW_DEADLINE_MS", 30 * 60_000),
     dailyLimit: num("REVIEW_DAILY_LIMIT", 50),
     /** Tokens of model requests in 24 hours, per project and for all; 0 — no limit. */
-    projectDailyTokens: num("TOKENS_PER_PROJECT_DAY", 2_000_000),
-    dailyTokens: num("TOKENS_PER_DAY", 10_000_000),
+    projectDailyTokens: num("TOKENS_PER_PROJECT_DAY", 1_000_000),
+    dailyTokens: num("TOKENS_PER_DAY", 5_000_000),
     retryWindowMs: num("REVIEW_RETRY_WINDOW_MS", 24 * 60 * 60_000),
     concurrency: Math.max(1, num("REVIEW_CONCURRENCY", 1)),
   };
