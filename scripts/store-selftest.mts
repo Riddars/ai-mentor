@@ -248,6 +248,56 @@ await runJob(again!, {
 });
 check("a zero budget means no limit", ran);
 
+const budgetNote = db.prepare("SELECT note FROM review_jobs WHERE id = @id").get({ id: jobId }) as { note: string };
+check("a job stopped by the token budget is marked \"budget\"", budgetNote.note === "budget", budgetNote.note);
+
+// --- spend, balance, roles ------------------------------------------------------------
+const prices = await import("@/lib/llm/prices");
+process.env.LLM_PRICES = "selectel:deepseek/deepseek-v4-pro=20/40; provod:m=1/2";
+const spent = prices.addSpend(prices.emptySpend(), { input: 1_000_000, output: 500_000 }, "selectel", "deepseek/deepseek-v4-pro");
+check("prices: rubles per million tokens", Math.abs(spent.rub - 40) < 1e-9 && !spent.unpriced, String(spent.rub));
+prices.addSpend(spent, { input: 10, output: 0 }, "selectel", "unknown-model");
+check("prices: a model without a price makes the spend unknown", prices.spendRub(spent) === null);
+check("prices: no tokens cost nothing", prices.spendRub(prices.emptySpend()) === 0);
+
+db.prepare(
+  "INSERT INTO users (id, login, password_salt, password_hash, role) VALUES ('u-sup', 'sup', '', '', 'supervisor')",
+).run();
+const sup = { id: "u-sup" };
+const own = store.createProjectManual("org", "own", undefined, sup.id);
+check("a supervisor who connects a project is assigned to it", store.isSupervisorOf(sup.id, own));
+const prOwn = pr(50, "feat-own");
+db.prepare("UPDATE pull_requests SET project_id = @own WHERE id = @prOwn").run({ own, prOwn });
+store.recordAnalysis({ prId: prOwn, headSha: "o1", trigger: "commit", outcome: "ok", provider: "selectel", tokensIn: 1000, tokensOut: 100, costRub: 2.5 });
+store.recordAnalysis({ prId: prOwn, headSha: "o2", trigger: "commit", outcome: "error", provider: "selectel", tokensIn: 500, tokensOut: 0, costRub: 1 });
+store.recordAnalysis({ prId: prOwn, headSha: "o3", trigger: "commit", outcome: "ok", provider: "selectel", tokensIn: 300, tokensOut: 0, costRub: null });
+const supSpend = store.spendByProject(30, sup.id);
+const ownRow = supSpend.find((p) => p.id === own);
+check("spend by project: a supervisor sees only their projects", supSpend.length === 1 && ownRow !== undefined);
+check(
+  "spend by project: reviews, failures, tokens, rubles, unpriced",
+  ownRow?.reviews === 2 && ownRow.failures === 1 && ownRow.tokens === 1900 && Math.abs(ownRow.rub - 3.5) < 1e-9 && ownRow.unpriced === 300,
+  JSON.stringify(ownRow),
+);
+const supDays = store.spendByDay(7, sup.id);
+check("spend by day: today's rubles", supDays.length === 1 && Math.abs(supDays[0].rub - 3.5) < 1e-9, JSON.stringify(supDays));
+check("spend by project: the head sees all projects", store.spendByProject(30).length > 1);
+
+db.prepare("UPDATE analyses SET created_at = datetime('now', '-2 days') WHERE provider = 'selectel'").run();
+store.addBalanceEntry({ provider: "selectel", kind: "topup", amountRub: 100, actor: "head" });
+db.prepare("UPDATE balance_entries SET at = datetime('now', '-3 days')").run();
+let providerBal = store.providerBalances().find((b) => b.provider === "selectel");
+check("balance: top-ups minus spend since the first top-up", providerBal !== undefined && Math.abs(providerBal.rub - 96.5) < 1e-9, JSON.stringify(providerBal));
+check("balance: unpriced tokens are flagged", providerBal?.unpriced === 300);
+check("balance: daily average over a short history", providerBal !== undefined && Math.abs(providerBal.dailyRub - 3.5 / 2) < 0.01, JSON.stringify(providerBal));
+store.deleteProjectCascade(own);
+providerBal = store.providerBalances().find((b) => b.provider === "selectel");
+check("balance: deleting a project keeps its spend", providerBal !== undefined && Math.abs(providerBal.rub - 96.5) < 1e-9, JSON.stringify(providerBal));
+check("balance: kept spend is not listed as an entry", store.listBalanceEntries().every((e) => e.kind !== ("spent" as string)));
+store.addBalanceEntry({ provider: "selectel", kind: "balance", amountRub: 90, actor: "head" });
+providerBal = store.providerBalances().find((b) => b.provider === "selectel");
+check("balance: a balance read restarts the count", providerBal !== undefined && Math.abs(providerBal.rub - 90) < 1e-9, JSON.stringify(providerBal));
+
 db.close();
 rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);

@@ -91,6 +91,7 @@ export interface ProjectSummary {
   openFindings: number;
   seriousOpenFindings: number;
   oldestSeriousOpenAt: string | null;
+  oldestOpenAt: string | null;
   /** Latest PR update or analysis — the last thing the curator saw. */
   lastActivityAt: string | null;
   lastAnalysisAt: string | null;
@@ -256,7 +257,8 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
         `SELECT
            COUNT(*) AS openFindings,
            SUM(CASE WHEN f.severity = 'critical' THEN 1 ELSE 0 END) AS serious,
-           MIN(CASE WHEN f.severity = 'critical' THEN f.created_at END) AS oldestSerious
+           MIN(CASE WHEN f.severity = 'critical' THEN f.created_at END) AS oldestSerious,
+           MIN(f.created_at) AS oldestOpen
          FROM findings f
          JOIN pull_requests pr ON pr.id = f.pull_request_id
          WHERE pr.project_id = @id
@@ -267,6 +269,7 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       openFindings: number;
       serious: number | null;
       oldestSerious: string | null;
+      oldestOpen: string | null;
     };
 
     const last = db
@@ -290,6 +293,7 @@ export function listProjectSummaries(supervisorId?: string): ProjectSummary[] {
       openFindings: counts.openFindings,
       seriousOpenFindings: counts.serious ?? 0,
       oldestSeriousOpenAt: counts.oldestSerious,
+      oldestOpenAt: counts.oldestOpen,
       lastActivityAt: getProjectLastActivity(p.id),
       lastAnalysisAt: last?.at ?? null,
       lastAnalysisOutcome: last?.outcome ?? null,
@@ -490,12 +494,24 @@ export function listAnalysisChanges(analysisId: number): AnalysisChange[] {
 
 // --- Admin: projects ---
 
+/** Connect a repository; a supervisor who connects it is assigned to it in the same step. */
 export function createProjectManual(
   owner: string,
   repo: string,
   name?: string,
+  supervisorId?: string,
 ): number {
-  return upsertProject(owner, repo, name);
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    const id = upsertProject(owner, repo, name);
+    if (supervisorId) assignSupervisor(id, supervisorId);
+    db.exec("COMMIT");
+    return id;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 /** All fields are always bound — node:sqlite rejects unused named parameters. */
@@ -525,9 +541,21 @@ export function projectHasPullRequests(id: number): boolean {
  * project.
  * github_events are not tied to a project and stay.
  */
-export function deleteProjectCascade(id: number): void {
+/**
+ * Delete a project with everything about it. Its spend stays in the balance as "spent"
+ * entries unless `keepSpend` is false (demo data).
+ */
+export function deleteProjectCascade(id: number, keepSpend = true): void {
   const db = getDb();
   const steps = [
+    ...(keepSpend
+      ? [
+          `INSERT INTO balance_entries (provider, kind, amount_rub, at)
+           SELECT a.provider, 'spent', a.cost_rub, a.created_at
+           FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+           WHERE pr.project_id = @id AND a.provider IS NOT NULL AND a.cost_rub > 0`,
+        ]
+      : []),
     `DELETE FROM finding_status_history WHERE finding_id IN
        (SELECT f.id FROM findings f JOIN pull_requests pr ON pr.id = f.pull_request_id
         WHERE pr.project_id = @id)`,
@@ -597,10 +625,15 @@ export function isSupervisorOf(userId: string, projectId: number): boolean {
   return row !== undefined;
 }
 
-export function listAllProjects(): ProjectDetail[] {
+/** All projects, or only a supervisor's. */
+export function listAllProjects(supervisorId?: string): ProjectDetail[] {
+  const s = scope(supervisorId);
   return getDb()
-    .prepare("SELECT id, owner, repo, name, status FROM projects ORDER BY name, repo")
-    .all() as unknown as ProjectDetail[];
+    .prepare(
+      `SELECT id, owner, repo, name, status FROM projects
+       WHERE id IN (${s.projectIds}) ORDER BY name, repo`,
+    )
+    .all(s.params) as unknown as ProjectDetail[];
 }
 
 // --- Curator write path (webhook / review.ts) ---
@@ -736,15 +769,17 @@ export function recordAnalysis(params: {
   mode?: AnalysisMode | null;
   tokensIn?: number;
   tokensOut?: number;
+  /** Rubles spent; null when some tokens had no price. */
+  costRub?: number | null;
   viewedFiles?: string[] | null;
 }): number {
   const row = getDb()
     .prepare(
       `INSERT INTO analyses
          (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
-          raw_response, mode, tokens_in, tokens_out, viewed_files)
+          raw_response, mode, tokens_in, tokens_out, cost_rub, viewed_files)
        VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
-               @rawResponse, @mode, @tokensIn, @tokensOut, @viewedFiles)
+               @rawResponse, @mode, @tokensIn, @tokensOut, @costRub, @viewedFiles)
        RETURNING id`,
     )
     .get({
@@ -760,6 +795,7 @@ export function recordAnalysis(params: {
       mode: params.mode ?? null,
       tokensIn: params.tokensIn ?? 0,
       tokensOut: params.tokensOut ?? 0,
+      costRub: params.costRub === undefined ? 0 : params.costRub,
       viewedFiles: params.viewedFiles ? JSON.stringify(params.viewedFiles) : null,
     }) as { id: number };
   return row.id;
@@ -779,6 +815,209 @@ export function recentTokens(projectId: number | null): number {
     )
     .get({ projectId }) as { tokens: number };
   return row.tokens;
+}
+
+// --- Usage and balance ---
+
+/** Spend of one local day; `unpriced` — tokens of analyses without a price. */
+export interface DaySpend {
+  day: string;
+  rub: number;
+  tokens: number;
+  analyses: number;
+  unpriced: number;
+}
+
+/** Spend per local day over the last `days` days (oldest first, days without spend left out). */
+export function spendByDay(days: number, supervisorId?: string): DaySpend[] {
+  const s = scope(supervisorId);
+  return getDb()
+    .prepare(
+      `SELECT date(a.created_at, 'localtime') AS day,
+              COALESCE(SUM(a.cost_rub), 0) AS rub,
+              COALESCE(SUM(COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)), 0) AS tokens,
+              COUNT(*) AS analyses,
+              COALESCE(SUM(CASE WHEN a.cost_rub IS NULL
+                THEN COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0) ELSE 0 END), 0) AS unpriced
+       FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE pr.project_id IN (${s.projectIds})
+         AND date(a.created_at, 'localtime') > date('now', 'localtime', @since)
+       GROUP BY day ORDER BY day`,
+    )
+    .all({ ...s.params, since: `-${days} days` }) as unknown as DaySpend[];
+}
+
+export interface ProjectSpend {
+  id: number;
+  owner: string;
+  repo: string;
+  name: string | null;
+  /** Analyses that produced a review. */
+  reviews: number;
+  /** Analyses that failed (error, unreadable answer). */
+  failures: number;
+  /** Commits whose check was concluded without a review: daily limit or token budget. */
+  notReviewed: number;
+  tokens: number;
+  rub: number;
+  /** Tokens of analyses without a price. */
+  unpriced: number;
+  /** Tokens in the last 24 hours, compared with the project's daily budget. */
+  dayTokens: number;
+}
+
+/** Per-project spend and activity over the last `days` days. */
+export function spendByProject(days: number, supervisorId?: string): ProjectSpend[] {
+  const s = scope(supervisorId);
+  return getDb()
+    .prepare(
+      `SELECT p.id, p.owner, p.repo, p.name,
+              COALESCE(a.reviews, 0) AS reviews, COALESCE(a.failures, 0) AS failures,
+              COALESCE(j.notReviewed, 0) AS notReviewed,
+              COALESCE(a.tokens, 0) AS tokens, COALESCE(a.rub, 0) AS rub,
+              COALESCE(a.unpriced, 0) AS unpriced, COALESCE(a.dayTokens, 0) AS dayTokens
+       FROM projects p
+       LEFT JOIN (
+         SELECT pr.project_id,
+                SUM(CASE WHEN a.outcome = 'ok' THEN 1 ELSE 0 END) AS reviews,
+                SUM(CASE WHEN a.outcome IN ('error', 'parse_error') THEN 1 ELSE 0 END) AS failures,
+                SUM(COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)) AS tokens,
+                SUM(a.cost_rub) AS rub,
+                SUM(CASE WHEN a.cost_rub IS NULL
+                  THEN COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0) ELSE 0 END) AS unpriced,
+                SUM(CASE WHEN a.created_at > datetime('now', '-1 day')
+                  THEN COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0) ELSE 0 END) AS dayTokens
+         FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+         WHERE date(a.created_at, 'localtime') > date('now', 'localtime', @since)
+         GROUP BY pr.project_id
+       ) a ON a.project_id = p.id
+       LEFT JOIN (
+         SELECT pr.project_id, COUNT(*) AS notReviewed
+         FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
+         WHERE j.note IN ('limit', 'budget')
+           AND date(j.created_at, 'localtime') > date('now', 'localtime', @since)
+         GROUP BY pr.project_id
+       ) j ON j.project_id = p.id
+       WHERE p.id IN (${s.projectIds})
+       ORDER BY rub DESC, tokens DESC, p.name, p.repo`,
+    )
+    .all({ ...s.params, since: `-${days} days` }) as unknown as ProjectSpend[];
+}
+
+export type BalanceKind = "topup" | "balance";
+
+/**
+ * A top-up of a provider's account, or its balance read from the provider's dashboard.
+ * Spend of deleted projects is kept as "spent" entries, not listed.
+ */
+export interface BalanceEntry {
+  id: number;
+  provider: string;
+  kind: BalanceKind;
+  amountRub: number;
+  at: string;
+  actor: string | null;
+}
+
+export function listBalanceEntries(): BalanceEntry[] {
+  return getDb()
+    .prepare(
+      `SELECT id, provider, kind, amount_rub AS amountRub, at, actor
+       FROM balance_entries WHERE kind IN ('topup', 'balance') ORDER BY at DESC, id DESC`,
+    )
+    .all() as unknown as BalanceEntry[];
+}
+
+/** Recorded at the current moment: the balance changes from then on. */
+export function addBalanceEntry(entry: Omit<BalanceEntry, "id" | "at">): void {
+  getDb()
+    .prepare(
+      `INSERT INTO balance_entries (provider, kind, amount_rub, at, actor)
+       VALUES (@provider, @kind, @amountRub, datetime('now'), @actor)`,
+    )
+    .run({ ...entry });
+}
+
+export function deleteBalanceEntry(id: number): void {
+  getDb()
+    .prepare("DELETE FROM balance_entries WHERE id = @id AND kind IN ('topup', 'balance')")
+    .run({ id });
+}
+
+export interface ProviderBalance {
+  provider: string;
+  /** Approximate rubles left: the last balance read, plus later top-ups, minus later spend. */
+  rub: number;
+  /** Average spend per day over the last 7 days (or the shorter history); 0 when nothing was spent. */
+  dailyRub: number;
+  /** Tokens counted against the balance that had no price, so the balance is overstated. */
+  unpriced: number;
+}
+
+/**
+ * Approximate balance per provider with entries. The start is the latest balance read (or the
+ * first top-up when there is none); spend is what analyses of the provider cost since then.
+ * Entry times are UTC like the rest of the database.
+ */
+export function providerBalances(): ProviderBalance[] {
+  const db = getDb();
+  const providers = db
+    .prepare(
+      "SELECT DISTINCT provider FROM balance_entries WHERE kind IN ('topup', 'balance') ORDER BY provider",
+    )
+    .all() as Array<{ provider: string }>;
+  return providers.map(({ provider }) => {
+    const base = db
+      .prepare(
+        `SELECT amount_rub AS amount, at FROM balance_entries
+         WHERE provider = @provider AND kind = 'balance' ORDER BY at DESC, id DESC LIMIT 1`,
+      )
+      .get({ provider }) as { amount: number; at: string } | undefined;
+    const since =
+      base?.at ??
+      (db
+        .prepare(
+          "SELECT MIN(at) AS at FROM balance_entries WHERE provider = @provider AND kind IN ('topup', 'balance')",
+        )
+        .get({ provider }) as { at: string }).at;
+    const topups = db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_rub), 0) AS sum FROM balance_entries
+         WHERE provider = @provider AND kind = 'topup' AND at ${base ? ">" : ">="} @since`,
+      )
+      .get({ provider, since }) as { sum: number };
+    const spent = db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_rub), 0) AS rub,
+                COALESCE(SUM(CASE WHEN cost_rub IS NULL
+                  THEN COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0) ELSE 0 END), 0) AS unpriced
+         FROM analyses WHERE provider = @provider AND created_at > @since`,
+      )
+      .get({ provider, since }) as { rub: number; unpriced: number };
+    const deleted = db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_rub), 0) AS rub FROM balance_entries
+         WHERE provider = @provider AND kind = 'spent' AND at > @since`,
+      )
+      .get({ provider, since }) as { rub: number };
+    const week = db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_rub), 0) AS rub,
+                julianday('now') - julianday(MIN(created_at)) AS days
+         FROM analyses WHERE provider = @provider AND created_at > datetime('now', '-7 days')`,
+      )
+      .get({ provider }) as { rub: number; days: number | null };
+    const history = db
+      .prepare("SELECT julianday('now') - julianday(MIN(created_at)) AS days FROM analyses WHERE provider = @provider")
+      .get({ provider }) as { days: number | null };
+    const span = Math.min(7, Math.max(1, history.days ?? 7));
+    return {
+      provider,
+      rub: (base?.amount ?? 0) + topups.sum - spent.rub - deleted.rub,
+      dailyRub: week.rub / span,
+      unpriced: spent.unpriced,
+    };
+  });
 }
 
 /** Remember the comment actually published to the pull request for an analysis. */
@@ -1515,8 +1754,11 @@ export function requeueStrayRunningJobs(runningHere: ReadonlySet<number>): numbe
   return ids.length;
 }
 
-/** The job's required check was concluded without a review ("deadline" or "limit"). */
-export function markCheckConcluded(id: number, note: "deadline" | "limit"): void {
+/**
+ * The job's required check was concluded without a review: "deadline", "limit" (daily count
+ * of reviews) or "budget" (daily tokens of the project or of the service).
+ */
+export function markCheckConcluded(id: number, note: "deadline" | "limit" | "budget"): void {
   getDb()
     .prepare(
       `UPDATE review_jobs SET check_concluded = 1, note = @note, updated_at = datetime('now')

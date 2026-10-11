@@ -3,6 +3,7 @@ import { getDb } from "@/lib/db";
 import {
   applyReconciliation,
   assignSupervisor,
+  addBalanceEntry,
   deleteProjectCascade,
   loadOpenFindings,
   recordAnalysis,
@@ -77,6 +78,10 @@ function alignDatesToAnalyses(): void {
 
 let shaCounter = 0;
 
+// Demo spend: the review model's prices, rubles per token.
+const DEMO_PRICE = { input: 0.000021672, output: 0.000043345 };
+const DEMO_ACTOR = "demo";
+
 interface ReviewOptions {
   files: string[];
   trigger?: "commit" | "comment";
@@ -101,14 +106,21 @@ function review(
     .prepare("SELECT COUNT(*) AS n FROM student_responses WHERE pull_request_id = @prId")
     .get({ prId }) as { n: number };
 
+  shaCounter += 1;
+  const tokensIn = outcome === "error" ? 0 : 30_000 + ((shaCounter * 7919) % 50_000);
+  const tokensOut = outcome === "error" ? 0 : 2_000 + ((shaCounter * 104_729) % 4_000);
   const id = recordAnalysis({
     prId,
-    headSha: `demo${(shaCounter += 1).toString(16).padStart(6, "0")}`,
+    headSha: `demo${shaCounter.toString(16).padStart(6, "0")}`,
     trigger,
     outcome,
     summary: result?.summary || null,
-    provider: outcome === "error" ? null : "provod",
+    provider: outcome === "error" ? null : "selectel",
     model: outcome === "error" ? null : "deepseek/deepseek-v4-pro",
+    mode: outcome === "error" ? null : "diff",
+    tokensIn,
+    tokensOut,
+    costRub: tokensIn * DEMO_PRICE.input + tokensOut * DEMO_PRICE.output,
     materials:
       outcome === "error"
         ? null
@@ -184,7 +196,8 @@ function resetDemo(): void {
       id: number;
     }>
   ).map((r) => r.id);
-  for (const id of ids) deleteProjectCascade(id);
+  for (const id of ids) deleteProjectCascade(id, false);
+  db().prepare("DELETE FROM balance_entries WHERE actor = @actor").run({ actor: DEMO_ACTOR });
 }
 
 export async function seedDemo(): Promise<{ seeded: boolean; message: string }> {
@@ -644,6 +657,10 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
   // spectra intentionally left unassigned.
 
   alignDatesToAnalyses();
+  addBalanceEntry({ provider: "selectel", kind: "topup", amountRub: 300, actor: DEMO_ACTOR });
+  db()
+    .prepare("UPDATE balance_entries SET at = datetime('now', '-40 days') WHERE actor = @actor")
+    .run({ actor: DEMO_ACTOR });
   // Demo PRs are created already merged: their findings are the project's.
   db()
     .prepare(

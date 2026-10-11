@@ -14,10 +14,10 @@ export const dynamic = "force-dynamic";
 export default async function AdminPage() {
   const viewer = await getViewer();
   if (!viewer) redirect("/login");
-  if (viewer.role !== "head") redirect("/");
+  const isHead = viewer.role === "head";
 
-  const projects = listAllProjects();
-  const users = listUsers();
+  const projects = listAllProjects(isHead ? undefined : viewer.userId);
+  const users = isHead ? listUsers() : [];
   const byId = new Map(users.map((u) => [u.id, u]));
 
   return (
@@ -26,10 +26,6 @@ export default async function AdminPage() {
       <PageShell>
         <div className="mb-6">
           <h1 className="text-2xl font-semibold tracking-tight">Управление</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Подключение репозиториев, состояние проектов и учётные записи. Разбираются
-            только подключённые здесь проекты.
-          </p>
         </div>
 
         <div className="flex flex-col gap-6">
@@ -58,9 +54,13 @@ export default async function AdminPage() {
                           </div>
                           <div className="text-xs text-muted-foreground">
                             {p.owner}/{p.repo}
-                            {" · "}
-                            {supervisors.length > 0 ? supervisors.join(", ") : (
-                              <span className="text-amber">руководитель не назначен</span>
+                            {isHead && (
+                              <>
+                                {" · "}
+                                {supervisors.length > 0 ? supervisors.join(", ") : (
+                                  <span className="text-amber">руководитель не назначен</span>
+                                )}
+                              </>
                             )}
                           </div>
                         </div>
@@ -75,6 +75,7 @@ export default async function AdminPage() {
             </CardBody>
           </Card>
 
+          {isHead && (
           <Card className="shadow-card">
             <CardHeader className="flex items-center justify-between">
               <CardTitle>Учётные записи</CardTitle>
@@ -103,6 +104,7 @@ export default async function AdminPage() {
               </ul>
             </CardBody>
           </Card>
+          )}
         </div>
       </PageShell>
     </>

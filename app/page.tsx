@@ -2,7 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getViewer } from "@/lib/users";
 import { listProjectSummaries, type ProjectSummary } from "@/lib/curator/store";
-import { parseDbDate, relativeDate } from "@/lib/format";
+import { daysSince, parseDbDate, relativeDate } from "@/lib/format";
 import { AppHeader, PageShell } from "@/components/AppHeader";
 import { Badge } from "@/components/ui/Badge";
 import { cn } from "@/lib/utils";
@@ -263,8 +263,20 @@ function ProjectRow({ p, isHead }: { p: ProjectSummary; isHead: boolean }) {
         {p.openFindings === 0 ? (
           <span className="text-xs text-muted-foreground">нет</span>
         ) : (
-          <span className={cn("font-medium tabular-nums", p.seriousOpenFindings > 0 && "text-red")}>
-            {p.openFindings}
+          <span className="whitespace-nowrap">
+            <span className={cn("font-medium tabular-nums", p.seriousOpenFindings > 0 && "text-red")}>
+              {p.openFindings}
+            </span>
+            <span
+              className="text-xs text-muted-foreground tabular-nums"
+              title={p.seriousOpenFindings > 0 ? "самое старое критичное" : "самое старое"}
+              aria-label={`${p.seriousOpenFindings > 0 ? "самое старое критичное" : "самое старое"}: ${daysSince(
+                p.seriousOpenFindings > 0 ? p.oldestSeriousOpenAt : p.oldestOpenAt,
+              )}`}
+            >
+              {" · "}
+              {daysSince(p.seriousOpenFindings > 0 ? p.oldestSeriousOpenAt : p.oldestOpenAt)}
+            </span>
           </span>
         )}
       </td>
@@ -279,17 +291,11 @@ function EmptyState({ head }: { head: boolean }) {
   return (
     <div className="rounded-xl border border-dashed border-border bg-card px-6 py-16 text-center shadow-card">
       <p className="text-sm text-muted-foreground">
-        {head ? (
-          <>
-            Проектов пока нет. Добавьте репозиторий в{" "}
-            <Link href="/admin" className="text-primary hover:underline">
-              управлении
-            </Link>
-            .
-          </>
-        ) : (
-          "Вам не назначены проекты — обратитесь к руководителю центра."
-        )}
+        {head ? "Проектов пока нет." : "У вас пока нет проектов."} Подключите репозиторий в{" "}
+        <Link href="/admin" className="text-primary hover:underline">
+          управлении
+        </Link>
+        .
       </p>
     </div>
   );

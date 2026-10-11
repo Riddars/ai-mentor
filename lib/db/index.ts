@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { databasePath } from "@/lib/config";
 import type { FindingLocation } from "@/lib/curator/finding";
 import { findingScope, type ChangedLines } from "@/lib/curator/scope";
+import { priceRub } from "@/lib/llm/prices";
 
 // Единственная точка доступа к SQLite. node:sqlite — встроенный драйвер (Node 22+,
 // помечен experimental). Весь остальной код ходит в БД только через getDb() и
@@ -323,6 +324,37 @@ function migrate(db: DatabaseSync): void {
       if (findingScope(locations, changed, false) === "branch") setBranch.run({ id: row.id });
     }
     db.exec("PRAGMA user_version = 9");
+  }
+  if (version < 10) {
+    // Rubles an analysis cost, priced when it was made (null: a model without a price);
+    // top-ups and balances read from a provider's account, for the approximate balance.
+    addColumns(db, "analyses", { cost_rub: "REAL" });
+    // Earlier analyses are priced at the current prices; unknown ones count as free, so the
+    // spend page does not flag the whole history as unpriced.
+    const old = db
+      .prepare(
+        `SELECT id, provider, model, COALESCE(tokens_in, 0) AS input, COALESCE(tokens_out, 0) AS output
+         FROM analyses WHERE cost_rub IS NULL`,
+      )
+      .all() as Array<{ id: number; provider: string | null; model: string | null; input: number; output: number }>;
+    const setCost = db.prepare("UPDATE analyses SET cost_rub = @cost WHERE id = @id");
+    for (const row of old) {
+      const model = (row.model ?? "").replace(/ \(agent\)$/, "");
+      const cost = row.provider ? priceRub(row, row.provider, model) : null;
+      setCost.run({ id: row.id, cost: cost ?? 0 });
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS balance_entries (
+        id          INTEGER PRIMARY KEY,
+        provider    TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        amount_rub  REAL NOT NULL,
+        at          TEXT NOT NULL,
+        actor       TEXT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    db.exec("PRAGMA user_version = 10");
   }
 }
 

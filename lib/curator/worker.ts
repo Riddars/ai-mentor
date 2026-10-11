@@ -122,7 +122,9 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
           ? NOT_REVIEWED_TOKENS
           : null;
   if (overLimit) {
-    if (await concludeIfOpen(job, overLimit, deps)) markCheckConcluded(job.id, "limit");
+    if (await concludeIfOpen(job, overLimit, deps)) {
+      markCheckConcluded(job.id, overLimit === NOT_REVIEWED_LIMIT ? "limit" : "budget");
+    }
     const at = overLimit === NOT_REVIEWED_LIMIT ? (recent.freeAt ?? undefined) : undefined;
     rescheduleJob(job.id, { at, delayMs: 60 * 60_000 });
     return;

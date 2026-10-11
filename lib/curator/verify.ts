@@ -1,6 +1,7 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { chat, type ChatMessage, type ChatResult, type ChatUsage } from "@/lib/llm/chat";
+import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
+import { addSpend, emptySpend, type Spend } from "@/lib/llm/prices";
 import { notebookCells } from "@/lib/curator/notebook";
 import { lineRange } from "@/lib/curator/scope";
 import type { ReconcileResult, ReconciledFinding } from "@/lib/curator/store";
@@ -27,8 +28,8 @@ export interface VerifyOutcome {
   dropped: DroppedFinding[];
   /** False when the model check did not run or its answer could not be read. */
   checked: boolean;
-  /** Tokens spent by the model check. */
-  tokens: ChatUsage;
+  /** Tokens and rubles spent by the model check. */
+  tokens: Spend;
 }
 
 /** Lines of a repository file as the agent saw them; null if missing or not text. */
@@ -142,7 +143,7 @@ export async function verifyFindings(
   }
 
   let checkedByModel = candidates.length === 0;
-  let tokens: ChatUsage = { input: 0, output: 0 };
+  let tokens = emptySpend();
   if (candidates.length > 0) {
     const findingsText = candidates
       .map(({ finding, excerpts }, n) =>
@@ -168,7 +169,7 @@ export async function verifyFindings(
     ];
     try {
       const answer = await ask(messages);
-      tokens = answer.usage;
+      tokens = addSpend(tokens, answer.usage, answer.provider, answer.model);
       const verdicts = parseVerdicts(answer.content);
       if (verdicts) {
         checkedByModel = true;

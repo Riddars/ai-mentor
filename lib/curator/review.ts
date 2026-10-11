@@ -2,10 +2,11 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
-import { chat, type ChatMessage, type ChatResult, type ChatUsage } from "@/lib/llm/chat";
+import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
+import { addSpend, emptySpend, mergeSpend, spendRub, type Spend } from "@/lib/llm/prices";
 import { reviewMode } from "@/lib/config";
 import { AGENT_RULES } from "@/lib/agent/prompt";
-import { AgentProcessError, withAgentRun } from "@/lib/agent/run";
+import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext } from "@/lib/curator/context";
 import { verifyFindings } from "@/lib/curator/verify";
 import {
@@ -432,11 +433,8 @@ async function runReview(
   } = {},
 ): Promise<ReviewOutcome> {
   const { prompt, materials, priorIds, changed } = await collectReviewContext(params, prId);
-  const tokens: ChatUsage = { input: 0, output: 0 };
-  const spend = (usage: ChatUsage) => {
-    tokens.input += usage.input;
-    tokens.output += usage.output;
-  };
+  const tokens = emptySpend();
+  const spend = (answer: ChatResult) => addSpend(tokens, answer.usage, answer.provider, answer.model);
   let mode: AnalysisMode = "diff";
   let viewed: string[] | null = null;
   let result: { answer: ChatResult; parsed: ReconcileResult | null } | null = null;
@@ -446,7 +444,7 @@ async function runReview(
     mode = "agent_fallback";
     if (attempt < MAX_AGENT_ATTEMPTS) {
       const agent = await reviewWithAgent(params, prompt, materials.files, context.isCurrent);
-      spend(agent.tokens);
+      mergeSpend(tokens, agent.tokens);
       if ("failure" in agent) {
         agentNote = agent.failure;
       } else {
@@ -469,13 +467,14 @@ async function runReview(
       trigger,
       outcome,
       summary,
-      provider: answer?.provider ?? null,
+      provider: answer?.provider ?? tokens.provider,
       model: answer?.model ?? null,
       materials,
       rawResponse: answer?.content ?? agentNote,
       mode,
       tokensIn: tokens.input,
       tokensOut: tokens.output,
+      costRub: spendRub(tokens),
       viewedFiles: viewed,
     });
 
@@ -492,11 +491,11 @@ async function runReview(
     try {
       // One retry when the answer is not valid JSON: models occasionally wrap or cut it.
       let answer = await chat(messages);
-      spend(answer.usage);
+      spend(answer);
       let parsed = parseModelJson(answer.content);
       if (!parsed) {
         answer = await chat(messages);
-        spend(answer.usage);
+        spend(answer);
         parsed = parseModelJson(answer.content);
       }
       if (agentNote) answer = { ...answer, content: `${answer.content}\n\n${agentNote}; разбор выполнен по diff` };
@@ -558,8 +557,8 @@ async function runReview(
 const MAX_AGENT_ATTEMPTS = 2;
 
 type AgentOutcome =
-  | { answer: ChatResult; parsed: ReconcileResult | null; tokens: ChatUsage; viewed: string[] }
-  | { failure: string; tokens: ChatUsage };
+  | { answer: ChatResult; parsed: ReconcileResult | null; tokens: Spend; viewed: string[] }
+  | { failure: string; tokens: Spend };
 
 /**
  * Agent review over a copy of the repository at the PR head, with the new findings checked
@@ -581,11 +580,12 @@ async function reviewWithAgent(
       params,
       { systemPrompt: `${SYSTEM_PROMPT}\n${AGENT_RULES}`, userPrompt: prompt, changed },
       async ({ reply, provider, model }, root): Promise<AgentOutcome> => {
-        const tokens = { input: reply.tokensIn, output: reply.tokensOut };
+        const used = { input: reply.tokensIn, output: reply.tokensOut };
+        const tokens = addSpend(emptySpend(), used, provider, model);
         const usage =
           `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, ` +
           `токенов: ${reply.tokensIn}/${reply.tokensOut}`;
-        const label = { provider, model: `${model} (agent)`, usage: tokens };
+        const label = { provider, model: `${model} (agent)`, usage: used };
         const stale = isCurrent !== undefined && !isCurrent();
         if (reply.error) {
           if (stale) {
@@ -605,8 +605,7 @@ async function reviewWithAgent(
         }
         if (!parsed) return { failure: `[agent] ответ не удалось разобрать; ${usage}`, tokens };
         const verified = await verifyFindings(parsed, root);
-        tokens.input += verified.tokens.input;
-        tokens.output += verified.tokens.output;
+        mergeSpend(tokens, verified.tokens);
         trailer.push(
           verified.checked ? "[verify] находки перепроверены" : "[verify] перепроверка не удалась, находки оставлены",
           ...verified.dropped.map((d) => `[verify] отброшено: ${d.title} — ${d.reason}`),
@@ -622,7 +621,11 @@ async function reviewWithAgent(
     );
   } catch (error) {
     // Download, unpacking or the process itself failed: the caller falls back to the diff review.
-    const tokens = error instanceof AgentProcessError ? error.spent : { input: 0, output: 0 };
+    const tokens = emptySpend();
+    if (error instanceof AgentProcessError) {
+      const { provider, model } = agentModel();
+      addSpend(tokens, error.spent, provider, model);
+    }
     return { failure: `[agent] сбой: ${error instanceof Error ? error.message : String(error)}`, tokens };
   }
 }

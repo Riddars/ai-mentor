@@ -8,6 +8,7 @@ import {
   deleteProjectCascade,
   getProject,
   getProjectByRepo,
+  isSupervisorOf,
   projectHasPullRequests,
   setProjectStatus,
   unassignSupervisor,
@@ -24,6 +25,8 @@ import {
   setUserPassword,
   updateUser,
 } from "@/lib/users";
+import type { Viewer } from "@/lib/auth";
+import { getRepoInstallationId } from "@/lib/github/auth";
 
 export type ActionState = { error?: string; ok?: string } | null;
 
@@ -34,6 +37,28 @@ async function requireHead(): Promise<void> {
   if (!viewer || viewer.role !== "head") {
     throw new Error("Доступ только для руководителя центра.");
   }
+}
+
+async function requireViewer(): Promise<Viewer> {
+  const viewer = await getViewer();
+  if (!viewer) throw new Error("Требуется вход.");
+  return viewer;
+}
+
+/** A supervisor works only with repositories the curator's GitHub App is installed in. */
+async function appInstalled(owner: string, repo: string): Promise<boolean> {
+  try {
+    await getRepoInstallationId(owner, repo);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The head, or a supervisor of this project. */
+async function canManageProject(projectId: number): Promise<boolean> {
+  const viewer = await requireViewer();
+  return viewer.role === "head" || isSupervisorOf(viewer.userId, projectId);
 }
 
 function str(form: FormData, key: string): string {
@@ -63,7 +88,7 @@ export async function addProjectAction(
   _prev: ActionState,
   form: FormData,
 ): Promise<ActionState> {
-  await requireHead();
+  const viewer = await requireViewer();
   const owner = str(form, "owner");
   const repo = str(form, "repo");
   const name = str(form, "name");
@@ -72,7 +97,16 @@ export async function addProjectAction(
     return { error: "owner и repo — как в адресе GitHub: латиница, цифры, «-», «_», «.»." };
   }
   if (getProjectByRepo(owner, repo)) return { error: `Проект ${owner}/${repo} уже подключён.` };
-  createProjectManual(owner, repo, name || undefined);
+  const supervisorId = viewer.role === "head" ? undefined : viewer.userId;
+  if (supervisorId && !(await appInstalled(owner, repo))) {
+    return { error: `Приложение куратора не установлено в ${owner}/${repo} или GitHub недоступен.` };
+  }
+  try {
+    createProjectManual(owner, repo, name || undefined, supervisorId);
+  } catch (error) {
+    if (isUniqueViolation(error)) return { error: `Проект ${owner}/${repo} уже подключён.` };
+    throw error;
+  }
   refresh();
   return { ok: `Проект ${owner}/${repo} подключён.` };
 }
@@ -81,10 +115,9 @@ export async function updateProjectAction(
   _prev: ActionState,
   form: FormData,
 ): Promise<ActionState> {
-  await requireHead();
   const id = Number(str(form, "projectId"));
   const project = Number.isNaN(id) ? null : getProject(id);
-  if (!project) return { error: "Проект не найден." };
+  if (!project || !(await canManageProject(id))) return { error: "Проект не найден." };
 
   const name = str(form, "name") || null;
   let owner = project.owner;
@@ -105,6 +138,10 @@ export async function updateProjectAction(
     }
     const clash = getProjectByRepo(owner, repo);
     if (clash && clash.id !== id) return { error: `Проект ${owner}/${repo} уже существует.` };
+    const viewer = await requireViewer();
+    if (viewer.role !== "head" && !(await appInstalled(owner, repo))) {
+      return { error: `Приложение куратора не установлено в ${owner}/${repo} или GitHub недоступен.` };
+    }
   }
 
   try {
@@ -118,10 +155,10 @@ export async function updateProjectAction(
 }
 
 export async function setProjectStatusAction(form: FormData): Promise<void> {
-  await requireHead();
   const id = Number(str(form, "projectId"));
   const status = str(form, "status") as ProjectStatus;
-  if (!Number.isNaN(id) && (status === "active" || status === "paused")) {
+  if (Number.isNaN(id) || !(await canManageProject(id))) return;
+  if (status === "active" || status === "paused") {
     setProjectStatus(id, status);
     refresh();
   }

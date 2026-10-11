@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { getViewer, listUsers } from "@/lib/users";
 import {
   getProject,
+  isSupervisorOf,
   listProjectSupervisors,
   projectHasPullRequests,
 } from "@/lib/curator/store";
@@ -29,13 +30,13 @@ export default async function AdminProjectPage({
 }) {
   const viewer = await getViewer();
   if (!viewer) redirect("/login");
-  if (viewer.role !== "head") redirect("/");
+  const isHead = viewer.role === "head";
 
   const id = Number((await params).id);
   const project = Number.isNaN(id) ? null : getProject(id);
-  if (!project) notFound();
+  if (!project || (!isHead && !isSupervisorOf(viewer.userId, id))) notFound();
 
-  const users = listUsers();
+  const users = isHead ? listUsers() : [];
   const assignedIds = new Set(listProjectSupervisors(id));
   const assigned = users.filter((u) => assignedIds.has(u.id));
   const available = users.filter(
@@ -74,6 +75,7 @@ export default async function AdminProjectPage({
             </CardBody>
           </Card>
 
+          {isHead && (
           <Card className="shadow-card">
             <CardHeader>
               <CardTitle>Руководители</CardTitle>
@@ -122,6 +124,7 @@ export default async function AdminProjectPage({
               )}
             </CardBody>
           </Card>
+          )}
 
           <Card className="shadow-card">
             <CardHeader>
@@ -143,6 +146,7 @@ export default async function AdminProjectPage({
             </CardBody>
           </Card>
 
+          {isHead && (
           <Card className="border-red/40 shadow-card">
             <CardHeader>
               <CardTitle className="text-red">Удалить проект</CardTitle>
@@ -162,6 +166,7 @@ export default async function AdminProjectPage({
               </ConfirmDeleteForm>
             </CardBody>
           </Card>
+          )}
         </div>
       </PageShell>
     </>

@@ -174,7 +174,9 @@ export default async function ProjectPage({
 
 function unreviewedReason(status: string, note: string | null): string {
   if (status === "failed") return "разбор не удался";
-  return note === "limit" ? "исчерпан дневной лимит, разбор в очереди" : "не успел вовремя, разбор в очереди";
+  if (note === "limit") return "исчерпан дневной лимит, разбор в очереди";
+  if (note === "budget") return "исчерпан дневной бюджет токенов, разбор в очереди";
+  return "не успел вовремя, разбор в очереди";
 }
 
 /** Reopened first (the model re-flagged it), then by severity, then most recent. */

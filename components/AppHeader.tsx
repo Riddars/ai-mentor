@@ -19,7 +19,8 @@ export function AppHeader({ viewer }: { viewer: Viewer }) {
         </Link>
         <nav className="flex items-center gap-1">
           <NavLink href="/">Проекты</NavLink>
-          {viewer.role === "head" && <NavLink href="/admin">Управление</NavLink>}
+          <NavLink href="/usage">Расход</NavLink>
+          <NavLink href="/admin">Управление</NavLink>
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <div className="hidden text-right leading-tight sm:block">

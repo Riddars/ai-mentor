@@ -39,6 +39,44 @@ export function relativeDate(iso: string | null): string {
   }).format(date);
 }
 
+/** Whole days since a moment: "сегодня", "1 день", "20 дней"; "—" when missing. */
+export function daysSince(iso: string | null): string {
+  const date = parseDbDate(iso);
+  if (!date) return "—";
+  const days = Math.floor((Date.now() - date.getTime()) / 86_400_000);
+  return days < 1 ? "сегодня" : `${days} ${plural(days, "день", "дня", "дней")}`;
+}
+
+const RUB = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+const RUB_WHOLE = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
+
+/** "34,20 ₽" under a thousand, "3 420 ₽" above. */
+export function formatRub(rub: number): string {
+  return `${Math.abs(rub) < 1000 ? RUB.format(rub) : RUB_WHOLE.format(rub)} ₽`;
+}
+
+const ONE_DECIMAL = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
+
+/** "850", "45 тыс.", "1,2 млн". */
+export function formatTokens(tokens: number): string {
+  if (tokens < 1000) return String(tokens);
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1000)} тыс.`;
+  return `${ONE_DECIMAL.format(tokens / 1_000_000)} млн`;
+}
+
+export const KNOWN_PROVIDERS = ["selectel", "provod"];
+
+const PROVIDER_LABEL: Record<string, string> = {
+  provod: "provod.ai",
+  selectel: "Selectel",
+  openai: "OpenAI",
+  openrouter: "OpenRouter",
+};
+
+export function providerLabel(provider: string): string {
+  return PROVIDER_LABEL[provider] ?? provider;
+}
+
 export function fullDate(iso: string | null): string {
   const date = parseDbDate(iso);
   if (!date) return "—";

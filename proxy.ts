@@ -25,12 +25,7 @@ export default async function proxy(request: NextRequest) {
   }
 
   const viewer = await verifyAuthToken(request.cookies.get(AUTH_COOKIE)?.value);
-  if (viewer) {
-    if (pathname.startsWith("/admin") && viewer.role !== "head") {
-      return NextResponse.redirect(new URL("/", request.url));
-    }
-    return NextResponse.next();
-  }
+  if (viewer) return NextResponse.next();
 
   if (pathname.startsWith("/api/")) {
     return NextResponse.json({ error: "Требуется вход." }, { status: 401 });
