@@ -1,4 +1,5 @@
 const BASE_URL = "https://api.github.com";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 interface RequestOptions {
   method?: string;
@@ -19,6 +20,8 @@ export async function githubRequest<T = unknown>(
       ...(body ? { "Content-Type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
+    // A hung connection would otherwise hold the caller (e.g. a worker tick) for minutes.
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

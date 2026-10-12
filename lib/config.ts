@@ -115,7 +115,8 @@ export function getConfig(): Config {
     reviewer,
     simMode: parseSimMode(),
     simDelayMs: Number(process.env.CURATOR_SIM_DELAY_MS ?? "8000"),
-    simAdminToken: requireEnv("SIM_ADMIN_TOKEN"),
+    // Guards only the stub reviewer's /api/simulate/conclude, which is closed with the llm reviewer.
+    simAdminToken: reviewer === "simulate" ? requireEnv("SIM_ADMIN_TOKEN") : "",
     databasePath: databasePath(),
   };
   return cached;
