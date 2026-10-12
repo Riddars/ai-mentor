@@ -1767,6 +1767,25 @@ export function markCheckConcluded(id: number, note: "deadline" | "limit" | "bud
     .run({ id, note });
 }
 
+/** Signs that reviews are not getting done; empty when the queue is healthy. */
+export function queueProblems(): string[] {
+  const row = getDb()
+    .prepare(
+      `SELECT
+         SUM(status = 'queued' AND last_error IS NOT NULL
+             AND COALESCE(note, '') NOT IN ('limit', 'budget')) AS retrying,
+         SUM(status = 'failed' AND updated_at > datetime('now', '-1 hour')) AS failed,
+         SUM(note = 'deadline' AND updated_at > datetime('now', '-1 hour')) AS overdue
+       FROM review_jobs`,
+    )
+    .get() as { retrying: number | null; failed: number | null; overdue: number | null };
+  const problems: string[] = [];
+  if (row.retrying) problems.push(`${row.retrying} review job(s) retrying after an error`);
+  if (row.failed) problems.push(`${row.failed} review job(s) failed for good in the last hour`);
+  if (row.overdue) problems.push(`${row.overdue} check(s) concluded "not reviewed" in the last hour`);
+  return problems;
+}
+
 /** Model requests of a project in the last 24 hours, and when the oldest of them expires. */
 export function recentAnalysesOfProject(projectId: number): {
   count: number;

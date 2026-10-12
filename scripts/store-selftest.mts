@@ -298,6 +298,22 @@ store.addBalanceEntry({ provider: "selectel", kind: "balance", amountRub: 90, ac
 providerBal = store.providerBalances().find((b) => b.provider === "selectel");
 check("balance: a balance read restarts the count", providerBal !== undefined && Math.abs(providerBal.rub - 90) < 1e-9, JSON.stringify(providerBal));
 
+// --- heartbeat: queue problems -----------------------------------------------------------
+
+db.prepare("DELETE FROM review_jobs").run();
+const anyPr = (db.prepare("SELECT id FROM pull_requests LIMIT 1").get() as { id: number }).id;
+const addJob = (fields: string, values: string) =>
+  db.prepare(`INSERT INTO review_jobs (pull_request_id, kind, payload${fields}) VALUES (${anyPr}, 'commit', '{}'${values})`).run();
+addJob(", status", ", 'done'");
+addJob(", status, last_error, note", ", 'queued', 'old error', 'limit'");
+addJob(", status, updated_at", ", 'failed', datetime('now', '-2 hours')");
+check("queue problems: healthy queue has none", store.queueProblems().length === 0, store.queueProblems().join("; "));
+addJob(", status, last_error", ", 'queued', 'model down'");
+addJob(", status", ", 'failed'");
+addJob(", status, check_concluded, note", ", 'queued', 1, 'deadline'");
+const problems = store.queueProblems();
+check("queue problems: retrying, failed and overdue reported", problems.length === 3, problems.join("; "));
+
 db.close();
 rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
