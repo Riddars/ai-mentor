@@ -79,6 +79,7 @@ const NOT_REVIEWED_TOKENS =
 /** Conclude checks whose jobs missed the deadline; the jobs keep retrying. */
 export async function concludeOverdue(deps: WorkerDeps = realDeps): Promise<void> {
   for (const job of listOverdueJobs()) {
+    markProgress();
     try {
       await deps.concludeUnreviewed(job, NOT_REVIEWED_DEADLINE);
       markCheckConcluded(job.id, "deadline");
@@ -174,6 +175,7 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
 async function syncOpenPullRequests(): Promise<void> {
   for (const project of listAllProjects()) {
     if (project.status !== "active") continue;
+    markProgress();
     try {
       const installationId = await getRepoInstallationId(project.owner, project.repo);
       const token = await getInstallationToken(installationId);
@@ -290,11 +292,24 @@ async function tick(): Promise<void> {
   }
 }
 
-type WorkerState = { started: boolean; busy: boolean };
+type WorkerState = { started: boolean; busy: boolean; progressAt: number };
 const state: WorkerState = ((globalThis as { __curatorWorker?: WorkerState }).__curatorWorker ??= {
   started: false,
   busy: false,
+  progressAt: 0,
 });
+
+const STALL_MS = 15 * 60_000;
+
+/** Record that the current tick is moving on; a long sweep over many projects is not a stall. */
+function markProgress(): void {
+  state.progressAt = performance.now();
+}
+
+/** Whether the worker is down or its current tick has made no progress for STALL_MS. */
+export function workerStalled(now = performance.now()): boolean {
+  return !state.started || (state.busy && now - state.progressAt > STALL_MS);
+}
 
 /** Start the worker once per process; only the language-model reviewer uses the queue. */
 export function startWorker(): void {
@@ -307,17 +322,18 @@ export function startWorker(): void {
     return;
   }
   if (reviewer !== "llm") return;
-  state.started = true;
   const requeued = requeueRunningJobs();
   if (requeued > 0) console.log(`[queue] ${requeued} interrupted job(s) back in the queue`);
   void removeStaleAgentDirs();
   setInterval(() => {
     if (state.busy) return;
     state.busy = true;
+    markProgress();
     tick()
       .catch((error) => console.error("[queue] tick failed:", error))
       .finally(() => {
         state.busy = false;
       });
   }, TICK_MS);
+  state.started = true;
 }
