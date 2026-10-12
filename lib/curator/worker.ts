@@ -228,9 +228,8 @@ async function syncOpenPullRequests(): Promise<void> {
 }
 
 /**
- * Heartbeat to an external monitor (Healthchecks.io URL format): a ping while the queue is
- * healthy, `<url>/fail` with the reasons otherwise. A dead or stuck worker sends nothing,
- * and the monitor alerts on the silence.
+ * Heartbeat to an external monitor: a GET of the URL while the queue is healthy, nothing
+ * otherwise. A dead, stuck or failing worker goes silent, and the monitor alerts on that.
  */
 async function sendHeartbeat(url: string): Promise<void> {
   let problems: string[];
@@ -239,14 +238,12 @@ async function sendHeartbeat(url: string): Promise<void> {
   } catch (error) {
     problems = [`queue state unreadable: ${error instanceof Error ? error.message : error}`];
   }
+  if (problems.length) {
+    console.warn(`[queue] heartbeat withheld: ${problems.join("; ")}`);
+    return;
+  }
   try {
-    const res = problems.length
-      ? await fetch(`${url.replace(/\/$/, "")}/fail`, {
-          method: "POST",
-          body: problems.join("\n"),
-          signal: AbortSignal.timeout(10_000),
-        })
-      : await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) console.warn(`[queue] heartbeat rejected: HTTP ${res.status}`);
   } catch (error) {
     console.warn(`[queue] heartbeat failed: ${error instanceof Error ? error.message : error}`);
