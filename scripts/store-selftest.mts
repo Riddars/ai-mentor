@@ -139,6 +139,10 @@ const result = reconcile(prB, [finding("x", [], "closed", second)], changes(["sr
 check("fix not visible in the PR's changes is not accepted", row(second).status === "open" && result.kept.some((k) => k.fixNotCounted));
 const comment = renderComment({ summary: "s", findings: [] }, result.statusChanges, undefined, { kept: result.kept });
 check("comment says the fix was not counted", comment.includes("не засчитано как исправленное"), comment);
+const withOthers = renderComment({ summary: "s", findings: [] }, [], undefined, {
+  others: Array.from({ length: 10 }, (_, i) => ({ id: i, prNumber: i === 0 ? 0 : 3, area: null, severity: "critical" as const, title: `other ${i}`, locations: [], verify: null, status: "open" as const })),
+});
+check("comment lists other open findings of the project", withOthers.includes("Ещё открыто в проекте (10)") && withOthers.includes("обзор проекта") && withOthers.includes("и ещё 2"), withOthers);
 
 // A is merged into main: its branch findings become the project's.
 store.recordPullRequestClosed(prA, "merged-default");
@@ -297,7 +301,6 @@ check("an overview cannot dismiss", row(oldProblem).status === "open");
 overviewRun([finding("x", [], "closed", oldProblem), finding("found by the overview", [file("src/core.py", "7")])]);
 check("an overview closes a fix it sees anywhere", row(oldProblem).status === "closed");
 check("findings of an overview belong to the project", row(idOf("found by the overview")).scope === "project");
-check("they are listed for the overview issue", store.listOpenProjectFindings(notesProject).some((f) => f.title === "found by the overview"));
 check("a PR review sees them", visibleTo(prR).includes("found by the overview"));
 
 // --- daily token budgets ---------------------------------------------------------------

@@ -16,7 +16,6 @@ import {
   WHAT_TO_LOOK_FOR,
 } from "@/lib/curator/review";
 import { verifyFindings } from "@/lib/curator/verify";
-import { areaLabel, locationText, severityLabel } from "@/lib/format";
 import {
   addProjectNotes,
   applyReconciliation,
@@ -25,7 +24,6 @@ import {
   getOverviewIssue,
   getProject,
   getProjectNotes,
-  listOpenProjectFindings,
   loadDismissedFindings,
   loadOpenFindings,
   recordAnalysis,
@@ -36,8 +34,8 @@ import {
 } from "@/lib/curator/store";
 
 // Project overview: the agent reads the whole main branch, finds major problems, reconciles the
-// open findings with the current code and rewrites the notes about the project. The result is
-// published as one GitHub issue per project, updated in place by every later overview.
+// open findings with the current code and rewrites the notes about the project. The notes are
+// published as one GitHub issue per project, updated in place when they change.
 
 export type OverviewReason = "initial" | "gap" | "resume" | "manual";
 
@@ -246,42 +244,30 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   }
 }
 
-/** The issue text: the notes and the open findings of the main branch, from the memory. */
+/**
+ * The issue text: how the curator understands the project. Findings stay in the PR comments,
+ * so the issue changes only with the notes.
+ */
 function overviewIssueBody(projectId: number): string {
   const notes = getProjectNotes(projectId);
-  const findings = listOpenProjectFindings(projectId);
   const sha = getMemorySha(projectId);
-  const parts = [
-    "🤖 **AI Curator — обзор проекта**",
+  return [
+    "🤖 **AI Curator — как куратор понимает проект**",
     "",
-    `Так куратор понимает проект${sha ? ` (основная ветка, коммит \`${sha.slice(0, 7)}\`)` : ""}. ` +
-      "Это описание куратор использует как память при разборе следующих pull request; issue " +
-      "обновляется при каждом полном обзоре.",
+    `Описание составлено по основной ветке${sha ? ` (коммит \`${sha.slice(0, 7)}\`)` : ""}. ` +
+      "Куратор опирается на него при разборе pull request; оно обновляется при полном обзоре " +
+      "проекта и при правке руководителем.",
     "",
     "**Если здесь что-то неверно, напишите руководителю проекта** — он исправит описание в " +
-      "панели куратора. Комментарии в этом issue куратор не читает.",
+      "панели куратора. Комментарии в этом issue куратор не читает. Замечания куратора — в " +
+      "комментариях к pull request.",
     "",
     "## Как устроен проект",
     "",
     notes?.body ? publicText(notes.body) : "_Описания пока нет._",
     "",
-    `## Открытые замечания (${findings.length})`,
-    "",
-  ];
-  if (findings.length === 0) {
-    parts.push("Открытых замечаний нет.");
-  } else {
-    for (const f of findings) {
-      const where = f.locations.length > 0 ? ` — ${f.locations.map((l) => `\`${locationText(l).replace(/`/g, "")}\``).join(", ")}` : "";
-      parts.push(`- **${publicText(f.title)}** · ${areaLabel(f.area)} · ${severityLabel(f.severity)}${where}`);
-    }
-    parts.push(
-      "",
-      "Объяснить замечание или сообщить об исправлении можно в комментарии к любому открытому pull request.",
-    );
-  }
-  parts.push("", `_Обновлено ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "long" }).format(new Date())}_`);
-  return parts.join("\n");
+    `_Обновлено ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "long" }).format(new Date())}_`,
+  ].join("\n");
 }
 
 /**

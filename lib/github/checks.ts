@@ -27,6 +27,12 @@ export async function createCheckRun(params: {
         head_sha: params.headSha,
         status: "in_progress",
         started_at: new Date().toISOString(),
+        output: {
+          title: "Куратор проверяет изменения",
+          summary:
+            "Обычно это занимает 1–3 минуты. Слияние станет доступно после проверки; " +
+            "замечания куратора появятся комментарием в pull request.",
+        },
       },
     },
   );

@@ -7,7 +7,7 @@ import { addSpend, emptySpend, mergeSpend, spendRub, type Spend } from "@/lib/ll
 import { reviewMode } from "@/lib/config";
 import { AGENT_RULES } from "@/lib/agent/prompt";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
-import { collectReviewContext } from "@/lib/curator/context";
+import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
 import { advanceMemory } from "@/lib/curator/memory";
 import { verifyFindings } from "@/lib/curator/verify";
 import {
@@ -43,6 +43,7 @@ import {
   type AnalysisMode,
   type FindingStatus,
   type KeptFinding,
+  type PriorFinding,
   type PullRequestState,
   type ReconcileResult,
   type ReconciledFinding,
@@ -351,11 +352,14 @@ function coverageNote(materials: AnalysisMaterials): string | null {
   );
 }
 
+/** Other open findings of the project listed under a PR comment, at most. */
+const OTHERS_SHOWN = 8;
+
 export function renderComment(
   result: ReconcileResult,
   changes: StatusChange[],
   materials?: AnalysisMaterials,
-  extra: { kept?: KeptFinding[]; viewed?: string[] | null } = {},
+  extra: { kept?: KeptFinding[]; viewed?: string[] | null; others?: PriorFinding[] } = {},
 ): string {
   const open = result.findings.filter(
     (f) => f.status === "open" || f.status === "reopened",
@@ -404,6 +408,17 @@ export function renderComment(
     for (const k of notFixed) {
       parts.push(`- ${publicText(k.title)} — не засчитано как исправленное: ${k.reason}`);
     }
+    parts.push("");
+  }
+
+  const others = extra.others ?? [];
+  if (others.length > 0) {
+    parts.push("---", `**Ещё открыто в проекте (${others.length}):**`);
+    for (const f of others.slice(0, OTHERS_SHOWN)) {
+      const origin = f.prNumber === 0 ? "обзор проекта" : `PR #${f.prNumber}`;
+      parts.push(`- ${publicText(f.title)} — ${severityLabel(f.severity)}, ${origin}`);
+    }
+    if (others.length > OTHERS_SHOWN) parts.push(`- и ещё ${others.length - OTHERS_SHOWN}`);
     parts.push("");
   }
 
@@ -581,10 +596,16 @@ async function runReview(
   });
   // Reviewed after the merge into the main branch: its notes apply now.
   if (trigger === "commit" && fixesFinal) applyNotesProposal(prId);
+  // Open findings this comment does not mention, so the student sees the whole project.
+  const mentioned = new Set([...statusChanges.map((c) => c.findingId), ...kept.map((k) => k.findingId)]);
+  const others = selectPriorFindings(
+    loadOpenFindings(prId).filter((f) => f.status !== "pending" && !mentioned.has(f.id)),
+    params.prNumber,
+  );
 
   return {
     analysisId,
-    comment: renderComment(parsed, statusChanges, materials, { kept, viewed }),
+    comment: renderComment(parsed, statusChanges, materials, { kept, viewed, others }),
     outcome: "ok",
     summary: parsed.summary,
     statusChanges,

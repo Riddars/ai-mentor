@@ -1284,17 +1284,6 @@ export function setOverviewIssue(projectId: number, issue: number): void {
     .run({ projectId, issue });
 }
 
-/** Open findings of the main branch, as the overview issue lists them. */
-export function listOpenProjectFindings(projectId: number): FindingRow[] {
-  const rows = getDb()
-    .prepare(
-      `${FINDING_SELECT} WHERE pr.project_id = @projectId AND f.scope = 'project'
-         AND f.status IN ${OPEN_STATUSES} ORDER BY f.id`,
-    )
-    .all({ projectId }) as unknown as RawFinding<FindingRow>[];
-  return rows.map(toFinding);
-}
-
 export function loadStudentResponses(prId: number): StudentResponse[] {
   return getDb()
     .prepare(
