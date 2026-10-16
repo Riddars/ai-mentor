@@ -356,6 +356,24 @@ function migrate(db: DatabaseSync): void {
     `);
     db.exec("PRAGMA user_version = 10");
   }
+  if (version < 11) {
+    // Project memory beyond findings: notes about the project (every edit is a new version);
+    // the main-branch commit the memory covers and the GitHub issue holding the overview; the
+    // notes a PR review proposes (applied when the PR is merged) and the notes version it saw.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS project_notes (
+        id          INTEGER PRIMARY KEY,
+        project_id  INTEGER NOT NULL REFERENCES projects(id),
+        body        TEXT NOT NULL,
+        analysis_id INTEGER REFERENCES analyses(id),
+        actor       TEXT,
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    addColumns(db, "projects", { memory_sha: "TEXT", overview_issue: "INTEGER" });
+    addColumns(db, "analyses", { notes_proposal: "TEXT", notes_base: "INTEGER" });
+    db.exec("PRAGMA user_version = 11");
+  }
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

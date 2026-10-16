@@ -2,8 +2,11 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { getViewer, listUsers } from "@/lib/users";
 import {
+  getLatestOverviewJob,
+  getOverviewIssue,
   getProject,
   getProjectLastActivity,
+  getProjectNotes,
   getProjectParticipants,
   isSupervisorOf,
   listProjectAnalyses,
@@ -12,12 +15,15 @@ import {
   listUnreviewedPrs,
   type AnalysisRow,
   type FindingRow,
+  type JobStatus,
+  type ProjectNotes as Notes,
 } from "@/lib/curator/store";
 import {
   areaLabel,
   findingStatusLabel,
   isOpenStatus,
   outcomeLabel,
+  prLabel,
   relativeDate,
   severityRank,
   triggerLabel,
@@ -28,6 +34,7 @@ import { Badge, SeverityBadge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CollapsibleCard } from "@/components/ui/Collapsible";
 import { RestartReviewButton } from "@/components/RestartReviewButton";
+import { ProjectNotes, StartOverviewButton } from "@/components/ProjectNotes";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -53,6 +60,10 @@ export default async function ProjectPage({
   const analyses = listProjectAnalyses(projectId);
   const unreviewed = listUnreviewedPrs(projectId);
   const lastActivity = getProjectLastActivity(projectId);
+  const notes = getProjectNotes(projectId);
+  const overviewJob = getLatestOverviewJob(projectId);
+  const lastOverview = analyses.find((a) => a.trigger === "overview" && a.outcome === "ok") ?? null;
+  const overviewIssue = getOverviewIssue(projectId);
   const supervisors = isHead
     ? (() => {
         const ids = new Set(listProjectSupervisors(projectId));
@@ -125,6 +136,35 @@ export default async function ProjectPage({
             </Card>
           )}
           <Card className="shadow-card">
+            <CardHeader className="flex items-center justify-between gap-3">
+              <CardTitle>О проекте</CardTitle>
+              <span className="text-xs text-muted-foreground">{notesSource(notes)}</span>
+            </CardHeader>
+            <CardBody className="flex flex-col gap-4 pt-0">
+              <ProjectNotes projectId={projectId} notes={notes?.body || null} />
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
+                <span>
+                  Полный обзор: {overviewState(overviewJob?.status ?? null, lastOverview)}
+                  {overviewIssue !== null && (
+                    <>
+                      {" · "}
+                      <a
+                        href={`https://github.com/${project.owner}/${project.repo}/issues/${overviewIssue}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="hover:text-foreground hover:underline"
+                      >
+                        issue #{overviewIssue}
+                      </a>
+                    </>
+                  )}
+                </span>
+                <StartOverviewButton projectId={projectId} />
+              </div>
+            </CardBody>
+          </Card>
+
+          <Card className="shadow-card">
             <CardHeader className="flex items-center justify-between">
               <CardTitle>Открытые замечания</CardTitle>
               <span className="text-xs text-muted-foreground">{open.length}</span>
@@ -170,6 +210,20 @@ export default async function ProjectPage({
       </PageShell>
     </>
   );
+}
+
+/** Who wrote the current notes and when. */
+function notesSource(notes: Notes | null): string {
+  if (!notes) return "";
+  const who = notes.actor ?? (notes.prNumber === null ? "куратор" : notes.prNumber === 0 ? "полный обзор" : `разбор PR #${notes.prNumber}`);
+  return `${who} · ${relativeDate(notes.createdAt)}`;
+}
+
+function overviewState(status: JobStatus | null, last: AnalysisRow | null): string {
+  if (status === "queued") return "в очереди";
+  if (status === "running") return "идёт";
+  const done = last ? relativeDate(last.createdAt) : "не проводился";
+  return status === "failed" ? `последний не удался (успешный — ${done})` : done;
 }
 
 function unreviewedReason(status: string, note: string | null): string {
@@ -268,7 +322,9 @@ function AnalysisList({ analyses, projectId }: { analyses: AnalysisRow[]; projec
           >
             <span className="font-medium group-hover:underline">{relativeDate(a.createdAt)}</span>
             <span className="text-muted-foreground">
-              {a.prNumber ? `PR #${a.prNumber}` : "—"} · {triggerLabel(a.trigger)}
+              {a.trigger === "overview"
+                ? triggerLabel(a.trigger)
+                : `${a.prNumber !== null ? prLabel(a.prNumber) : "—"} · ${triggerLabel(a.trigger)}`}
             </span>
             {a.outcome !== "ok" && (
               <Badge tone={a.outcome === "error" ? "red" : "amber"}>{outcomeLabel(a.outcome, a.trigger)}</Badge>

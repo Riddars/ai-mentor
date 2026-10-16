@@ -15,6 +15,7 @@ import {
   fullDate,
   isOpenStatus,
   locationText,
+  prLabel,
   prStateLabel,
 } from "@/lib/format";
 import { FindingDecisionForm } from "@/components/FindingDecisionForm";
@@ -97,7 +98,9 @@ export default async function FindingPage({
           </div>
           <h1 className="mt-3 text-2xl font-semibold tracking-tight">{finding.title}</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            {finding.prNumber ? (
+            {finding.prNumber === 0 ? (
+              <>{prLabel(0)} · </>
+            ) : finding.prNumber ? (
               <>
                 <a
                   href={`${repoUrl}/pull/${finding.prNumber}`}
@@ -112,7 +115,8 @@ export default async function FindingPage({
               </>
             ) : null}
             обнаружено {fullDate(finding.createdAt)}
-            {fixedIn !== null && (
+            {fixedIn === 0 && " · исправлено (видно в полном обзоре)"}
+            {fixedIn !== null && fixedIn !== 0 && (
               <>
                 {" · исправлено в "}
                 <a href={`${repoUrl}/pull/${fixedIn}`} target="_blank" rel="noreferrer" className="hover:underline">
@@ -213,13 +217,13 @@ export default async function FindingPage({
                         )}
                         <p className="text-sm font-medium">{findingStatusLabel(h.newStatus)}</p>
                         <p className="text-xs text-muted-foreground">
-                          {h.analysisId && h.prNumber ? (
+                          {h.analysisId && h.prNumber !== null ? (
                             <>
                               <Link
                                 href={`/projects/${projectId}/analyses/${h.analysisId}`}
                                 className="hover:text-foreground hover:underline"
                               >
-                                PR #{h.prNumber}
+                                {prLabel(h.prNumber)}
                               </Link>
                               {" · "}
                             </>

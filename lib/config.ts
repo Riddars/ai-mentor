@@ -52,6 +52,15 @@ export function databasePath(): string {
   return process.env.DATABASE_PATH ?? "./data/curator.db";
 }
 
+/**
+ * Where project repositories live: the organization and its template repository. The panel
+ * links to them when a supervisor sets up a new project; null when GITHUB_ORG is not set.
+ */
+export function projectsHome(): { org: string; template: string } | null {
+  const org = process.env.GITHUB_ORG?.trim();
+  return org ? { org, template: process.env.GITHUB_TEMPLATE_REPO?.trim() || "project-template" } : null;
+}
+
 function loadPrivateKey(): string {
   const path = process.env.GITHUB_APP_PRIVATE_KEY_PATH;
   if (path) {

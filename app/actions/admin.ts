@@ -27,6 +27,7 @@ import {
 } from "@/lib/users";
 import type { Viewer } from "@/lib/auth";
 import { getRepoInstallationId } from "@/lib/github/auth";
+import { startOverview } from "@/lib/curator/overview";
 
 export type ActionState = { error?: string; ok?: string } | null;
 
@@ -101,14 +102,17 @@ export async function addProjectAction(
   if (supervisorId && !(await appInstalled(owner, repo))) {
     return { error: `Приложение куратора не установлено в ${owner}/${repo} или GitHub недоступен.` };
   }
+  let projectId: number;
   try {
-    createProjectManual(owner, repo, name || undefined, supervisorId);
+    projectId = createProjectManual(owner, repo, name || undefined, supervisorId);
   } catch (error) {
     if (isUniqueViolation(error)) return { error: `Проект ${owner}/${repo} уже подключён.` };
     throw error;
   }
+  startOverview(projectId, "initial");
   refresh();
-  return { ok: `Проект ${owner}/${repo} подключён.` };
+  // The project page shows what is left to set up in GitHub.
+  redirect(`/admin/projects/${projectId}`);
 }
 
 export async function updateProjectAction(
@@ -159,7 +163,10 @@ export async function setProjectStatusAction(form: FormData): Promise<void> {
   const status = str(form, "status") as ProjectStatus;
   if (Number.isNaN(id) || !(await canManageProject(id))) return;
   if (status === "active" || status === "paused") {
+    const resumed = status === "active" && getProject(id)?.status === "paused";
     setProjectStatus(id, status);
+    // What changed during the pause is unknown: the project is looked at as a whole again.
+    if (resumed) startOverview(id, "resume");
     refresh();
   }
 }

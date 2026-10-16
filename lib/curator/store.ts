@@ -21,6 +21,10 @@ export interface AnalysisMaterials {
   truncated: boolean;
   /** Open findings of the project given to the model for reconciliation. */
   priorFindings: number;
+  /** Findings dismissed by an explanation, given so they are not raised again. */
+  dismissedFindings?: number;
+  /** Notes about the project were given. */
+  notes?: boolean;
   studentResponses: number;
 }
 
@@ -36,6 +40,13 @@ export interface PriorFinding {
   /** How to check that the problem is fixed. */
   verify: string | null;
   status: FindingStatus;
+}
+
+/** A finding dismissed by an explanation (or by a person), with the reason recorded. */
+export interface DismissedFinding extends PriorFinding {
+  reason: string | null;
+  /** Dismissed by a supervisor or the head: the model may not reopen it. */
+  byPerson: boolean;
 }
 
 export interface StudentResponse {
@@ -64,6 +75,8 @@ export interface ReconciledFinding {
 export interface ReconcileResult {
   summary: string;
   findings: ReconciledFinding[];
+  /** New full text of the notes about the project; null — leave them as they are. */
+  notes?: string | null;
 }
 
 /** active — в работе; paused — разбор отключён, проект остаётся в памяти. */
@@ -308,7 +321,7 @@ export function getProjectLastActivity(projectId: number): string | null {
   const row = getDb()
     .prepare(
       `SELECT MAX(ts) AS ts FROM (
-         SELECT MAX(updated_at) AS ts FROM pull_requests WHERE project_id = @projectId
+         SELECT MAX(updated_at) AS ts FROM pull_requests WHERE project_id = @projectId AND number != 0
          UNION ALL
          SELECT MAX(a.created_at) AS ts FROM analyses a
            JOIN pull_requests pr ON pr.id = a.pull_request_id
@@ -529,14 +542,14 @@ export function updateProject(
 
 export function projectHasPullRequests(id: number): boolean {
   const row = getDb()
-    .prepare("SELECT 1 FROM pull_requests WHERE project_id = @id LIMIT 1")
+    .prepare("SELECT 1 FROM pull_requests WHERE project_id = @id AND number != 0 LIMIT 1")
     .get({ id });
   return row !== undefined;
 }
 
 /**
  * Delete a project with everything the memory holds about it, in one transaction.
- * Order follows the foreign keys (PRAGMA foreign_keys = ON): history → responses →
+ * Order follows the foreign keys (PRAGMA foreign_keys = ON): history → responses → notes →
  * findings → analyses → review jobs → pull requests → participants → assignments →
  * project.
  * github_events are not tied to a project and stay.
@@ -561,6 +574,7 @@ export function deleteProjectCascade(id: number, keepSpend = true): void {
         WHERE pr.project_id = @id)`,
     `DELETE FROM student_responses WHERE pull_request_id IN
        (SELECT id FROM pull_requests WHERE project_id = @id)`,
+    `DELETE FROM project_notes WHERE project_id = @id`,
     `DELETE FROM findings WHERE pull_request_id IN
        (SELECT id FROM pull_requests WHERE project_id = @id)`,
     `DELETE FROM analyses WHERE pull_request_id IN
@@ -759,7 +773,7 @@ export function hasSuccessfulCommitAnalysis(prId: number, headSha: string): bool
 export function recordAnalysis(params: {
   prId: number;
   headSha: string;
-  trigger: "commit" | "comment";
+  trigger: "commit" | "comment" | "overview";
   outcome: AnalysisOutcome;
   summary?: string | null;
   provider?: string | null;
@@ -772,14 +786,19 @@ export function recordAnalysis(params: {
   /** Rubles spent; null when some tokens had no price. */
   costRub?: number | null;
   viewedFiles?: string[] | null;
+  /** Notes about the project the review proposes, and the notes version it was given. */
+  notesProposal?: string | null;
+  notesBase?: number | null;
 }): number {
   const row = getDb()
     .prepare(
       `INSERT INTO analyses
          (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
-          raw_response, mode, tokens_in, tokens_out, cost_rub, viewed_files)
+          raw_response, mode, tokens_in, tokens_out, cost_rub, viewed_files, notes_proposal,
+          notes_base)
        VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
-               @rawResponse, @mode, @tokensIn, @tokensOut, @costRub, @viewedFiles)
+               @rawResponse, @mode, @tokensIn, @tokensOut, @costRub, @viewedFiles, @notesProposal,
+               @notesBase)
        RETURNING id`,
     )
     .get({
@@ -797,6 +816,8 @@ export function recordAnalysis(params: {
       tokensOut: params.tokensOut ?? 0,
       costRub: params.costRub === undefined ? 0 : params.costRub,
       viewedFiles: params.viewedFiles ? JSON.stringify(params.viewedFiles) : null,
+      notesProposal: params.notesProposal ?? null,
+      notesBase: params.notesBase ?? null,
     }) as { id: number };
   return row.id;
 }
@@ -1049,6 +1070,219 @@ export function loadOpenFindings(prId: number): PriorFinding[] {
   return rows.map((r) => ({ ...r, locations: parseJson<FindingLocation[]>(r.locations) ?? [] }));
 }
 
+/**
+ * Dismissed findings a review of the PR should know about (its own and the project's): the
+ * model is told not to raise them again. Ones dismissed by a person come with `byPerson`.
+ */
+export function loadDismissedFindings(prId: number): DismissedFinding[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT f.id, pr.number AS prNumber, f.area, f.severity, f.title, f.locations, f.verify,
+              f.status, h.reason, h.actor
+       FROM findings f
+       JOIN pull_requests pr ON pr.id = f.pull_request_id
+       LEFT JOIN finding_status_history h ON h.id = (
+         SELECT MAX(id) FROM finding_status_history WHERE finding_id = f.id)
+       WHERE pr.project_id = (SELECT project_id FROM pull_requests WHERE id = @prId)
+         AND f.status = 'dismissed'
+         AND (f.pull_request_id = @prId OR f.scope = 'project')
+       ORDER BY f.id DESC`,
+    )
+    .all({ prId }) as unknown as Array<
+    Omit<DismissedFinding, "locations" | "byPerson"> & { locations: string | null; actor: string | null }
+  >;
+  return rows.map(({ actor, ...r }) => ({
+    ...r,
+    locations: parseJson<FindingLocation[]>(r.locations) ?? [],
+    byPerson: actor !== null,
+  }));
+}
+
+// --- Notes about the project ---
+
+/** Longest notes kept; the model is asked for less. */
+export const NOTES_MAX_CHARS = 6_000;
+
+export interface ProjectNotes {
+  id: number;
+  body: string;
+  /** Who wrote this version: a person's login, or null for the curator. */
+  actor: string | null;
+  analysisId: number | null;
+  /** PR whose review wrote it (0 — a project overview); null when a person did. */
+  prNumber: number | null;
+  createdAt: string;
+}
+
+/** The current version of the notes about the project, if any. */
+export function getProjectNotes(projectId: number): ProjectNotes | null {
+  const row = getDb()
+    .prepare(
+      `SELECT n.id, n.body, n.actor, n.analysis_id AS analysisId, pr.number AS prNumber,
+              n.created_at AS createdAt
+       FROM project_notes n
+       LEFT JOIN analyses a ON a.id = n.analysis_id
+       LEFT JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE n.project_id = @projectId ORDER BY n.id DESC LIMIT 1`,
+    )
+    .get({ projectId }) as ProjectNotes | undefined;
+  return row ?? null;
+}
+
+/** Save a new version of the notes; an empty text clears them. */
+export function addProjectNotes(
+  projectId: number,
+  body: string,
+  source: { analysisId?: number | null; actor?: string | null },
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO project_notes (project_id, body, analysis_id, actor)
+       VALUES (@projectId, @body, @analysisId, @actor)`,
+    )
+    .run({
+      projectId,
+      body: body.trim().slice(0, NOTES_MAX_CHARS),
+      analysisId: source.analysisId ?? null,
+      actor: source.actor ?? null,
+    });
+}
+
+/**
+ * The PR reached the main branch: the notes its review proposed become current, if the
+ * review was of the merged head and the notes have not changed since it read them.
+ */
+export function applyNotesProposal(prId: number): boolean {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `SELECT a.id, a.notes_proposal AS proposal, a.notes_base AS base, pr.project_id AS projectId
+       FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE a.pull_request_id = @prId AND a.trigger = 'commit' AND a.outcome = 'ok'
+         AND a.head_sha = pr.head_sha
+       ORDER BY a.id DESC LIMIT 1`,
+    )
+    .get({ prId }) as { id: number; proposal: string | null; base: number | null; projectId: number } | undefined;
+  if (!row?.proposal) return false;
+  if ((getProjectNotes(row.projectId)?.id ?? null) !== row.base) return false;
+  db.exec("BEGIN");
+  try {
+    addProjectNotes(row.projectId, row.proposal, { analysisId: row.id });
+    // Applied once: a repeated close event of the same PR does not apply it again.
+    db.prepare("UPDATE analyses SET notes_proposal = NULL WHERE id = @id").run({ id: row.id });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+  return true;
+}
+
+// --- Project overview and memory cursor ---
+
+/**
+ * A project overview is stored as the reviews of a service pull request numbered 0 (GitHub
+ * numbers start at 1): its findings, analyses and jobs then count for the project like any
+ * other. It is always "merged into the main branch", so it is never synced or reviewed as a PR.
+ */
+export const OVERVIEW_PR_NUMBER = 0;
+
+export function ensureOverviewPullRequest(projectId: number): number {
+  return upsertPullRequest(projectId, OVERVIEW_PR_NUMBER, {
+    title: "Обзор проекта",
+    state: "merged",
+    mergedIntoDefault: true,
+  });
+}
+
+/** Automatic overviews of a project (initial, memory gap) run at most this often. */
+const AUTO_OVERVIEW_DAYS = 7;
+
+/**
+ * Queue an overview of the project. Not queued when one is already queued or running, or —
+ * unless `force` (a person asked, the project was resumed) — when one was queued in the last
+ * AUTO_OVERVIEW_DAYS days.
+ */
+export function enqueueOverviewJob(
+  projectId: number,
+  payload: unknown,
+  force: boolean,
+): "queued" | "active" | "recent" {
+  const db = getDb();
+  const latest = db
+    .prepare(
+      `SELECT j.status, j.created_at > datetime('now', @window) AS recent
+       FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
+       WHERE pr.project_id = @projectId AND j.kind = 'overview' AND j.status != 'superseded'
+       ORDER BY j.id DESC LIMIT 1`,
+    )
+    .get({ projectId, window: `-${AUTO_OVERVIEW_DAYS} days` }) as { status: JobStatus; recent: number } | undefined;
+  if (latest && (latest.status === "queued" || latest.status === "running")) return "active";
+  if (!force && latest?.recent) return "recent";
+  db.prepare(
+    `INSERT INTO review_jobs (pull_request_id, kind, payload) VALUES (@prId, 'overview', @payload)`,
+  ).run({ prId: ensureOverviewPullRequest(projectId), payload: JSON.stringify(payload) });
+  return "queued";
+}
+
+/** Latest overview job of the project: its state and when it was queued. */
+export function getLatestOverviewJob(
+  projectId: number,
+): { status: JobStatus; createdAt: string; lastError: string | null } | null {
+  const row = getDb()
+    .prepare(
+      `SELECT j.status, j.created_at AS createdAt, j.last_error AS lastError
+       FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
+       WHERE pr.project_id = @projectId AND j.kind = 'overview' AND j.status != 'superseded'
+       ORDER BY j.id DESC LIMIT 1`,
+    )
+    .get({ projectId }) as { status: JobStatus; createdAt: string; lastError: string | null } | undefined;
+  return row ?? null;
+}
+
+/** Commit of the main branch the project memory covers; null — no overview has been made. */
+export function getMemorySha(projectId: number): string | null {
+  const row = getDb()
+    .prepare("SELECT memory_sha AS sha FROM projects WHERE id = @projectId")
+    .get({ projectId }) as { sha: string | null } | undefined;
+  return row?.sha ?? null;
+}
+
+/**
+ * Move the memory to `sha`, only if it still covers `expected` (it may have moved while the
+ * caller was asking GitHub); false when it had moved.
+ */
+export function setMemorySha(projectId: number, sha: string, expected: string | null): boolean {
+  const res = getDb()
+    .prepare("UPDATE projects SET memory_sha = @sha WHERE id = @projectId AND memory_sha IS @expected")
+    .run({ projectId, sha, expected });
+  return res.changes > 0;
+}
+
+export function getOverviewIssue(projectId: number): number | null {
+  const row = getDb()
+    .prepare("SELECT overview_issue AS issue FROM projects WHERE id = @projectId")
+    .get({ projectId }) as { issue: number | null } | undefined;
+  return row?.issue ?? null;
+}
+
+export function setOverviewIssue(projectId: number, issue: number): void {
+  getDb()
+    .prepare("UPDATE projects SET overview_issue = @issue WHERE id = @projectId")
+    .run({ projectId, issue });
+}
+
+/** Open findings of the main branch, as the overview issue lists them. */
+export function listOpenProjectFindings(projectId: number): FindingRow[] {
+  const rows = getDb()
+    .prepare(
+      `${FINDING_SELECT} WHERE pr.project_id = @projectId AND f.scope = 'project'
+         AND f.status IN ${OPEN_STATUSES} ORDER BY f.id`,
+    )
+    .all({ projectId }) as unknown as RawFinding<FindingRow>[];
+  return rows.map(toFinding);
+}
+
 export function loadStudentResponses(prId: number): StudentResponse[] {
   return getDb()
     .prepare(
@@ -1119,6 +1353,16 @@ export interface ReconcileOptions {
   changed: ChangedLines;
   /** Head branch of the PR, kept with new findings for display. */
   branch?: string | null;
+  /**
+   * Dismissed findings given to the model: it may only reopen them, and not those a person
+   * dismissed; any other answer about them is ignored.
+   */
+  reopenableIds?: ReadonlySet<number>;
+  /**
+   * A review of the whole main branch (project overview): a fix need not show in changes,
+   * and nothing is dismissed — there is no explanation to accept.
+   */
+  wholeRepository?: boolean;
 }
 
 /**
@@ -1131,6 +1375,8 @@ export interface ReconcileOptions {
  *   фиксируются при создании, остальные поля обновляются только непустыми значениями;
  * - «исправлено» по diff PR — это `pending` (ждёт слияния PR в основную ветку, см.
  *   recordPullRequestClosed), а не окончательное `closed`;
+ * - находку, снятую по объяснению, модель может только открыть снова (`reopened`), и только
+ *   если её снял не человек;
  * - находки, которых модель не упомянула, не трогаем.
  * Возвращает смены статусов и оставленные открытыми прошлые находки — по ним
  * вызывающий пишет комментарий.
@@ -1170,6 +1416,13 @@ export function applyReconciliation(
   const getPrior = db.prepare(
     `SELECT f.status, f.title, f.locations FROM findings f WHERE f.id = @id AND ${RECONCILABLE}`,
   );
+  const getDismissed = db.prepare(
+    `SELECT f.title,
+            (SELECT h.actor FROM finding_status_history h WHERE h.finding_id = f.id
+               ORDER BY h.id DESC LIMIT 1) AS actor
+     FROM findings f WHERE f.id = @id AND f.status = 'dismissed'
+       AND (f.pull_request_id = @prId OR f.scope = 'project')`,
+  );
   const insertHistory = db.prepare(
     `INSERT INTO finding_status_history (finding_id, old_status, new_status, reason, analysis_id)
      VALUES (@findingId, @oldStatus, @newStatus, @reason, @analysisId)`,
@@ -1185,6 +1438,17 @@ export function applyReconciliation(
         impact: f.impact ?? null,
         recommendation: f.recommendation ?? null,
       };
+      if (f.priorId != null && options.reopenableIds?.has(f.priorId)) {
+        const dismissed = getDismissed.get({ id: f.priorId, prId }) as { title: string; actor: string | null } | undefined;
+        if (dismissed && dismissed.actor === null && f.status === "reopened") {
+          const change = { findingId: f.priorId, oldStatus: "dismissed" as const, newStatus: "reopened" as const, reason: f.reason ?? null };
+          updateFinding.run({ id: f.priorId, prId, analysisId, status: "reopened", ...text });
+          insertHistory.run({ ...change, analysisId });
+          statusChanges.push({ ...change, title: dismissed.title });
+        }
+        continue;
+      }
+      if (options.wholeRepository && f.status === "dismissed") continue;
       const prior =
         f.priorId != null && options.allowedPriorIds.has(f.priorId)
           ? (getPrior.get({ id: f.priorId, prId }) as
@@ -1228,7 +1492,7 @@ export function applyReconciliation(
 
       const findingId = f.priorId as number;
       const priorLocations = parseJson<FindingLocation[]>(prior.locations) ?? [];
-      if (f.status === "closed" && !fixVisible(priorLocations, changedFiles)) {
+      if (f.status === "closed" && !options.wholeRepository && !fixVisible(priorLocations, changedFiles)) {
         kept.push({
           findingId,
           title: prior.title,
@@ -1434,7 +1698,7 @@ export function setFindingStatusByPerson(params: {
 
 // --- Review queue ---
 
-export type JobKind = "commit" | "comment";
+export type JobKind = "commit" | "comment" | "overview";
 export type JobStatus = "queued" | "running" | "done" | "failed" | "superseded";
 
 export interface ReviewJob {
@@ -1661,7 +1925,10 @@ export function requeueRunningJobs(): number {
   );
 }
 
-/** Due jobs, oldest first: at most one per project, none for a project with a running job. */
+/**
+ * Due jobs, oldest first, overviews after reviews of PRs: at most one per project, none for a
+ * project with a running job.
+ */
 export function listDueJobs(limit: number): ReviewJob[] {
   const rows = getDb()
     .prepare(
@@ -1670,7 +1937,7 @@ export function listDueJobs(limit: number): ReviewJob[] {
          AND pr.project_id NOT IN (
            SELECT p2.project_id FROM review_jobs j2
            JOIN pull_requests p2 ON p2.id = j2.pull_request_id WHERE j2.status = 'running')
-       ORDER BY j.run_after, j.id`,
+       ORDER BY j.kind = 'overview', j.run_after, j.id`,
     )
     .all() as unknown as RawJob[];
   const seen = new Set<number>();

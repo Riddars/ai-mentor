@@ -112,6 +112,8 @@ async function buildCase(benchDir: string, id: string): Promise<BuiltCase> {
   const prompt = buildReviewPrompt({
     prNumber,
     prior: selectPriorFindings(spec.open_findings ?? [], prNumber),
+    dismissed: [],
+    notes: null,
     research: readOrNull(join(root, "RESEARCH.md")),
     plan: readOrNull(join(root, "PLAN.md")),
     prBody: readFileSync(join(caseDir, "pr.md"), "utf8"),

@@ -8,6 +8,7 @@ import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { AddProjectForm } from "@/components/admin/AddProjectForm";
 import { CreateSupervisorForm } from "@/components/admin/CreateSupervisorForm";
 import { roleLabel } from "@/lib/format";
+import { projectsHome } from "@/lib/config";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,15 @@ export default async function AdminPage() {
   const projects = listAllProjects(isHead ? undefined : viewer.userId);
   const users = isHead ? listUsers() : [];
   const byId = new Map(users.map((u) => [u.id, u]));
+  const home = projectsHome();
+  const newRepoUrl = home
+    ? `https://github.com/new?${new URLSearchParams({
+        owner: home.org,
+        template_owner: home.org,
+        template_name: home.template,
+        visibility: "public",
+      })}`
+    : null;
 
   return (
     <>
@@ -35,7 +45,23 @@ export default async function AdminPage() {
               <span className="text-xs text-muted-foreground">{projects.length}</span>
             </CardHeader>
             <CardBody className="flex flex-col gap-5">
-              <AddProjectForm />
+              <section className="flex flex-col gap-3 rounded-lg border border-border p-4">
+                <h3 className="text-sm font-semibold">Новый проект</h3>
+                <ol className="flex list-decimal flex-col gap-1 pl-5 text-sm">
+                  <li>
+                    {newRepoUrl ? (
+                      <a href={newRepoUrl} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
+                        Создайте репозиторий из шаблона
+                      </a>
+                    ) : (
+                      "Создайте репозиторий из шаблона"
+                    )}{" "}
+                    в GitHub: введите имя, нажмите Create repository.
+                  </li>
+                  <li>Подключите его здесь. Страница проекта покажет, что ещё настроить в GitHub.</li>
+                </ol>
+                <AddProjectForm defaultOwner={home?.org} />
+              </section>
               {projects.length > 0 && (
                 <ul className="flex flex-col divide-y divide-border">
                   {projects.map((p) => {

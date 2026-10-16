@@ -178,7 +178,13 @@ export function prStateLabel(state: string | null): string {
 const TRIGGER_LABEL: Record<string, string> = {
   commit: "новый коммит",
   comment: "ответ студента",
+  overview: "полный обзор",
 };
+
+/** A pull request by number; 0 is the service one holding project overviews. */
+export function prLabel(number: number): string {
+  return number === 0 ? "обзор проекта" : `PR #${number}`;
+}
 
 export function triggerLabel(trigger: string): string {
   return TRIGGER_LABEL[trigger] ?? trigger;

@@ -20,6 +20,9 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { EditProjectForm } from "@/components/admin/EditProjectForm";
 import { ConfirmDeleteForm } from "@/components/admin/ConfirmDeleteForm";
+import { getConfig } from "@/lib/config";
+import { checkRepositorySetup, type RepositorySetup } from "@/lib/github/setup";
+import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -44,6 +47,13 @@ export default async function AdminProjectPage({
   );
   const hasPrs = projectHasPullRequests(id);
   const fullName = `${project.owner}/${project.repo}`;
+  const repoUrl = `https://github.com/${fullName}`;
+  let setup: RepositorySetup | null = null;
+  try {
+    setup = await checkRepositorySetup(project.owner, project.repo, getConfig().appId);
+  } catch (error) {
+    console.warn(`[panel] setup of ${fullName} not checked:`, error);
+  }
 
   return (
     <>
@@ -127,6 +137,56 @@ export default async function AdminProjectPage({
           )}
 
           <Card className="shadow-card">
+            <CardHeader className="flex items-center justify-between gap-3">
+              <CardTitle>Настройка в GitHub</CardTitle>
+              <Link href={`/admin/projects/${id}`} className="text-xs text-muted-foreground hover:underline">
+                Проверить снова
+              </Link>
+            </CardHeader>
+            <CardBody className="flex flex-col gap-4 pt-0 text-sm">
+              {setup === null ? (
+                <p className="text-amber">Не удалось проверить: GitHub недоступен или сервис не настроен.</p>
+              ) : (
+                <ul className="flex flex-col gap-1.5">
+                  <SetupItem ok={setup.installed}>Приложение куратора установлено в репозиторий</SetupItem>
+                  <SetupItem ok={setup.isPublic}>
+                    Репозиторий публичный (на бесплатном плане обязательная проверка работает только в публичных)
+                  </SetupItem>
+                  <SetupItem ok={setup.pullRequestsOnly}>Изменения в основную ветку — только через pull request</SetupItem>
+                  <SetupItem ok={setup.checkRequired}>Обязательна проверка AI Curator от приложения куратора</SetupItem>
+                </ul>
+              )}
+              {!(setup?.pullRequestsOnly && setup.checkRequired) && (
+                <div className="flex flex-col gap-1.5">
+                  <p className="font-medium">Правило ветки</p>
+                  <ol className="flex list-decimal flex-col gap-1 pl-5">
+                    <li>
+                      <a href="/api/ruleset" download className="text-primary hover:underline">
+                        Скачайте файл правила
+                      </a>
+                      .
+                    </li>
+                    <li>
+                      Откройте{" "}
+                      <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                        правила репозитория
+                      </a>
+                      : New ruleset → Import a ruleset → выберите файл → Create.
+                    </li>
+                  </ol>
+                </div>
+              )}
+              <p>
+                Студенты:{" "}
+                <a href={`${repoUrl}/settings/access`} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                  добавьте их в репозиторий
+                </a>{" "}
+                с ролью Write.
+              </p>
+            </CardBody>
+          </Card>
+
+          <Card className="shadow-card">
             <CardHeader>
               <CardTitle>Состояние</CardTitle>
             </CardHeader>
@@ -170,5 +230,17 @@ export default async function AdminProjectPage({
         </div>
       </PageShell>
     </>
+  );
+}
+
+/** One requirement of the repository setup: met, not met, or unknown (null). */
+function SetupItem({ ok, children }: { ok: boolean | null; children: React.ReactNode }) {
+  return (
+    <li className="flex items-start gap-2">
+      <span className={cn("w-4 shrink-0 font-semibold", ok ? "text-green" : ok === false ? "text-red" : "text-muted-foreground")}>
+        {ok ? "✓" : ok === false ? "✕" : "?"}
+      </span>
+      <span>{children}</span>
+    </li>
   );
 }

@@ -8,7 +8,7 @@ import {
   listAnalysisChanges,
   type AnalysisMode,
 } from "@/lib/curator/store";
-import { findingStatusLabel, fullDate, outcomeLabel, triggerLabel } from "@/lib/format";
+import { findingStatusLabel, fullDate, outcomeLabel, prLabel, triggerLabel } from "@/lib/format";
 import { AppHeader, PageShell } from "@/components/AppHeader";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Markdown } from "@/components/Markdown";
@@ -71,7 +71,7 @@ export default async function AnalysisPage({
             )}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-            {analysis.prNumber && (
+            {analysis.prNumber !== null && analysis.prNumber > 0 && (
               <a href={`${repoUrl}/pull/${analysis.prNumber}`} target="_blank" rel="noreferrer" className="hover:underline">
                 PR #{analysis.prNumber}
               </a>
@@ -95,7 +95,7 @@ export default async function AnalysisPage({
             {analysis.comment && (
               <Card className="shadow-card">
                 <CardHeader>
-                  <CardTitle>Комментарий в pull request</CardTitle>
+                  <CardTitle>{analysis.trigger === "overview" ? "Обзор в issue" : "Комментарий в pull request"}</CardTitle>
                 </CardHeader>
                 <CardBody className="pt-0">
                   <Markdown>{analysis.comment}</Markdown>
@@ -130,7 +130,9 @@ export default async function AnalysisPage({
                           </Badge>
                         </div>
                         {c.prNumber !== analysis.prNumber && (
-                          <p className="mt-0.5 text-xs text-muted-foreground">найдено в PR #{c.prNumber}</p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {c.prNumber === 0 ? "найдено полным обзором" : `найдено в ${prLabel(c.prNumber)}`}
+                          </p>
                         )}
                         {c.reason && <p className="mt-0.5 text-xs text-muted-foreground">{c.reason}</p>}
                       </li>
@@ -192,6 +194,18 @@ export default async function AnalysisPage({
                   )}
                   <dt className="text-muted-foreground">Открытые замечания проекта</dt>
                   <dd className="tabular-nums">{materials.priorFindings}</dd>
+                  {materials.dismissedFindings !== undefined && (
+                    <>
+                      <dt className="text-muted-foreground">Снятые замечания</dt>
+                      <dd className="tabular-nums">{materials.dismissedFindings}</dd>
+                    </>
+                  )}
+                  {materials.notes !== undefined && (
+                    <>
+                      <dt className="text-muted-foreground">Заметки о проекте</dt>
+                      <dd>{materials.notes ? "есть" : "нет"}</dd>
+                    </>
+                  )}
                   <dt className="text-muted-foreground">Ответы студента</dt>
                   <dd className="tabular-nums">{materials.studentResponses}</dd>
                   {analysis.mode && (

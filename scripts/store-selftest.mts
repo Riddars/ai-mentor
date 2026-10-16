@@ -59,6 +59,8 @@ check("public text: mention defused", cleaned.includes("@​student") && !/(^|\s
 check("public text: markdown link reduced to its text", cleaned.includes("ссылку") && !cleaned.includes("evil.example"), cleaned);
 check("public text: bare URLs not linked", cleaned.includes("`https://x.example`") && cleaned.includes("`www.y.example`"), cleaned);
 check("public text: e-mail left as is", cleaned.includes("a@b.ru"), cleaned);
+const html = publicText('p < 0.05 <img src="x" onerror=1> `a<b`');
+check("public text: raw HTML escaped, code spans untouched", html.includes("p &lt; 0.05") && html.includes("&lt;img") && html.includes("`a<b`"), html);
 const code = publicText("Код `@torch.no_grad()` и `https://a.example`, затем `x`@alice\n```\n@decorator\n```");
 check("public text: code spans and blocks untouched", code.includes("`@torch.no_grad()`") && code.includes("`https://a.example`") && code.includes("\n@decorator\n"), code);
 check("public text: mention right after a code span defused", code.includes("`x`@\u200balice"), code);
@@ -71,7 +73,12 @@ const pr = (number: number, headRef: string, baseRef = "main") =>
   store.upsertPullRequest(projectId, number, { state: "open", headSha: `sha${number}`, headRef, baseRef, mergedIntoDefault: false });
 const analysis = (prId: number) =>
   store.recordAnalysis({ prId, headSha: `sha${prId}`, trigger: "commit", outcome: "ok", mode: "diff", tokensIn: 10, tokensOut: 5 });
-const finding = (title: string, locations: Location[], status: "open" | "closed" = "open", priorId: number | null = null) => ({
+const finding = (
+  title: string,
+  locations: Location[],
+  status: "open" | "closed" | "dismissed" | "reopened" = "open",
+  priorId: number | null = null,
+) => ({
   priorId,
   status,
   title,
@@ -204,6 +211,95 @@ const branchL = (db.prepare("SELECT branch FROM findings WHERE id = @id").get({ 
 check("merge into main collects findings left in its branch", bugL.prId === prK && bugL.scope === "project", JSON.stringify(bugL));
 check("handed-over findings carry the new branch", branchL === "feat-k", String(branchL));
 
+// --- dismissed findings ----------------------------------------------------------------
+
+const prM = pr(13, "feat-m");
+reconcile(prM, [finding("explained by the student", [file("src/m.py", "1")])], changes(["src/other.py", [1]]));
+const explained = idOf("explained by the student");
+reconcile(prM, [finding("x", [], "dismissed", explained)], changes(["src/m.py", [1]]));
+check("an explanation dismisses a finding", row(explained).status === "dismissed");
+const prN = pr(14, "feat-n");
+const dismissedForN = store.loadDismissedFindings(prN);
+check("dismissed findings reach later reviews", dismissedForN.some((f) => f.id === explained && !f.byPerson && f.reason === null));
+check("…and are not among the open ones", !visibleTo(prN).includes("explained by the student"));
+const reopen = (prId: number, status: "open" | "reopened" | "closed", id: number) =>
+  store.applyReconciliation(prId, analysis(prId), { summary: "", findings: [finding("x", [], status, id)] }, {
+    allowedPriorIds: new Set(),
+    reopenableIds: new Set([id]),
+    allowNew: true,
+    changed: changes(["src/m.py", [1]]),
+  });
+reopen(prN, "closed", explained);
+check("a dismissed finding cannot be closed by the model", row(explained).status === "dismissed");
+reopen(prN, "reopened", explained);
+check("…but can be reopened on new grounds", row(explained).status === "reopened");
+store.setFindingStatusByPerson({ findingId: explained, status: "dismissed", reason: "false finding", actor: "sup" });
+check("a finding dismissed by a person is marked so", store.loadDismissedFindings(prN).some((f) => f.id === explained && f.byPerson));
+const before2 = (db.prepare("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n;
+reopen(prN, "reopened", explained);
+reopen(prN, "open", explained);
+check("…the model can neither reopen it nor raise it as new",
+  row(explained).status === "dismissed" && (db.prepare("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n === before2);
+
+// --- notes about the project -----------------------------------------------------------
+
+const notesProject = store.createProjectManual("org", "notes");
+const prO = store.upsertPullRequest(notesProject, 1, { state: "open", headSha: "o-head", headRef: "feat-o", mergedIntoDefault: false });
+store.addProjectNotes(notesProject, "initial notes", { actor: "sup" });
+const base = store.getProjectNotes(notesProject)!.id;
+store.recordAnalysis({ prId: prO, headSha: "o-head", trigger: "commit", outcome: "ok", notesProposal: "notes from PR", notesBase: base });
+check("proposed notes wait for the merge", store.getProjectNotes(notesProject)!.body === "initial notes");
+store.recordPullRequestClosed(prO, "merged-default");
+store.applyNotesProposal(prO);
+check("a merged PR's notes become current", store.getProjectNotes(notesProject)!.body === "notes from PR");
+check("…once", !store.applyNotesProposal(prO));
+const prP = store.upsertPullRequest(notesProject, 2, { state: "open", headSha: "p-head", headRef: "feat-p", mergedIntoDefault: false });
+store.recordAnalysis({ prId: prP, headSha: "p-head", trigger: "commit", outcome: "ok", notesProposal: "stale proposal", notesBase: base });
+store.applyNotesProposal(prP);
+check("notes proposed over an older version are dropped", store.getProjectNotes(notesProject)!.body === "notes from PR");
+const prQ = store.upsertPullRequest(notesProject, 3, { state: "open", headSha: "q-new", headRef: "feat-q", mergedIntoDefault: false });
+store.recordAnalysis({ prId: prQ, headSha: "q-old", trigger: "commit", outcome: "ok", notesProposal: "unreviewed head", notesBase: store.getProjectNotes(notesProject)!.id });
+store.applyNotesProposal(prQ);
+check("notes of a review of an older commit are dropped", store.getProjectNotes(notesProject)!.body === "notes from PR");
+
+// --- project overview ------------------------------------------------------------------
+
+check("an overview is queued", store.enqueueOverviewJob(notesProject, { reason: "initial" }, false) === "queued");
+check("…once at a time", store.enqueueOverviewJob(notesProject, { reason: "manual" }, true) === "active");
+db.prepare("UPDATE review_jobs SET status = 'done' WHERE kind = 'overview'").run();
+check("automatic overviews are limited", store.enqueueOverviewJob(notesProject, { reason: "gap" }, false) === "recent");
+check("a person may run one any time", store.enqueueOverviewJob(notesProject, { reason: "manual" }, true) === "queued");
+db.prepare("UPDATE review_jobs SET status = 'done' WHERE kind = 'overview'").run();
+const overviewPr = store.ensureOverviewPullRequest(notesProject);
+const fresh = store.createProjectManual("org", "fresh");
+store.ensureOverviewPullRequest(fresh);
+check("the overview PR does not lock renaming a fresh project", !store.projectHasPullRequests(fresh));
+check("memory moves when it covers the expected commit", store.setMemorySha(fresh, "a1", null) && store.getMemorySha(fresh) === "a1");
+check("…and not when it moved meanwhile", !store.setMemorySha(fresh, "b2", null) && store.getMemorySha(fresh) === "a1");
+check("the overview PR is not an open PR", !store.listOpenPullRequestNumbers(notesProject).includes(store.OVERVIEW_PR_NUMBER));
+const prR = store.upsertPullRequest(notesProject, 4, { state: "open", headSha: "r-head", headRef: "feat-r", mergedIntoDefault: false });
+store.applyReconciliation(prR, store.recordAnalysis({ prId: prR, headSha: "r-head", trigger: "commit", outcome: "ok" }),
+  { summary: "", findings: [finding("old problem", [file("src/old.py", "3")])] },
+  { allowedPriorIds: new Set(), allowNew: true, changed: changes(["src/new.py", [1]]) });
+const oldProblem = idOf("old problem");
+check("the overview sees the project's open findings", store.loadOpenFindings(overviewPr).some((f) => f.id === oldProblem));
+const overviewRun = (findings: ReturnType<typeof finding>[]) =>
+  store.applyReconciliation(overviewPr, store.recordAnalysis({ prId: overviewPr, headSha: "main", trigger: "overview", outcome: "ok" }),
+    { summary: "", findings }, {
+      allowedPriorIds: new Set(findings.map((f) => f.priorId).filter((id): id is number => id !== null)),
+      allowNew: true,
+      fixesFinal: true,
+      wholeRepository: true,
+      changed: new Map(),
+    });
+overviewRun([finding("x", [], "dismissed", oldProblem)]);
+check("an overview cannot dismiss", row(oldProblem).status === "open");
+overviewRun([finding("x", [], "closed", oldProblem), finding("found by the overview", [file("src/core.py", "7")])]);
+check("an overview closes a fix it sees anywhere", row(oldProblem).status === "closed");
+check("findings of an overview belong to the project", row(idOf("found by the overview")).scope === "project");
+check("they are listed for the overview issue", store.listOpenProjectFindings(notesProject).some((f) => f.title === "found by the overview"));
+check("a PR review sees them", visibleTo(prR).includes("found by the overview"));
+
 // --- daily token budgets ---------------------------------------------------------------
 
 process.env.TOKENS_PER_PROJECT_DAY = "1000";
@@ -219,6 +315,9 @@ await runJob(job!, {
     ran = true;
   },
   runComment: async () => {
+    ran = true;
+  },
+  runOverview: async () => {
     ran = true;
   },
   concludeUnreviewed: async (_job, summary) => {
@@ -243,6 +342,7 @@ await runJob(again!, {
     ran = true;
   },
   runComment: async () => {},
+  runOverview: async () => {},
   concludeUnreviewed: async () => {},
   reportFailure: async () => {},
 });

@@ -5,7 +5,7 @@ import { addProjectAction, type ActionState } from "@/app/actions/admin";
 import { Button } from "@/components/ui/Button";
 import { Field, FormMessage, inputClass } from "@/components/admin/fields";
 
-export function AddProjectForm() {
+export function AddProjectForm({ defaultOwner }: { defaultOwner?: string }) {
   const [state, action, pending] = useActionState<ActionState, FormData>(
     addProjectAction,
     null,
@@ -14,7 +14,7 @@ export function AddProjectForm() {
     <form action={action} className="flex flex-col gap-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <Field label="owner" className="flex-1">
-          <input name="owner" className={inputClass} placeholder="RiddarsCorp" />
+          <input name="owner" className={inputClass} placeholder="RiddarsCorp" defaultValue={defaultOwner} />
         </Field>
         <Field label="repo" className="flex-1">
           <input name="repo" className={inputClass} placeholder="test-project-1" />

@@ -5,6 +5,8 @@ import { getConfig } from "@/lib/config";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
 import { isProjectMember } from "@/lib/github/members";
+import { memoryGap } from "@/lib/curator/memory";
+import { executeOverviewJob, OVERVIEW_LIMITS, startOverview } from "@/lib/curator/overview";
 import {
   concludeCheck,
   executeCommentJob,
@@ -47,6 +49,7 @@ const HEARTBEAT_MS = 5 * 60_000;
 export interface WorkerDeps {
   runCommit(job: ReviewJob): Promise<void>;
   runComment(job: ReviewJob): Promise<void>;
+  runOverview(job: ReviewJob): Promise<void>;
   concludeUnreviewed(job: ReviewJob, summary: string): Promise<void>;
   reportFailure(job: ReviewJob): Promise<void>;
 }
@@ -55,11 +58,17 @@ const realDeps: WorkerDeps = {
   runCommit: (job) =>
     executeCommitJob(job.payload as ReviewParams, job.prId, job.id, job.attempts),
   runComment: (job) => executeCommentJob(job.payload as CommentReviewParams),
+  runOverview: (job) => executeOverviewJob(job),
   concludeUnreviewed: (job, summary) =>
     concludeCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
-  reportFailure: (job) =>
-    reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind),
+  // A failed overview is already recorded with what it spent; it has no PR to report to.
+  reportFailure: async (job) => {
+    if (job.kind !== "overview") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind);
+  },
 };
+
+/** An overview reads the whole project, so a failed one is repeated only once. */
+const OVERVIEW_ATTEMPTS = 2;
 
 const NOT_REVIEWED_DEADLINE =
   "Не разобрано: разбор не успел выполниться вовремя. Слияние разрешено, разбор будет " +
@@ -116,12 +125,14 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   }
 
   const recent = recentAnalysesOfProject(job.projectId);
+  // An overview starts only with room for its whole run left in the budgets.
+  const reserve = job.kind === "overview" ? OVERVIEW_LIMITS.maxTokens : 0;
   const overLimit =
     recent.count >= settings.dailyLimit
       ? NOT_REVIEWED_LIMIT
-      : settings.projectDailyTokens > 0 && recentTokens(job.projectId) >= settings.projectDailyTokens
+      : settings.projectDailyTokens > 0 && recentTokens(job.projectId) + reserve >= settings.projectDailyTokens
         ? NOT_REVIEWED_PROJECT_TOKENS
-        : settings.dailyTokens > 0 && recentTokens(null) >= settings.dailyTokens
+        : settings.dailyTokens > 0 && recentTokens(null) + reserve >= settings.dailyTokens
           ? NOT_REVIEWED_TOKENS
           : null;
   if (overLimit) {
@@ -136,6 +147,7 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   if (!markJobRunning(job.id)) return; // replaced meanwhile
   try {
     if (job.kind === "commit") await deps.runCommit(job);
+    else if (job.kind === "overview") await deps.runOverview(job);
     else await deps.runComment(job);
     finishJob(job.id, "done");
   } catch (error) {
@@ -146,7 +158,7 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     }
     const message = error instanceof Error ? error.message : String(error);
     const age = Date.now() - (parseDbDate(job.createdAt)?.getTime() ?? Date.now());
-    if (age >= settings.retryWindowMs) {
+    if (age >= settings.retryWindowMs || (job.kind === "overview" && job.attempts + 1 >= OVERVIEW_ATTEMPTS)) {
       console.error(`[queue] job ${job.id} failed for good:`, error);
       finishJob(job.id, "failed", message);
       if (await concludeIfOpen(job, NOT_REVIEWED_FAILED, deps)) {
@@ -168,9 +180,34 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   }
 }
 
+/** Main-branch heads seen with a memory gap on the previous sync, by project. */
+const gapSeen = new Map<number, string>();
+
+/**
+ * A project without an overview gets one at once. Other gaps must be seen on two syncs in a
+ * row at the same head, so a merge whose close event is still being handled is not taken
+ * for one.
+ */
+async function checkMemoryGap(project: { id: number; owner: string; repo: string }, installationId: number): Promise<void> {
+  const { gap, head, initial } = await memoryGap(project, installationId);
+  if (!gap) {
+    gapSeen.delete(project.id);
+    return;
+  }
+  if (!initial && gapSeen.get(project.id) !== head) {
+    gapSeen.set(project.id, head);
+    return;
+  }
+  gapSeen.delete(project.id);
+  if (startOverview(project.id, initial ? "initial" : "gap") === "queued") {
+    console.log(`[queue] overview of ${project.owner}/${project.repo} queued (${initial ? "no overview yet" : "memory gap"})`);
+  }
+}
+
 /**
  * Open PRs of active projects without a finished review of their head get a job; PRs open
- * in memory but not on GitHub had their close event lost and are closed now.
+ * in memory but not on GitHub had their close event lost and are closed now. A project whose
+ * memory does not cover its main branch gets an overview.
  */
 async function syncOpenPullRequests(): Promise<void> {
   for (const project of listAllProjects()) {
@@ -222,6 +259,7 @@ async function syncOpenPullRequests(): Promise<void> {
           "sync",
         );
       }
+      await checkMemoryGap(project, installationId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[queue] sync of ${project.owner}/${project.repo} failed: ${message}`);

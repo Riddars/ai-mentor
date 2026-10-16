@@ -180,7 +180,7 @@ export interface AgentRun {
  */
 export async function withAgentRun<T>(
   target: AgentTarget,
-  input: { systemPrompt: string; userPrompt: string; changed: string[] },
+  input: { systemPrompt: string; userPrompt: string; changed: string[]; limits?: AgentLimitsSpec },
   consume: (run: AgentRun, root: string) => Promise<T>,
   isCurrent?: () => boolean,
 ): Promise<T> {
@@ -199,7 +199,7 @@ export async function withAgentRun<T>(
         userPrompt: input.userPrompt,
         changed: input.changed,
         model: { baseUrl, model },
-        limits: agentLimits(),
+        limits: input.limits ?? agentLimits(),
       },
       apiKey,
       isCurrent,
