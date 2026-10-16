@@ -50,4 +50,6 @@ export interface AgentReply {
   /** Entries of the archive that were not unpacked, and why. */
   skipped: Array<{ path: string; reason: string }>;
   partialCopy: string | null;
+  /** The run step by step as Markdown (lib/agent/transcript.mts), for the supervisor. */
+  transcript: string;
 }

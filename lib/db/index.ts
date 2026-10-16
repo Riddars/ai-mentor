@@ -374,6 +374,11 @@ function migrate(db: DatabaseSync): void {
     addColumns(db, "analyses", { notes_proposal: "TEXT", notes_base: "INTEGER" });
     db.exec("PRAGMA user_version = 11");
   }
+  if (version < 12) {
+    // The agent's run step by step, shown on the analysis page.
+    addColumns(db, "analyses", { agent_log: "TEXT" });
+    db.exec("PRAGMA user_version = 12");
+  }
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

@@ -176,6 +176,8 @@ export interface AnalysisDetail extends AnalysisRow {
   tokensOut: number | null;
   /** Repository files the agent read. */
   viewedFiles: string[] | null;
+  /** The agent's run step by step (Markdown), if an agent ran. */
+  agentLog: string | null;
 }
 
 /** A finding status change made by one analysis (a new finding has no old status). */
@@ -470,7 +472,7 @@ export function getAnalysis(id: number): AnalysisDetail | null {
       `SELECT a.id, pr.number AS prNumber, pr.project_id AS projectId, a.head_sha AS headSha,
               a.trigger, a.outcome, a.summary, a.provider, a.model, a.comment, a.materials,
               a.raw_response AS rawResponse, a.mode, a.tokens_in AS tokensIn,
-              a.tokens_out AS tokensOut, a.viewed_files AS viewedFiles,
+              a.tokens_out AS tokensOut, a.viewed_files AS viewedFiles, a.agent_log AS agentLog,
               a.created_at AS createdAt
        FROM analyses a
        JOIN pull_requests pr ON pr.id = a.pull_request_id
@@ -796,16 +798,18 @@ export function recordAnalysis(params: {
   /** Notes about the project the review proposes, and the notes version it was given. */
   notesProposal?: string | null;
   notesBase?: number | null;
+  /** The agent's run step by step (Markdown). */
+  agentLog?: string | null;
 }): number {
   const row = getDb()
     .prepare(
       `INSERT INTO analyses
          (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
           raw_response, mode, tokens_in, tokens_out, cost_rub, viewed_files, notes_proposal,
-          notes_base)
+          notes_base, agent_log)
        VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
                @rawResponse, @mode, @tokensIn, @tokensOut, @costRub, @viewedFiles, @notesProposal,
-               @notesBase)
+               @notesBase, @agentLog)
        RETURNING id`,
     )
     .get({
@@ -825,6 +829,7 @@ export function recordAnalysis(params: {
       viewedFiles: params.viewedFiles ? JSON.stringify(params.viewedFiles) : null,
       notesProposal: params.notesProposal ?? null,
       notesBase: params.notesBase ?? null,
+      agentLog: params.agentLog || null,
     }) as { id: number };
   return row.id;
 }

@@ -167,6 +167,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
     });
 
   let done = false;
+  let failedLog: string | null = null;
   try {
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
@@ -174,7 +175,10 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       async ({ reply, provider, model }, root) => {
         addSpend(tokens, { input: reply.tokensIn, output: reply.tokensOut }, provider, model);
         const usage = `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, токенов: ${reply.tokensIn}/${reply.tokensOut}`;
-        if (reply.error) throw new Error(`[agent] сбой: ${reply.error}; ${usage}`);
+        if (reply.error) {
+          failedLog = reply.transcript;
+          throw new Error(`[agent] сбой: ${reply.error}; ${usage}`);
+        }
         const parsed = parseModelJson(reply.text);
         const materials = {
           files: [],
@@ -186,7 +190,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
           notes: notes !== null,
           studentResponses: 0,
         };
-        const base = { model: `${model} (agent)`, materials, viewedFiles: reply.viewed };
+        const base = { model: `${model} (agent)`, materials, viewedFiles: reply.viewed, agentLog: reply.transcript };
         if (!parsed) {
           // Kept for the supervisor; not retried, a new run would cost as much again.
           record("parse_error", { ...base, rawResponse: `${reply.text}\n\n[agent] ${usage}` });
@@ -236,7 +240,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       addSpend(tokens, error.spent, provider, model);
     }
     if (tokens.input + tokens.output > 0) {
-      record("error", { rawResponse: error instanceof Error ? error.message : String(error) });
+      record("error", { rawResponse: error instanceof Error ? error.message : String(error), agentLog: failedLog });
     }
     throw error;
   }

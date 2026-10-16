@@ -102,6 +102,13 @@ export default async function AnalysisPage({
                 </CardBody>
               </Card>
             )}
+            {analysis.agentLog && (
+              <CollapsibleCard title="Как работал агент">
+                <div className="max-h-[40rem] overflow-auto">
+                  <Markdown>{analysis.agentLog}</Markdown>
+                </div>
+              </CollapsibleCard>
+            )}
             {analysis.rawResponse && (
               <CollapsibleCard title="Ответ модели как есть">
                 <pre className="max-h-[32rem] overflow-auto rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs whitespace-pre-wrap">

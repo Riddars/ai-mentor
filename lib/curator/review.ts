@@ -471,12 +471,14 @@ async function runReview(
   let viewed: string[] | null = null;
   let result: { answer: ChatResult; parsed: ReconcileResult | null } | null = null;
   let agentNote: string | null = null;
+  let agentLog: string | null = null;
   if (trigger === "commit" && reviewMode() === "agent") {
     const attempt = context.attempt ?? 0;
     mode = "agent_fallback";
     if (attempt < MAX_AGENT_ATTEMPTS) {
       const agent = await reviewWithAgent(params, prompt, materials.files, context.isCurrent);
       mergeSpend(tokens, agent.tokens);
+      agentLog = agent.log ?? null;
       if ("failure" in agent) {
         agentNote = agent.failure;
       } else {
@@ -511,6 +513,7 @@ async function runReview(
       // Notes proposed by a commit review take effect when the PR reaches the main branch.
       notesProposal: outcome === "ok" && trigger === "commit" ? (result?.parsed?.notes ?? null) : null,
       notesBase,
+      agentLog,
     });
 
   if (!result) {
@@ -595,9 +598,10 @@ async function runReview(
  */
 const MAX_AGENT_ATTEMPTS = 2;
 
+/** `log` — the agent's run step by step, when the agent process got to run. */
 type AgentOutcome =
-  | { answer: ChatResult; parsed: ReconcileResult | null; tokens: Spend; viewed: string[] }
-  | { failure: string; tokens: Spend };
+  | { answer: ChatResult; parsed: ReconcileResult | null; tokens: Spend; viewed: string[]; log?: string }
+  | { failure: string; tokens: Spend; log?: string };
 
 /**
  * Agent review over a copy of the repository at the PR head, with the new findings checked
@@ -626,11 +630,12 @@ async function reviewWithAgent(
           `токенов: ${reply.tokensIn}/${reply.tokensOut}`;
         const label = { provider, model: `${model} (agent)`, usage: used };
         const stale = isCurrent !== undefined && !isCurrent();
+        const log = reply.transcript;
         if (reply.error) {
           if (stale) {
-            return { answer: { ...label, content: `[agent] отменён: ${reply.error}; ${usage}` }, parsed: null, tokens, viewed: reply.viewed };
+            return { answer: { ...label, content: `[agent] отменён: ${reply.error}; ${usage}` }, parsed: null, tokens, viewed: reply.viewed, log };
           }
-          return { failure: `[agent] сбой: ${reply.error}; ${usage}`, tokens };
+          return { failure: `[agent] сбой: ${reply.error}; ${usage}`, tokens, log };
         }
         const trailer = [
           `[agent] ${usage}`,
@@ -640,9 +645,9 @@ async function reviewWithAgent(
         const parsed = parseModelJson(reply.text);
         // A stale answer is not applied: returned unverified for the caller to record.
         if (stale) {
-          return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed, tokens, viewed: reply.viewed };
+          return { answer: { ...label, content: `${reply.text}\n\n${trailer.join("\n")}` }, parsed, tokens, viewed: reply.viewed, log };
         }
-        if (!parsed) return { failure: `[agent] ответ не удалось разобрать; ${usage}`, tokens };
+        if (!parsed) return { failure: `[agent] ответ не удалось разобрать; ${usage}`, tokens, log };
         const verified = await verifyFindings(parsed, root);
         mergeSpend(tokens, verified.tokens);
         trailer.push(
@@ -654,6 +659,7 @@ async function reviewWithAgent(
           parsed: verified.result,
           tokens,
           viewed: reply.viewed,
+          log,
         };
       },
       isCurrent,

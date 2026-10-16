@@ -5,6 +5,7 @@ import { mkdir } from "node:fs/promises";
 import { openAICompatibleModel, runAgent } from "@/lib/agent/agent.mjs";
 import type { AgentProgress, AgentReply, AgentRequest } from "@/lib/agent/protocol";
 import { repositorySection } from "@/lib/agent/prompt";
+import { transcript } from "@/lib/agent/transcript.mjs";
 import { extractTarball, listRepoFiles, relatedFiles, repoMap } from "@/lib/agent/workspace";
 
 const controller = new AbortController();
@@ -39,6 +40,7 @@ async function handle(request: AgentRequest): Promise<AgentReply> {
     viewed: [...result.log.viewed].sort(),
     skipped: extracted.skipped,
     partialCopy: extracted.stoppedOn,
+    transcript: transcript("Ход работы агента", result.messages),
   };
 }
 
@@ -66,6 +68,7 @@ process.on("message", (message: AgentRequest | { type: "cancel" }) => {
       viewed: [],
       skipped: [],
       partialCopy: null,
+      transcript: "",
     }),
   );
 });

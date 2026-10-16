@@ -24,7 +24,7 @@ export type ReviewMode = "diff" | "agent";
 const REVIEW_MODES: readonly ReviewMode[] = ["diff", "agent"];
 
 export function reviewMode(): ReviewMode {
-  const raw = process.env.REVIEW_MODE ?? "diff";
+  const raw = process.env.REVIEW_MODE ?? "agent";
   if (!REVIEW_MODES.includes(raw as ReviewMode)) {
     throw new Error(`Invalid REVIEW_MODE "${raw}", expected one of: ${REVIEW_MODES.join(", ")}`);
   }
