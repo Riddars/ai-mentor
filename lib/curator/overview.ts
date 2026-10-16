@@ -276,7 +276,7 @@ function overviewIssueBody(projectId: number): string {
       "Объяснить замечание или сообщить об исправлении можно в комментарии к любому открытому pull request.",
     );
   }
-  parts.push("", `_Обновлено ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "long" }).format(new Date())}._`);
+  parts.push("", `_Обновлено ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "long" }).format(new Date())}_`);
   return parts.join("\n");
 }
 

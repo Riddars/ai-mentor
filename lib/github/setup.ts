@@ -52,6 +52,8 @@ export interface RepositorySetup {
   pullRequestsOnly: boolean | null;
   /** The `AI Curator` check is required on the main branch and only the app can set it. */
   checkRequired: boolean | null;
+  /** Logins of outside collaborators (students) who accepted their invitation; null when unknown. */
+  students: string[] | null;
 }
 
 interface BranchRule {
@@ -66,7 +68,7 @@ export async function checkRepositorySetup(owner: string, repo: string, appId: s
     installationId = await getRepoInstallationId(owner, repo);
   } catch (error) {
     if (error instanceof Error && / failed: 404 /.test(error.message)) {
-      return { installed: false, isPublic: null, pullRequestsOnly: null, checkRequired: null };
+      return { installed: false, isPublic: null, pullRequestsOnly: null, checkRequired: null, students: null };
     }
     throw error;
   }
@@ -75,6 +77,13 @@ export async function checkRepositorySetup(owner: string, repo: string, appId: s
   const rules = await githubRequest<BranchRule[]>(
     `/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(info.default_branch)}`,
     { token },
+  );
+  const students = await githubRequest<Array<{ login: string }>>(
+    `/repos/${owner}/${repo}/collaborators?affiliation=outside&per_page=100`,
+    { token },
+  ).then(
+    (list) => list.map((c) => c.login),
+    () => null,
   );
   return {
     installed: true,
@@ -87,5 +96,6 @@ export async function checkRepositorySetup(owner: string, repo: string, appId: s
           (c) => c.context === CHECK_NAME && String(c.integration_id) === appId,
         ),
     ),
+    students,
   };
 }

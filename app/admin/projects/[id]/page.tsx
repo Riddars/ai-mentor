@@ -6,6 +6,7 @@ import {
   isSupervisorOf,
   listProjectSupervisors,
   projectHasPullRequests,
+  upsertParticipant,
 } from "@/lib/curator/store";
 import {
   assignSupervisorAction,
@@ -54,6 +55,8 @@ export default async function AdminProjectPage({
   } catch (error) {
     console.warn(`[panel] setup of ${fullName} not checked:`, error);
   }
+  // Students who joined while the service missed the event become participants here.
+  for (const login of setup?.students ?? []) upsertParticipant(id, login);
 
   return (
     <>
@@ -138,51 +141,74 @@ export default async function AdminProjectPage({
 
           <Card className="shadow-card">
             <CardHeader className="flex items-center justify-between gap-3">
-              <CardTitle>Настройка в GitHub</CardTitle>
+              <CardTitle>Подготовка репозитория</CardTitle>
               <Link href={`/admin/projects/${id}`} className="text-xs text-muted-foreground hover:underline">
-                Проверить снова
+                Обновить
               </Link>
             </CardHeader>
-            <CardBody className="flex flex-col gap-4 pt-0 text-sm">
-              {setup === null ? (
-                <p className="text-amber">Не удалось проверить: GitHub недоступен или сервис не настроен.</p>
-              ) : (
-                <ul className="flex flex-col gap-1.5">
-                  <SetupItem ok={setup.installed}>Приложение куратора установлено в репозиторий</SetupItem>
-                  <SetupItem ok={setup.isPublic}>
-                    Репозиторий публичный (на бесплатном плане обязательная проверка работает только в публичных)
-                  </SetupItem>
-                  <SetupItem ok={setup.pullRequestsOnly}>Изменения в основную ветку — только через pull request</SetupItem>
-                  <SetupItem ok={setup.checkRequired}>Обязательна проверка AI Curator от приложения куратора</SetupItem>
-                </ul>
-              )}
-              {!(setup?.pullRequestsOnly && setup.checkRequired) && (
-                <div className="flex flex-col gap-1.5">
-                  <p className="font-medium">Правило ветки</p>
-                  <ol className="flex list-decimal flex-col gap-1 pl-5">
-                    <li>
-                      <a href="/api/ruleset" download className="text-primary hover:underline">
-                        Скачайте файл правила
-                      </a>
-                      .
-                    </li>
-                    <li>
-                      Откройте{" "}
-                      <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                        правила репозитория
-                      </a>
-                      : New ruleset → Import a ruleset → выберите файл → Create.
-                    </li>
-                  </ol>
-                </div>
-              )}
-              <p>
-                Студенты:{" "}
-                <a href={`${repoUrl}/settings/access`} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                  добавьте их в репозиторий
-                </a>{" "}
-                с ролью Write.
+            <CardBody className="flex flex-col gap-5 pt-0 text-sm">
+              <p className="text-muted-foreground">
+                Чтобы куратор проверял работу студентов, в репозитории на GitHub нужно сделать два шага.
               </p>
+              {setup === null && <p className="text-amber">Не удалось связаться с GitHub — попробуйте обновить позже.</p>}
+              {setup?.installed === false && (
+                <p className="text-red">Куратор не видит репозиторий. Проверьте, что он создан в организации проектов.</p>
+              )}
+              {setup?.isPublic === false && (
+                <p className="text-red">Репозиторий закрытый — куратор работает только с публичными.</p>
+              )}
+
+              <SetupStep
+                n={1}
+                title="Защитите основную ветку"
+                done={setup ? Boolean(setup.pullRequestsOnly && setup.checkRequired) : null}
+                doneText="Готово: изменения попадают в проект только через pull request с проверкой куратора."
+              >
+                <ol className="flex list-decimal flex-col gap-1 pl-5">
+                  <li>
+                    <a href="/api/ruleset" download className="font-medium text-primary hover:underline">
+                      Скачайте файл настройки
+                    </a>
+                    .
+                  </li>
+                  <li>
+                    Откройте{" "}
+                    <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
+                      настройки репозитория
+                    </a>
+                    , нажмите <b>New ruleset</b> → <b>Import a ruleset</b> и выберите скачанный файл.
+                  </li>
+                  <li>
+                    Внизу страницы нажмите <b>Create</b>.
+                  </li>
+                </ol>
+              </SetupStep>
+
+              <SetupStep
+                n={2}
+                title="Пригласите студентов"
+                note="Смотреть публичный репозиторий может любой, а вносить изменения — только приглашённые."
+                done={setup?.students?.length ? true : setup ? false : null}
+                doneText={`В репозитории: ${setup?.students?.join(", ") ?? ""}.`}
+                keepInstructions
+              >
+                <ol className="flex list-decimal flex-col gap-1 pl-5">
+                  <li>
+                    Откройте в GitHub{" "}
+                    <a href={`${repoUrl}/settings/access`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
+                      список участников репозитория
+                    </a>{" "}
+                    (Collaborators) и нажмите зелёную кнопку <b>Add people</b>.
+                  </li>
+                  <li>Введите логин студента на GitHub или его почту и выберите его в списке.</li>
+                  <li>
+                    Выберите роль <b>Write</b> и нажмите <b>Add to repository</b>.
+                  </li>
+                </ol>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Студенту придёт приглашение на почту; здесь он появится, когда его примет.
+                </p>
+              </SetupStep>
             </CardBody>
           </Card>
 
@@ -233,14 +259,41 @@ export default async function AdminProjectPage({
   );
 }
 
-/** One requirement of the repository setup: met, not met, or unknown (null). */
-function SetupItem({ ok, children }: { ok: boolean | null; children: React.ReactNode }) {
+/** One step of preparing the repository: what to do, or that it is done (null — unknown). */
+function SetupStep({
+  n,
+  title,
+  done,
+  doneText,
+  note,
+  keepInstructions,
+  children,
+}: {
+  n: number;
+  title: string;
+  done: boolean | null;
+  doneText: string;
+  note?: string;
+  /** Instructions stay after the step is done: it may be repeated (more students). */
+  keepInstructions?: boolean;
+  children: React.ReactNode;
+}) {
   return (
-    <li className="flex items-start gap-2">
-      <span className={cn("w-4 shrink-0 font-semibold", ok ? "text-green" : ok === false ? "text-red" : "text-muted-foreground")}>
-        {ok ? "✓" : ok === false ? "✕" : "?"}
+    <section className="flex gap-3">
+      <span
+        className={cn(
+          "flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold",
+          done ? "bg-green-soft text-green" : "bg-muted text-muted-foreground",
+        )}
+      >
+        {done ? "✓" : n}
       </span>
-      <span>{children}</span>
-    </li>
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <p className="font-medium">{title}</p>
+        {note && !done && <p className="text-muted-foreground">{note}</p>}
+        {done && <p className="text-green">{doneText}</p>}
+        {(!done || keepInstructions) && children}
+      </div>
+    </section>
   );
 }

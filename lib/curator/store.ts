@@ -675,6 +675,13 @@ export function upsertParticipant(projectId: number, login: string): void {
     .run({ projectId, login });
 }
 
+/** A person no longer has access to the project's repository. */
+export function removeParticipant(projectId: number, login: string): void {
+  getDb()
+    .prepare("DELETE FROM participants WHERE project_id = @projectId AND github_login = @login COLLATE NOCASE")
+    .run({ projectId, login });
+}
+
 export function upsertPullRequest(
   projectId: number,
   number: number,

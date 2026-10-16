@@ -8,7 +8,9 @@ import {
   findProjectForRepository,
   forgetEvent,
   recordEventOnce,
+  removeParticipant,
   saveReplyAndEnqueue,
+  upsertParticipant,
   upsertPullRequest,
 } from "@/lib/curator/store";
 
@@ -54,11 +56,12 @@ export async function POST(req: Request) {
 
   const isPullRequest = event === "pull_request";
   const isComment = event === "issue_comment";
+  const isMember = event === "member";
   const isRerun =
     event === "check_run" &&
     payload.action === "rerequested" &&
     payload.check_run?.name === CHECK_NAME;
-  if (!isPullRequest && !isComment && !isRerun) {
+  if (!isPullRequest && !isComment && !isRerun && !isMember) {
     return Response.json({ ok: true });
   }
 
@@ -71,6 +74,14 @@ export async function POST(req: Request) {
   const project = owner && repo ? findProjectForRepository(repoId, owner, repo) : null;
   if (!project) {
     return Response.json({ ok: true, ignored: "not connected" });
+  }
+
+  // Someone accepted an invitation to the repository (a student) or lost access to it.
+  if (isMember) {
+    const login: string | undefined = payload.member?.login;
+    if (login && payload.action === "added") upsertParticipant(project.id, login);
+    if (login && payload.action === "removed") removeParticipant(project.id, login);
+    return Response.json({ ok: true });
   }
 
   if (isPullRequest && payload.action === "closed") {
