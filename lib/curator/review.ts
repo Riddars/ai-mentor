@@ -340,6 +340,8 @@ export function renderComment(
       coverage
         ? "Существенных методических проблем в проверенной части не нашёл."
         : "Существенных методических проблем в этих изменениях не нашёл.",
+      // A blank line keeps a following "---" a separator, not a heading underline.
+      "",
     );
   } else {
     parts.push(`**Существенные находки (${open.length}):**`, "");
