@@ -6,7 +6,7 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
 import { isProjectMember } from "@/lib/github/members";
 import { memoryGap } from "@/lib/curator/memory";
-import { executeOverviewJob, OVERVIEW_LIMITS, startOverview } from "@/lib/curator/overview";
+import { executeOverviewJob, OVERVIEW_LIMITS, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
   concludeCheck,
   executeCommentJob,
@@ -125,12 +125,14 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   }
 
   const recent = recentAnalysesOfProject(job.projectId);
-  // An overview starts only with room for its whole run left in the budgets.
+  // An overview starts only with room for its whole run left in the budgets. One a person asked
+  // for (button, resume) is not held back by the project's budget, only by the service's.
   const reserve = job.kind === "overview" ? OVERVIEW_LIMITS.maxTokens : 0;
+  const asked = job.kind === "overview" && ["manual", "resume"].includes((job.payload as OverviewPayload).reason);
   const overLimit =
     recent.count >= settings.dailyLimit
       ? NOT_REVIEWED_LIMIT
-      : settings.projectDailyTokens > 0 && recentTokens(job.projectId) + reserve >= settings.projectDailyTokens
+      : !asked && settings.projectDailyTokens > 0 && recentTokens(job.projectId) + reserve >= settings.projectDailyTokens
         ? NOT_REVIEWED_PROJECT_TOKENS
         : settings.dailyTokens > 0 && recentTokens(null) + reserve >= settings.dailyTokens
           ? NOT_REVIEWED_TOKENS

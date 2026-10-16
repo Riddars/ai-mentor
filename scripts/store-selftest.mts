@@ -354,6 +354,31 @@ check("a zero budget means no limit", ran);
 const budgetNote = db.prepare("SELECT note FROM review_jobs WHERE id = @id").get({ id: jobId }) as { note: string };
 check("a job stopped by the token budget is marked \"budget\"", budgetNote.note === "budget", budgetNote.note);
 
+// An overview a person asked for is not held back by the project's budget.
+process.env.TOKENS_PER_PROJECT_DAY = "1000";
+const askedProject = store.createProjectManual("org", "asked");
+const askedPr = store.ensureOverviewPullRequest(askedProject);
+store.recordAnalysis({ prId: askedPr, headSha: "x", trigger: "overview", outcome: "ok", tokensIn: 5000, tokensOut: 0 });
+const runOverviewOnce = async (reason: string) => {
+  db.prepare("UPDATE review_jobs SET status = 'done' WHERE kind = 'overview'").run();
+  store.enqueueOverviewJob(askedProject, { reason }, true);
+  const overview = store.listDueJobs(50).find((j) => j.kind === "overview" && j.projectId === askedProject);
+  let ranOverview = false;
+  await runJob(overview!, {
+    runCommit: async () => {},
+    runComment: async () => {},
+    runOverview: async () => {
+      ranOverview = true;
+    },
+    concludeUnreviewed: async () => {},
+    reportFailure: async () => {},
+  });
+  return ranOverview;
+};
+check("an overview by the button runs over the project's budget", await runOverviewOnce("manual"));
+check("an automatic overview waits for the project's budget", !(await runOverviewOnce("gap")));
+process.env.TOKENS_PER_PROJECT_DAY = "0";
+
 // --- spend, balance, roles ------------------------------------------------------------
 const prices = await import("@/lib/llm/prices");
 process.env.LLM_PRICES = "selectel:deepseek/deepseek-v4-pro=20/40; provod:m=1/2";

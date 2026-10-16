@@ -182,7 +182,7 @@ export default async function ProjectPage({
             <CollapsibleCard title="Закрытые замечания" count={dismissed.length + closed.length}>
               <div className="flex flex-col gap-5">
                 {dismissed.length > 0 && (
-                  <FindingGroup title="Сняты по объяснению студента" tone="amber">
+                  <FindingGroup title="Сняты" tone="amber">
                     <FindingList findings={dismissed} projectId={projectId} closed />
                   </FindingGroup>
                 )}
