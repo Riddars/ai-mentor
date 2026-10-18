@@ -7,6 +7,7 @@ import {
   getProject,
   getProjectLastActivity,
   getProjectNotes,
+  pendingOverviewRequests,
   getProjectParticipants,
   isSupervisorOf,
   listProjectAnalyses,
@@ -61,6 +62,7 @@ export default async function ProjectPage({
   const unreviewed = listUnreviewedPrs(projectId);
   const lastActivity = getProjectLastActivity(projectId);
   const notes = getProjectNotes(projectId);
+  const overviewRequests = pendingOverviewRequests(projectId);
   const overviewJob = getLatestOverviewJob(projectId);
   const lastOverview = analyses.find((a) => a.trigger === "overview" && a.outcome === "ok") ?? null;
   const overviewIssue = getOverviewIssue(projectId);
@@ -142,6 +144,11 @@ export default async function ProjectPage({
             </CardHeader>
             <CardBody className="flex flex-col gap-4 pt-0">
               <ProjectNotes projectId={projectId} notes={notes?.body || null} />
+              {overviewRequests.map((r) => (
+                <p key={r.prNumber} className="text-xs text-muted-foreground">
+                  После слияния PR #{r.prNumber} куратор перечитает проект: {r.reason}
+                </p>
+              ))}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
                 <span>
                   Полный обзор: {overviewState(overviewJob?.status ?? null, lastOverview)}

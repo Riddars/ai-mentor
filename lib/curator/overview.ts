@@ -31,7 +31,7 @@ import {
 // open findings with the current code and rewrites the notes about the project. The notes are
 // published as one GitHub issue per project, updated in place when they change.
 
-export type OverviewReason = "initial" | "gap" | "resume" | "manual";
+export type OverviewReason = "initial" | "gap" | "resume" | "manual" | "merge";
 
 export interface OverviewPayload {
   reason: OverviewReason;
@@ -43,7 +43,8 @@ export const OVERVIEW_LIMITS = { maxToolCalls: 60, maxTokens: 600_000, timeoutMs
 const ISSUE_TITLE = "Обзор проекта (AI Curator)";
 
 /**
- * Queue an overview; a person's request or a resume skips the limit on automatic overviews.
+ * Queue an overview; a person's request, a resume or a merged PR whose review asked for it skip
+ * the limit on automatic overviews.
  * An overview is an agent run: without the language-model reviewer and an agent model nothing
  * is queued.
  */
@@ -58,7 +59,8 @@ export function startOverview(
     return "unavailable";
   }
   const payload: OverviewPayload = { reason };
-  return enqueueOverviewJob(projectId, payload, reason === "resume" || reason === "manual");
+  // A person, a resume or a merged PR whose review named a reason skip the limit on automatic overviews.
+  return enqueueOverviewJob(projectId, payload, reason !== "initial" && reason !== "gap");
 }
 
 async function exists(root: string, name: string): Promise<boolean> {

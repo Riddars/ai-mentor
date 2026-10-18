@@ -16,12 +16,14 @@ function render(name: string, values: Record<string, string> = {}): string {
 
 /** System prompt of a PR review. */
 export function reviewPrompt(): string {
-  return render("review", { notes: '"полный новый текст заметок о проекте или null"' });
+  return render("review", {
+    tail: '"refresh_overview": "одна фраза: почему после слияния этого PR заметки о проекте станут неверными, или null"',
+  });
 }
 
 /** System prompt of a full project overview. */
 export function overviewPrompt(): string {
-  return render("overview", { notes: '"полный текст заметок о проекте"' });
+  return render("overview", { tail: '"notes": "полный текст заметок о проекте"' });
 }
 
 /** Rules appended to the review prompt when the model works over a repository copy. */

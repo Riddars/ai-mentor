@@ -55,8 +55,6 @@ export interface ReviewContext {
   priorIds: Set<number>;
   /** Dismissed findings given to the model that it may reopen. */
   reopenableIds: Set<number>;
-  /** Version of the notes about the project the model was given (null — none). */
-  notesBase: number | null;
   /** Changed files of the PR with the lines it adds. */
   changed: ChangedLines;
 }
@@ -324,7 +322,6 @@ export async function collectReviewContext(
     prompt,
     priorIds: new Set(prior.map((f) => f.id)),
     reopenableIds: new Set(dismissed.map((f) => f.id)),
-    notesBase: notes?.id ?? null,
     changed: changedLines(files),
     materials: {
       files: files.map((f) => f.filename),

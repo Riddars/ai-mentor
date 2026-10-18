@@ -358,6 +358,15 @@ function migrate(db: DatabaseSync): void {
     db.exec("DROP TABLE IF EXISTS balance_entries");
     db.exec("PRAGMA user_version = 13");
   }
+  if (version < 14) {
+    // A PR review no longer writes the notes: it may ask to re-read the project once merged.
+    addColumns(db, "analyses", { overview_reason: "TEXT" });
+    const columns = (db.prepare("PRAGMA table_info(analyses)").all() as Array<{ name: string }>).map((c) => c.name);
+    for (const column of ["notes_proposal", "notes_base"]) {
+      if (columns.includes(column)) db.exec(`ALTER TABLE analyses DROP COLUMN ${column}`);
+    }
+    db.exec("PRAGMA user_version = 14");
+  }
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

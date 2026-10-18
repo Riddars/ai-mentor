@@ -75,8 +75,10 @@ export interface ReconciledFinding {
 export interface ReconcileResult {
   summary: string;
   findings: ReconciledFinding[];
-  /** New full text of the notes about the project; null — leave them as they are. */
+  /** New full text of the notes about the project (an overview); null — leave them as they are. */
   notes?: string | null;
+  /** Why the notes go stale once this PR is merged (a PR review); null — they stay right. */
+  refreshOverview?: string | null;
 }
 
 /** active — в работе; paused — разбор отключён, проект остаётся в памяти. */
@@ -782,9 +784,8 @@ export function recordAnalysis(params: {
   tokensIn?: number;
   tokensOut?: number;
   viewedFiles?: string[] | null;
-  /** Notes about the project the review proposes, and the notes version it was given. */
-  notesProposal?: string | null;
-  notesBase?: number | null;
+  /** Why the project should be re-read once this PR is merged (a PR review). */
+  overviewReason?: string | null;
   /** The agent's run step by step (Markdown). */
   agentLog?: string | null;
 }): number {
@@ -792,11 +793,11 @@ export function recordAnalysis(params: {
     .prepare(
       `INSERT INTO analyses
          (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
-          raw_response, mode, tokens_in, tokens_out, viewed_files, notes_proposal,
-          notes_base, agent_log)
+          raw_response, mode, tokens_in, tokens_out, viewed_files, overview_reason,
+          agent_log)
        VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
-               @rawResponse, @mode, @tokensIn, @tokensOut, @viewedFiles, @notesProposal,
-               @notesBase, @agentLog)
+               @rawResponse, @mode, @tokensIn, @tokensOut, @viewedFiles, @overviewReason,
+               @agentLog)
        RETURNING id`,
     )
     .get({
@@ -813,8 +814,7 @@ export function recordAnalysis(params: {
       tokensIn: params.tokensIn ?? 0,
       tokensOut: params.tokensOut ?? 0,
       viewedFiles: params.viewedFiles ? JSON.stringify(params.viewedFiles) : null,
-      notesProposal: params.notesProposal ?? null,
-      notesBase: params.notesBase ?? null,
+      overviewReason: params.overviewReason ?? null,
       agentLog: params.agentLog || null,
     }) as { id: number };
   return row.id;
@@ -1064,33 +1064,45 @@ export function addProjectNotes(
 }
 
 /**
- * The PR reached the main branch: the notes its review proposed become current, if the
- * review was of the merged head and the notes have not changed since it read them.
+ * The PR reached the main branch: the reason its review gave for re-reading the project, if
+ * the review was of the merged head. Taken once — a repeated close event finds nothing.
  */
-export function applyNotesProposal(prId: number): boolean {
+export function takeOverviewRequest(prId: number): string | null {
   const db = getDb();
   const row = db
     .prepare(
-      `SELECT a.id, a.notes_proposal AS proposal, a.notes_base AS base, pr.project_id AS projectId
+      `SELECT a.id, a.overview_reason AS reason
        FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
        WHERE a.pull_request_id = @prId AND a.trigger = 'commit' AND a.outcome = 'ok'
          AND a.head_sha = pr.head_sha
        ORDER BY a.id DESC LIMIT 1`,
     )
-    .get({ prId }) as { id: number; proposal: string | null; base: number | null; projectId: number } | undefined;
-  if (!row?.proposal) return false;
-  if ((getProjectNotes(row.projectId)?.id ?? null) !== row.base) return false;
-  db.exec("BEGIN");
-  try {
-    addProjectNotes(row.projectId, row.proposal, { analysisId: row.id });
-    // Applied once: a repeated close event of the same PR does not apply it again.
-    db.prepare("UPDATE analyses SET notes_proposal = NULL WHERE id = @id").run({ id: row.id });
-    db.exec("COMMIT");
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
-  return true;
+    .get({ prId }) as { id: number; reason: string | null } | undefined;
+  if (!row?.reason) return null;
+  db.prepare("UPDATE analyses SET overview_reason = NULL WHERE id = @id").run({ id: row.id });
+  return row.reason;
+}
+
+export interface OverviewRequest {
+  prNumber: number;
+  reason: string;
+}
+
+/** Open PRs whose latest review asks to re-read the project once they are merged. */
+export function pendingOverviewRequests(projectId: number): OverviewRequest[] {
+  return getDb()
+    .prepare(
+      `SELECT pr.number AS prNumber, a.overview_reason AS reason
+       FROM pull_requests pr
+       JOIN analyses a ON a.id = (SELECT a2.id FROM analyses a2
+                                  WHERE a2.pull_request_id = pr.id AND a2.trigger = 'commit' AND a2.outcome = 'ok'
+                                    AND a2.head_sha = pr.head_sha
+                                  ORDER BY a2.id DESC LIMIT 1)
+       WHERE pr.project_id = @projectId AND COALESCE(pr.state, 'open') = 'open'
+         AND a.overview_reason IS NOT NULL
+       ORDER BY pr.number`,
+    )
+    .all({ projectId }) as unknown as OverviewRequest[];
 }
 
 // --- Project overview and memory cursor ---

@@ -250,21 +250,21 @@ check("…the model can neither reopen it nor raise it as new",
 const notesProject = store.createProjectManual("org", "notes");
 const prO = store.upsertPullRequest(notesProject, 1, { state: "open", headSha: "o-head", headRef: "feat-o", mergedIntoDefault: false });
 store.addProjectNotes(notesProject, "initial notes", { actor: "sup" });
-const base = store.getProjectNotes(notesProject)!.id;
-store.recordAnalysis({ prId: prO, headSha: "o-head", trigger: "commit", outcome: "ok", notesProposal: "notes from PR", notesBase: base });
-check("proposed notes wait for the merge", store.getProjectNotes(notesProject)!.body === "initial notes");
+store.recordAnalysis({ prId: prO, headSha: "o-head", trigger: "commit", outcome: "ok", overviewReason: "first code" });
+check("a PR review leaves the notes alone", store.getProjectNotes(notesProject)!.body === "initial notes");
+check("an open PR asking to re-read the project is listed",
+  JSON.stringify(store.pendingOverviewRequests(notesProject)) === JSON.stringify([{ prNumber: 1, reason: "first code" }]));
+store.upsertPullRequest(notesProject, 1, { state: "merged", headSha: "o-head", headRef: "feat-o", mergedIntoDefault: true });
 store.recordPullRequestClosed(prO, "merged-default");
-store.applyNotesProposal(prO);
-check("a merged PR's notes become current", store.getProjectNotes(notesProject)!.body === "notes from PR");
-check("…once", !store.applyNotesProposal(prO));
-const prP = store.upsertPullRequest(notesProject, 2, { state: "open", headSha: "p-head", headRef: "feat-p", mergedIntoDefault: false });
-store.recordAnalysis({ prId: prP, headSha: "p-head", trigger: "commit", outcome: "ok", notesProposal: "stale proposal", notesBase: base });
-store.applyNotesProposal(prP);
-check("notes proposed over an older version are dropped", store.getProjectNotes(notesProject)!.body === "notes from PR");
-const prQ = store.upsertPullRequest(notesProject, 3, { state: "open", headSha: "q-new", headRef: "feat-q", mergedIntoDefault: false });
-store.recordAnalysis({ prId: prQ, headSha: "q-old", trigger: "commit", outcome: "ok", notesProposal: "unreviewed head", notesBase: store.getProjectNotes(notesProject)!.id });
-store.applyNotesProposal(prQ);
-check("notes of a review of an older commit are dropped", store.getProjectNotes(notesProject)!.body === "notes from PR");
+check("…not once it is merged", store.pendingOverviewRequests(notesProject).length === 0);
+check("the merged PR's request is taken", store.takeOverviewRequest(prO) === "first code");
+check("…once", store.takeOverviewRequest(prO) === null);
+const prP = store.upsertPullRequest(notesProject, 2, { state: "open", headSha: "p-new", headRef: "feat-p", mergedIntoDefault: false });
+store.recordAnalysis({ prId: prP, headSha: "p-old", trigger: "commit", outcome: "ok", overviewReason: "stale" });
+check("a request from a review of an older commit is ignored",
+  store.takeOverviewRequest(prP) === null && store.pendingOverviewRequests(notesProject).length === 0);
+store.recordAnalysis({ prId: prP, headSha: "p-new", trigger: "commit", outcome: "ok" });
+check("a review without a reason asks for nothing", store.takeOverviewRequest(prP) === null);
 
 // --- project overview ------------------------------------------------------------------
 

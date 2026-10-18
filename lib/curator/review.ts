@@ -9,6 +9,7 @@ import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
 import { advanceMemory } from "@/lib/curator/memory";
 import { verifyFindings } from "@/lib/curator/verify";
+import { startOverview } from "@/lib/curator/overview";
 import { agentRules, reviewPrompt } from "@/lib/curator/prompts";
 import {
   FINDING_AREAS,
@@ -21,13 +22,13 @@ import {
 import { areaLabel, locationText, plural, severityLabel, severityRank } from "@/lib/format";
 import {
   adoptMergedBranchFindings,
-  applyNotesProposal,
   applyReconciliation,
   enqueueCommitJob,
   finishJob,
   getJobCheckRun,
   getPullRequest,
   setJobCheckRun,
+  takeOverviewRequest,
   getPullRequestHead,
   hasJobForHead,
   getProjectByRepo,
@@ -178,7 +179,7 @@ export function parseModelJson(raw: string): ReconcileResult | null {
   }
 
   const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
-  return { summary, findings, notes: str(obj.notes) };
+  return { summary, findings, notes: str(obj.notes), refreshOverview: str(obj.refresh_overview) };
 }
 
 /**
@@ -364,7 +365,7 @@ async function runReview(
     attempt?: number;
   } = {},
 ): Promise<ReviewOutcome> {
-  const { prompt, materials, priorIds, reopenableIds, notesBase, changed } = await collectReviewContext(params, prId);
+  const { prompt, materials, priorIds, reopenableIds, changed } = await collectReviewContext(params, prId);
   const tokens = emptySpend();
   const spend = (answer: ChatResult) => addSpend(tokens, answer.usage, answer.provider);
   let mode: AnalysisMode = "diff";
@@ -409,9 +410,8 @@ async function runReview(
       tokensIn: tokens.input,
       tokensOut: tokens.output,
       viewedFiles: viewed,
-      // Notes proposed by a commit review take effect when the PR reaches the main branch.
-      notesProposal: outcome === "ok" && trigger === "commit" ? (result?.parsed?.notes ?? null) : null,
-      notesBase,
+      // A commit review may ask to re-read the project once the PR reaches the main branch.
+      overviewReason: outcome === "ok" && trigger === "commit" ? (result?.parsed?.refreshOverview ?? null) : null,
       agentLog,
     });
 
@@ -478,8 +478,8 @@ async function runReview(
     changed,
     branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
   });
-  // Reviewed after the merge into the main branch: its notes apply now.
-  if (trigger === "commit" && fixesFinal) applyNotesProposal(prId);
+  // Reviewed after the merge into the main branch: a requested overview starts now.
+  if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId);
   // Findings of other PRs the model only left open go to the list of the rest of the project,
   // not among this PR's findings; so the student sees the whole project without repeats.
   const open = loadOpenFindings(prId).filter((f) => f.status !== "pending");
@@ -740,11 +740,21 @@ export interface ClosedPullRequest {
   merge_commit_sha?: string | null;
 }
 
+/** The PR reached the main branch: queue the overview its review asked for, if any. */
+function overviewAfterMerge(prId: number): void {
+  const pr = getPullRequest(prId);
+  const reason = pr ? takeOverviewRequest(prId) : null;
+  if (pr && reason) {
+    console.log(`[curator] PR #${pr.number} merged, re-reading the project: ${reason}`);
+    startOverview(pr.projectId, "merge");
+  }
+}
+
 /**
  * A PR was closed: remember its final state and branches, settle its findings (see
  * recordPullRequestClosed) and, if it was not merged, drop its waiting review — its code
- * never lands. Merged into the main branch, its proposed notes apply and the project memory
- * moves on to the merge commit. Without `pr` the PR is fetched from GitHub (a close event
+ * never lands. Merged into the main branch, the overview its review asked for is queued and the
+ * project memory moves on to the merge commit. Without `pr` the PR is fetched from GitHub (a close event
  * that was missed).
  */
 export async function handlePullRequestClosed(
@@ -764,7 +774,7 @@ export async function handlePullRequestClosed(
     author: data.user?.login ?? null,
     title: data.title ?? null,
     state: data.merged ? "merged" : "closed",
-    // The commit that was merged: its review decides whether proposed notes apply.
+    // The commit that was merged: its review decides whether the project is re-read.
     headSha: data.head.sha ?? null,
     baseRef: data.base.ref,
     headRef: data.head.ref,
@@ -772,7 +782,7 @@ export async function handlePullRequestClosed(
   });
   recordPullRequestClosed(prId, !data.merged ? "closed" : mergedIntoDefault ? "merged-default" : "merged-other");
   if (mergedIntoDefault) {
-    applyNotesProposal(prId);
+    overviewAfterMerge(prId);
     if (data.merge_commit_sha) {
       await advanceMemory(project, data.merge_commit_sha, installationId).catch((error) =>
         console.warn(`[curator] memory of ${project.owner}/${project.repo} not advanced:`, error),
