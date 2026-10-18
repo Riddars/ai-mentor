@@ -3,7 +3,7 @@ import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
 import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
-import { addSpend, emptySpend, mergeSpend, spendRub, type Spend } from "@/lib/llm/prices";
+import { addSpend, emptySpend, mergeSpend, type Spend } from "@/lib/llm/spend";
 import { reviewMode } from "@/lib/config";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
@@ -349,7 +349,7 @@ async function runReview(
 ): Promise<ReviewOutcome> {
   const { prompt, materials, priorIds, reopenableIds, notesBase, changed } = await collectReviewContext(params, prId);
   const tokens = emptySpend();
-  const spend = (answer: ChatResult) => addSpend(tokens, answer.usage, answer.provider, answer.model);
+  const spend = (answer: ChatResult) => addSpend(tokens, answer.usage, answer.provider);
   let mode: AnalysisMode = "diff";
   let viewed: string[] | null = null;
   let result: { answer: ChatResult; parsed: ReconcileResult | null } | null = null;
@@ -391,7 +391,6 @@ async function runReview(
       mode,
       tokensIn: tokens.input,
       tokensOut: tokens.output,
-      costRub: spendRub(tokens),
       viewedFiles: viewed,
       // Notes proposed by a commit review take effect when the PR reaches the main branch.
       notesProposal: outcome === "ok" && trigger === "commit" ? (result?.parsed?.notes ?? null) : null,
@@ -518,7 +517,7 @@ async function reviewWithAgent(
       { systemPrompt: `${reviewPrompt()}\n\n${agentRules()}`, userPrompt: prompt, changed },
       async ({ reply, provider, model }, root): Promise<AgentOutcome> => {
         const used = { input: reply.tokensIn, output: reply.tokensOut };
-        const tokens = addSpend(emptySpend(), used, provider, model);
+        const tokens = addSpend(emptySpend(), used, provider);
         const usage =
           `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, ` +
           `токенов: ${reply.tokensIn}/${reply.tokensOut}`;
@@ -562,8 +561,8 @@ async function reviewWithAgent(
     // Download, unpacking or the process itself failed: the caller falls back to the diff review.
     const tokens = emptySpend();
     if (error instanceof AgentProcessError) {
-      const { provider, model } = agentModel();
-      addSpend(tokens, error.spent, provider, model);
+      const { provider } = agentModel();
+      addSpend(tokens, error.spent, provider);
     }
     return { failure: `[agent] сбой: ${error instanceof Error ? error.message : String(error)}`, tokens };
   }

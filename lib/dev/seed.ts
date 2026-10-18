@@ -3,7 +3,6 @@ import { getDb } from "@/lib/db";
 import {
   applyReconciliation,
   assignSupervisor,
-  addBalanceEntry,
   deleteProjectCascade,
   loadOpenFindings,
   recordAnalysis,
@@ -78,10 +77,6 @@ function alignDatesToAnalyses(): void {
 
 let shaCounter = 0;
 
-// Demo spend: the review model's prices, rubles per token.
-const DEMO_PRICE = { input: 0.000021672, output: 0.000043345 };
-const DEMO_ACTOR = "demo";
-
 interface ReviewOptions {
   files: string[];
   trigger?: "commit" | "comment";
@@ -120,7 +115,6 @@ function review(
     mode: outcome === "error" ? null : "diff",
     tokensIn,
     tokensOut,
-    costRub: tokensIn * DEMO_PRICE.input + tokensOut * DEMO_PRICE.output,
     materials:
       outcome === "error"
         ? null
@@ -196,8 +190,7 @@ function resetDemo(): void {
       id: number;
     }>
   ).map((r) => r.id);
-  for (const id of ids) deleteProjectCascade(id, false);
-  db().prepare("DELETE FROM balance_entries WHERE actor = @actor").run({ actor: DEMO_ACTOR });
+  for (const id of ids) deleteProjectCascade(id);
 }
 
 export async function seedDemo(): Promise<{ seeded: boolean; message: string }> {
@@ -657,10 +650,6 @@ export async function seedDemo(): Promise<{ seeded: boolean; message: string }> 
   // spectra intentionally left unassigned.
 
   alignDatesToAnalyses();
-  addBalanceEntry({ provider: "selectel", kind: "topup", amountRub: 300, actor: DEMO_ACTOR });
-  db()
-    .prepare("UPDATE balance_entries SET at = datetime('now', '-40 days') WHERE actor = @actor")
-    .run({ actor: DEMO_ACTOR });
   // Demo PRs are created already merged: their findings are the project's.
   db()
     .prepare(

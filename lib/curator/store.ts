@@ -556,21 +556,10 @@ export function projectHasPullRequests(id: number): boolean {
  * project.
  * github_events are not tied to a project and stay.
  */
-/**
- * Delete a project with everything about it. Its spend stays in the balance as "spent"
- * entries unless `keepSpend` is false (demo data).
- */
-export function deleteProjectCascade(id: number, keepSpend = true): void {
+/** Delete a project with everything about it. */
+export function deleteProjectCascade(id: number): void {
   const db = getDb();
   const steps = [
-    ...(keepSpend
-      ? [
-          `INSERT INTO balance_entries (provider, kind, amount_rub, at)
-           SELECT a.provider, 'spent', a.cost_rub, a.created_at
-           FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
-           WHERE pr.project_id = @id AND a.provider IS NOT NULL AND a.cost_rub > 0`,
-        ]
-      : []),
     `DELETE FROM finding_status_history WHERE finding_id IN
        (SELECT f.id FROM findings f JOIN pull_requests pr ON pr.id = f.pull_request_id
         WHERE pr.project_id = @id)`,
@@ -792,8 +781,6 @@ export function recordAnalysis(params: {
   mode?: AnalysisMode | null;
   tokensIn?: number;
   tokensOut?: number;
-  /** Rubles spent; null when some tokens had no price. */
-  costRub?: number | null;
   viewedFiles?: string[] | null;
   /** Notes about the project the review proposes, and the notes version it was given. */
   notesProposal?: string | null;
@@ -805,10 +792,10 @@ export function recordAnalysis(params: {
     .prepare(
       `INSERT INTO analyses
          (pull_request_id, head_sha, trigger, outcome, summary, provider, model, materials,
-          raw_response, mode, tokens_in, tokens_out, cost_rub, viewed_files, notes_proposal,
+          raw_response, mode, tokens_in, tokens_out, viewed_files, notes_proposal,
           notes_base, agent_log)
        VALUES (@prId, @headSha, @trigger, @outcome, @summary, @provider, @model, @materials,
-               @rawResponse, @mode, @tokensIn, @tokensOut, @costRub, @viewedFiles, @notesProposal,
+               @rawResponse, @mode, @tokensIn, @tokensOut, @viewedFiles, @notesProposal,
                @notesBase, @agentLog)
        RETURNING id`,
     )
@@ -825,7 +812,6 @@ export function recordAnalysis(params: {
       mode: params.mode ?? null,
       tokensIn: params.tokensIn ?? 0,
       tokensOut: params.tokensOut ?? 0,
-      costRub: params.costRub === undefined ? 0 : params.costRub,
       viewedFiles: params.viewedFiles ? JSON.stringify(params.viewedFiles) : null,
       notesProposal: params.notesProposal ?? null,
       notesBase: params.notesBase ?? null,
@@ -850,37 +836,76 @@ export function recentTokens(projectId: number | null): number {
   return row.tokens;
 }
 
-// --- Usage and balance ---
+// --- Usage ---
 
-/** Spend of one local day; `unpriced` — tokens of analyses without a price. */
-export interface DaySpend {
-  day: string;
-  rub: number;
-  tokens: number;
-  analyses: number;
-  unpriced: number;
+/** What a model run was for: a commit review, a check of a student's reply, an overview. */
+export type WorkKind = "commit" | "comment" | "overview";
+
+export const WORK_KINDS: readonly WorkKind[] = ["commit", "comment", "overview"];
+
+const TOKENS = "COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)";
+
+/** Tokens of each kind of work, by the analysis trigger (quoted: COMMIT is an SQL keyword). */
+const TOKENS_BY_KIND = WORK_KINDS.map(
+  (k) => `COALESCE(SUM(CASE WHEN a.trigger = '${k}' THEN ${TOKENS} ELSE 0 END), 0) AS "${k}"`,
+).join(", ");
+
+/** Analyses in the viewer's scope, optionally of one project, over the last `days` local days. */
+function usageFilter(days: number, supervisorId?: string, projectId?: number) {
+  const s = scope(supervisorId);
+  return {
+    where: `pr.project_id IN (${s.projectIds})
+         AND (@projectId IS NULL OR pr.project_id = @projectId)
+         AND date(a.created_at, 'localtime') > date('now', 'localtime', @since)`,
+    params: { ...s.params, projectId: projectId ?? null, since: `-${days} days` },
+  };
 }
 
-/** Spend per local day over the last `days` days (oldest first, days without spend left out). */
-export function spendByDay(days: number, supervisorId?: string): DaySpend[] {
-  const s = scope(supervisorId);
+/** Tokens of one local day by kind of work; `runs` — model runs that day. */
+export interface DayUsage extends Record<WorkKind, number> {
+  day: string;
+  runs: number;
+}
+
+/** Usage per local day over the last `days` days (oldest first, days without runs left out). */
+export function usageByDay(days: number, supervisorId?: string, projectId?: number): DayUsage[] {
+  const f = usageFilter(days, supervisorId, projectId);
   return getDb()
     .prepare(
-      `SELECT date(a.created_at, 'localtime') AS day,
-              COALESCE(SUM(a.cost_rub), 0) AS rub,
-              COALESCE(SUM(COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)), 0) AS tokens,
-              COUNT(*) AS analyses,
-              COALESCE(SUM(CASE WHEN a.cost_rub IS NULL
-                THEN COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0) ELSE 0 END), 0) AS unpriced
+      `SELECT date(a.created_at, 'localtime') AS day, COUNT(*) AS runs, ${TOKENS_BY_KIND}
        FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
-       WHERE pr.project_id IN (${s.projectIds})
-         AND date(a.created_at, 'localtime') > date('now', 'localtime', @since)
+       WHERE ${f.where}
        GROUP BY day ORDER BY day`,
     )
-    .all({ ...s.params, since: `-${days} days` }) as unknown as DaySpend[];
+    .all(f.params) as unknown as DayUsage[];
 }
 
-export interface ProjectSpend {
+export interface KindUsage {
+  kind: WorkKind;
+  runs: number;
+  /** Runs that failed (error, unreadable answer); their tokens count too. */
+  failures: number;
+  tokens: number;
+}
+
+/** Usage per kind of work over the last `days` days; every kind is listed. */
+export function usageByKind(days: number, supervisorId?: string, projectId?: number): KindUsage[] {
+  const f = usageFilter(days, supervisorId, projectId);
+  const rows = getDb()
+    .prepare(
+      `SELECT a.trigger AS kind, COUNT(*) AS runs,
+              SUM(CASE WHEN a.outcome IN ('error', 'parse_error') THEN 1 ELSE 0 END) AS failures,
+              COALESCE(SUM(${TOKENS}), 0) AS tokens
+       FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
+       WHERE ${f.where}
+       GROUP BY a.trigger`,
+    )
+    .all(f.params) as unknown as KindUsage[];
+  const byKind = new Map(rows.map((r) => [r.kind, r]));
+  return WORK_KINDS.map((kind) => byKind.get(kind) ?? { kind, runs: 0, failures: 0, tokens: 0 });
+}
+
+export interface ProjectUsage extends Record<WorkKind, number> {
   id: number;
   owner: string;
   repo: string;
@@ -892,34 +917,28 @@ export interface ProjectSpend {
   /** Commits whose check was concluded without a review: daily limit or token budget. */
   notReviewed: number;
   tokens: number;
-  rub: number;
-  /** Tokens of analyses without a price. */
-  unpriced: number;
   /** Tokens in the last 24 hours, compared with the project's daily budget. */
   dayTokens: number;
 }
 
-/** Per-project spend and activity over the last `days` days. */
-export function spendByProject(days: number, supervisorId?: string): ProjectSpend[] {
+/** Per-project usage and activity over the last `days` days. */
+export function usageByProject(days: number, supervisorId?: string): ProjectUsage[] {
   const s = scope(supervisorId);
+  const kinds = WORK_KINDS.map((k) => `COALESCE(a."${k}", 0) AS "${k}"`).join(", ");
   return getDb()
     .prepare(
       `SELECT p.id, p.owner, p.repo, p.name,
               COALESCE(a.reviews, 0) AS reviews, COALESCE(a.failures, 0) AS failures,
-              COALESCE(j.notReviewed, 0) AS notReviewed,
-              COALESCE(a.tokens, 0) AS tokens, COALESCE(a.rub, 0) AS rub,
-              COALESCE(a.unpriced, 0) AS unpriced, COALESCE(a.dayTokens, 0) AS dayTokens
+              COALESCE(j.notReviewed, 0) AS notReviewed, ${kinds},
+              COALESCE(a.tokens, 0) AS tokens, COALESCE(a.dayTokens, 0) AS dayTokens
        FROM projects p
        LEFT JOIN (
          SELECT pr.project_id,
                 SUM(CASE WHEN a.outcome = 'ok' THEN 1 ELSE 0 END) AS reviews,
                 SUM(CASE WHEN a.outcome IN ('error', 'parse_error') THEN 1 ELSE 0 END) AS failures,
-                SUM(COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)) AS tokens,
-                SUM(a.cost_rub) AS rub,
-                SUM(CASE WHEN a.cost_rub IS NULL
-                  THEN COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0) ELSE 0 END) AS unpriced,
-                SUM(CASE WHEN a.created_at > datetime('now', '-1 day')
-                  THEN COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0) ELSE 0 END) AS dayTokens
+                ${TOKENS_BY_KIND},
+                SUM(${TOKENS}) AS tokens,
+                SUM(CASE WHEN a.created_at > datetime('now', '-1 day') THEN ${TOKENS} ELSE 0 END) AS dayTokens
          FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
          WHERE date(a.created_at, 'localtime') > date('now', 'localtime', @since)
          GROUP BY pr.project_id
@@ -932,125 +951,9 @@ export function spendByProject(days: number, supervisorId?: string): ProjectSpen
          GROUP BY pr.project_id
        ) j ON j.project_id = p.id
        WHERE p.id IN (${s.projectIds})
-       ORDER BY rub DESC, tokens DESC, p.name, p.repo`,
+       ORDER BY tokens DESC, p.name, p.repo`,
     )
-    .all({ ...s.params, since: `-${days} days` }) as unknown as ProjectSpend[];
-}
-
-export type BalanceKind = "topup" | "balance";
-
-/**
- * A top-up of a provider's account, or its balance read from the provider's dashboard.
- * Spend of deleted projects is kept as "spent" entries, not listed.
- */
-export interface BalanceEntry {
-  id: number;
-  provider: string;
-  kind: BalanceKind;
-  amountRub: number;
-  at: string;
-  actor: string | null;
-}
-
-export function listBalanceEntries(): BalanceEntry[] {
-  return getDb()
-    .prepare(
-      `SELECT id, provider, kind, amount_rub AS amountRub, at, actor
-       FROM balance_entries WHERE kind IN ('topup', 'balance') ORDER BY at DESC, id DESC`,
-    )
-    .all() as unknown as BalanceEntry[];
-}
-
-/** Recorded at the current moment: the balance changes from then on. */
-export function addBalanceEntry(entry: Omit<BalanceEntry, "id" | "at">): void {
-  getDb()
-    .prepare(
-      `INSERT INTO balance_entries (provider, kind, amount_rub, at, actor)
-       VALUES (@provider, @kind, @amountRub, datetime('now'), @actor)`,
-    )
-    .run({ ...entry });
-}
-
-export function deleteBalanceEntry(id: number): void {
-  getDb()
-    .prepare("DELETE FROM balance_entries WHERE id = @id AND kind IN ('topup', 'balance')")
-    .run({ id });
-}
-
-export interface ProviderBalance {
-  provider: string;
-  /** Approximate rubles left: the last balance read, plus later top-ups, minus later spend. */
-  rub: number;
-  /** Average spend per day over the last 7 days (or the shorter history); 0 when nothing was spent. */
-  dailyRub: number;
-  /** Tokens counted against the balance that had no price, so the balance is overstated. */
-  unpriced: number;
-}
-
-/**
- * Approximate balance per provider with entries. The start is the latest balance read (or the
- * first top-up when there is none); spend is what analyses of the provider cost since then.
- * Entry times are UTC like the rest of the database.
- */
-export function providerBalances(): ProviderBalance[] {
-  const db = getDb();
-  const providers = db
-    .prepare(
-      "SELECT DISTINCT provider FROM balance_entries WHERE kind IN ('topup', 'balance') ORDER BY provider",
-    )
-    .all() as Array<{ provider: string }>;
-  return providers.map(({ provider }) => {
-    const base = db
-      .prepare(
-        `SELECT amount_rub AS amount, at FROM balance_entries
-         WHERE provider = @provider AND kind = 'balance' ORDER BY at DESC, id DESC LIMIT 1`,
-      )
-      .get({ provider }) as { amount: number; at: string } | undefined;
-    const since =
-      base?.at ??
-      (db
-        .prepare(
-          "SELECT MIN(at) AS at FROM balance_entries WHERE provider = @provider AND kind IN ('topup', 'balance')",
-        )
-        .get({ provider }) as { at: string }).at;
-    const topups = db
-      .prepare(
-        `SELECT COALESCE(SUM(amount_rub), 0) AS sum FROM balance_entries
-         WHERE provider = @provider AND kind = 'topup' AND at ${base ? ">" : ">="} @since`,
-      )
-      .get({ provider, since }) as { sum: number };
-    const spent = db
-      .prepare(
-        `SELECT COALESCE(SUM(cost_rub), 0) AS rub,
-                COALESCE(SUM(CASE WHEN cost_rub IS NULL
-                  THEN COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0) ELSE 0 END), 0) AS unpriced
-         FROM analyses WHERE provider = @provider AND created_at > @since`,
-      )
-      .get({ provider, since }) as { rub: number; unpriced: number };
-    const deleted = db
-      .prepare(
-        `SELECT COALESCE(SUM(amount_rub), 0) AS rub FROM balance_entries
-         WHERE provider = @provider AND kind = 'spent' AND at > @since`,
-      )
-      .get({ provider, since }) as { rub: number };
-    const week = db
-      .prepare(
-        `SELECT COALESCE(SUM(cost_rub), 0) AS rub,
-                julianday('now') - julianday(MIN(created_at)) AS days
-         FROM analyses WHERE provider = @provider AND created_at > datetime('now', '-7 days')`,
-      )
-      .get({ provider }) as { rub: number; days: number | null };
-    const history = db
-      .prepare("SELECT julianday('now') - julianday(MIN(created_at)) AS days FROM analyses WHERE provider = @provider")
-      .get({ provider }) as { days: number | null };
-    const span = Math.min(7, Math.max(1, history.days ?? 7));
-    return {
-      provider,
-      rub: (base?.amount ?? 0) + topups.sum - spent.rub - deleted.rub,
-      dailyRub: week.rub / span,
-      unpriced: spent.unpriced,
-    };
-  });
+    .all({ ...s.params, since: `-${days} days` }) as unknown as ProjectUsage[];
 }
 
 /** Remember the comment actually published to the pull request for an analysis. */

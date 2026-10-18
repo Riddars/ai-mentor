@@ -379,14 +379,11 @@ check("an overview by the button runs over the project's budget", await runOverv
 check("an automatic overview waits for the project's budget", !(await runOverviewOnce("gap")));
 process.env.TOKENS_PER_PROJECT_DAY = "0";
 
-// --- spend, balance, roles ------------------------------------------------------------
-const prices = await import("@/lib/llm/prices");
-process.env.LLM_PRICES = "selectel:deepseek/deepseek-v4-pro=20/40; provod:m=1/2";
-const spent = prices.addSpend(prices.emptySpend(), { input: 1_000_000, output: 500_000 }, "selectel", "deepseek/deepseek-v4-pro");
-check("prices: rubles per million tokens", Math.abs(spent.rub - 40) < 1e-9 && !spent.unpriced, String(spent.rub));
-prices.addSpend(spent, { input: 10, output: 0 }, "selectel", "unknown-model");
-check("prices: a model without a price makes the spend unknown", prices.spendRub(spent) === null);
-check("prices: no tokens cost nothing", prices.spendRub(prices.emptySpend()) === 0);
+// --- usage, roles ------------------------------------------------------------------------
+const spendLib = await import("@/lib/llm/spend");
+const spent = spendLib.addSpend(spendLib.emptySpend(), { input: 1000, output: 500 }, "selectel");
+spendLib.addSpend(spent, { input: 0, output: 0 }, "provod");
+check("spend: tokens add up, an empty call keeps the provider", spent.input === 1000 && spent.output === 500 && spent.provider === "selectel");
 
 db.prepare(
   "INSERT INTO users (id, login, password_salt, password_hash, role) VALUES ('u-sup', 'sup', '', '', 'supervisor')",
@@ -396,35 +393,37 @@ const own = store.createProjectManual("org", "own", undefined, sup.id);
 check("a supervisor who connects a project is assigned to it", store.isSupervisorOf(sup.id, own));
 const prOwn = pr(50, "feat-own");
 db.prepare("UPDATE pull_requests SET project_id = @own WHERE id = @prOwn").run({ own, prOwn });
-store.recordAnalysis({ prId: prOwn, headSha: "o1", trigger: "commit", outcome: "ok", provider: "selectel", tokensIn: 1000, tokensOut: 100, costRub: 2.5 });
-store.recordAnalysis({ prId: prOwn, headSha: "o2", trigger: "commit", outcome: "error", provider: "selectel", tokensIn: 500, tokensOut: 0, costRub: 1 });
-store.recordAnalysis({ prId: prOwn, headSha: "o3", trigger: "commit", outcome: "ok", provider: "selectel", tokensIn: 300, tokensOut: 0, costRub: null });
-const supSpend = store.spendByProject(30, sup.id);
-const ownRow = supSpend.find((p) => p.id === own);
-check("spend by project: a supervisor sees only their projects", supSpend.length === 1 && ownRow !== undefined);
+store.recordAnalysis({ prId: prOwn, headSha: "o1", trigger: "commit", outcome: "ok", provider: "selectel", tokensIn: 1000, tokensOut: 100 });
+store.recordAnalysis({ prId: prOwn, headSha: "o2", trigger: "commit", outcome: "error", provider: "selectel", tokensIn: 500, tokensOut: 0 });
+store.recordAnalysis({ prId: prOwn, headSha: "o3", trigger: "comment", outcome: "ok", provider: "selectel", tokensIn: 300, tokensOut: 0 });
+store.recordAnalysis({ prId: prOwn, headSha: "o4", trigger: "overview", outcome: "ok", provider: "selectel", tokensIn: 2000, tokensOut: 200 });
+const supUsage = store.usageByProject(30, sup.id);
+const ownRow = supUsage.find((p) => p.id === own);
+check("usage by project: a supervisor sees only their projects", supUsage.length === 1 && ownRow !== undefined);
 check(
-  "spend by project: reviews, failures, tokens, rubles, unpriced",
-  ownRow?.reviews === 2 && ownRow.failures === 1 && ownRow.tokens === 1900 && Math.abs(ownRow.rub - 3.5) < 1e-9 && ownRow.unpriced === 300,
+  "usage by project: reviews, failures, tokens by kind",
+  ownRow?.reviews === 3 && ownRow.failures === 1 && ownRow.tokens === 4100 &&
+    ownRow.commit === 1600 && ownRow.comment === 300 && ownRow.overview === 2200 && ownRow.dayTokens === 4100,
   JSON.stringify(ownRow),
 );
-const supDays = store.spendByDay(7, sup.id);
-check("spend by day: today's rubles", supDays.length === 1 && Math.abs(supDays[0].rub - 3.5) < 1e-9, JSON.stringify(supDays));
-check("spend by project: the head sees all projects", store.spendByProject(30).length > 1);
-
-db.prepare("UPDATE analyses SET created_at = datetime('now', '-2 days') WHERE provider = 'selectel'").run();
-store.addBalanceEntry({ provider: "selectel", kind: "topup", amountRub: 100, actor: "head" });
-db.prepare("UPDATE balance_entries SET at = datetime('now', '-3 days')").run();
-let providerBal = store.providerBalances().find((b) => b.provider === "selectel");
-check("balance: top-ups minus spend since the first top-up", providerBal !== undefined && Math.abs(providerBal.rub - 96.5) < 1e-9, JSON.stringify(providerBal));
-check("balance: unpriced tokens are flagged", providerBal?.unpriced === 300);
-check("balance: daily average over a short history", providerBal !== undefined && Math.abs(providerBal.dailyRub - 3.5 / 2) < 0.01, JSON.stringify(providerBal));
+const supDays = store.usageByDay(7, sup.id);
+check(
+  "usage by day: today's tokens by kind",
+  supDays.length === 1 && supDays[0].runs === 4 && supDays[0].commit === 1600 && supDays[0].overview === 2200,
+  JSON.stringify(supDays),
+);
+const ownKinds = store.usageByKind(30, undefined, own);
+check(
+  "usage by kind: one project, every kind listed",
+  ownKinds.map((k) => `${k.kind}:${k.runs}/${k.failures}/${k.tokens}`).join(" ") === "commit:2/1/1600 comment:1/0/300 overview:1/0/2200",
+  JSON.stringify(ownKinds),
+);
+check("usage by kind: the head sees more than one project", store.usageByKind(30).reduce((s, k) => s + k.tokens, 0) > 4100);
+check("usage by project: the head sees all projects", store.usageByProject(30).length > 1);
+db.prepare("UPDATE analyses SET created_at = datetime('now', '-10 days') WHERE head_sha = 'o4'").run();
+check("usage: the period leaves older runs out", store.usageByKind(7, undefined, own)[2].runs === 0);
 store.deleteProjectCascade(own);
-providerBal = store.providerBalances().find((b) => b.provider === "selectel");
-check("balance: deleting a project keeps its spend", providerBal !== undefined && Math.abs(providerBal.rub - 96.5) < 1e-9, JSON.stringify(providerBal));
-check("balance: kept spend is not listed as an entry", store.listBalanceEntries().every((e) => e.kind !== ("spent" as string)));
-store.addBalanceEntry({ provider: "selectel", kind: "balance", amountRub: 90, actor: "head" });
-providerBal = store.providerBalances().find((b) => b.provider === "selectel");
-check("balance: a balance read restarts the count", providerBal !== undefined && Math.abs(providerBal.rub - 90) < 1e-9, JSON.stringify(providerBal));
+check("deleting a project removes its usage", store.usageByProject(30).every((p) => p.id !== own));
 
 // --- heartbeat: queue problems -----------------------------------------------------------
 

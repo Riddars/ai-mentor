@@ -2,7 +2,7 @@ import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
-import { addSpend, emptySpend, mergeSpend, spendRub } from "@/lib/llm/prices";
+import { addSpend, emptySpend, mergeSpend } from "@/lib/llm/spend";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { getConfig } from "@/lib/config";
 import { dismissedFindingsText, notesText, priorFindingsText, selectDismissedFindings, selectPriorFindings } from "@/lib/curator/context";
@@ -99,7 +99,6 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       mode: "agent",
       tokensIn: tokens.input,
       tokensOut: tokens.output,
-      costRub: spendRub(tokens),
       ...extra,
     });
 
@@ -110,7 +109,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       { owner: project.owner, repo: project.repo, headSha, installationId },
       { systemPrompt: overviewPrompt(), userPrompt, changed: [], limits: OVERVIEW_LIMITS },
       async ({ reply, provider, model }, root) => {
-        addSpend(tokens, { input: reply.tokensIn, output: reply.tokensOut }, provider, model);
+        addSpend(tokens, { input: reply.tokensIn, output: reply.tokensOut }, provider);
         const usage = `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, токенов: ${reply.tokensIn}/${reply.tokensOut}`;
         if (reply.error) {
           failedLog = reply.transcript;
@@ -173,8 +172,8 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       return;
     }
     if (error instanceof AgentProcessError) {
-      const { provider, model } = agentModel();
-      addSpend(tokens, error.spent, provider, model);
+      const { provider } = agentModel();
+      addSpend(tokens, error.spent, provider);
     }
     if (tokens.input + tokens.output > 0) {
       record("error", { rawResponse: error instanceof Error ? error.message : String(error), agentLog: failedLog });

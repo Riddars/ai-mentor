@@ -1,7 +1,7 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
-import { addSpend, emptySpend, type Spend } from "@/lib/llm/prices";
+import { addSpend, emptySpend, type Spend } from "@/lib/llm/spend";
 import { notebookCells } from "@/lib/curator/notebook";
 import { lineRange } from "@/lib/curator/scope";
 import { verifyPrompt } from "@/lib/curator/prompts";
@@ -155,7 +155,7 @@ export async function verifyFindings(
     ];
     try {
       const answer = await ask(messages);
-      tokens = addSpend(tokens, answer.usage, answer.provider, answer.model);
+      tokens = addSpend(tokens, answer.usage, answer.provider);
       const verdicts = parseVerdicts(answer.content);
       if (verdicts) {
         checkedByModel = true;

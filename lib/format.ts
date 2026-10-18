@@ -47,14 +47,6 @@ export function daysSince(iso: string | null): string {
   return days < 1 ? "сегодня" : `${days} ${plural(days, "день", "дня", "дней")}`;
 }
 
-const RUB = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
-const RUB_WHOLE = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
-
-/** "34,20 ₽" under a thousand, "3 420 ₽" above. */
-export function formatRub(rub: number): string {
-  return `${Math.abs(rub) < 1000 ? RUB.format(rub) : RUB_WHOLE.format(rub)} ₽`;
-}
-
 const ONE_DECIMAL = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 
 /** "850", "45 тыс.", "1,2 млн". */
@@ -62,19 +54,6 @@ export function formatTokens(tokens: number): string {
   if (tokens < 1000) return String(tokens);
   if (tokens < 1_000_000) return `${Math.round(tokens / 1000)} тыс.`;
   return `${ONE_DECIMAL.format(tokens / 1_000_000)} млн`;
-}
-
-export const KNOWN_PROVIDERS = ["selectel", "provod"];
-
-const PROVIDER_LABEL: Record<string, string> = {
-  provod: "provod.ai",
-  selectel: "Selectel",
-  openai: "OpenAI",
-  openrouter: "OpenRouter",
-};
-
-export function providerLabel(provider: string): string {
-  return PROVIDER_LABEL[provider] ?? provider;
 }
 
 export function fullDate(iso: string | null): string {
@@ -188,6 +167,17 @@ export function prLabel(number: number): string {
 
 export function triggerLabel(trigger: string): string {
   return TRIGGER_LABEL[trigger] ?? trigger;
+}
+
+const WORK_KIND_LABEL: Record<string, string> = {
+  commit: "Разбор PR",
+  comment: "Сверка по ответу студента",
+  overview: "Полный обзор",
+};
+
+/** A kind of model work on the usage page, by the analysis trigger. */
+export function workKindLabel(kind: string): string {
+  return WORK_KIND_LABEL[kind] ?? kind;
 }
 
 const ROLE_LABEL: Record<Role, string> = {
