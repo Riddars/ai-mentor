@@ -152,7 +152,7 @@ export default async function FindingPage({
               </Field>
             )}
             {(finding.locations.length > 0 || finding.evidence) && (
-              <Field title="Основания">
+              <Field title="Где">
                 <div className="flex flex-col gap-2">
                   {finding.locations.length > 0 && (
                     <ul className="flex flex-col gap-1 text-sm">

@@ -18,7 +18,7 @@ import {
   type LocationKind,
   type Severity,
 } from "@/lib/curator/finding";
-import { areaLabel, locationText, severityLabel } from "@/lib/format";
+import { areaLabel, locationText, plural, severityLabel, severityRank } from "@/lib/format";
 import {
   adoptMergedBranchFindings,
   applyNotesProposal,
@@ -216,6 +216,17 @@ function coverageNote(materials: AnalysisMaterials): string | null {
   );
 }
 
+/** A quoted fragment as a code block; the fence is longer than any backtick run inside. */
+function codeBlock(text: string): string {
+  const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((s) => s.length));
+  const fence = "`".repeat(longest + 1);
+  return `${fence}\n${text.trim()}\n${fence}`;
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
 /** Other open findings of the project listed under a PR comment, at most. */
 const OTHERS_SHOWN = 8;
 
@@ -223,7 +234,7 @@ export function renderComment(
   result: ReconcileResult,
   changes: StatusChange[],
   materials?: AnalysisMaterials,
-  extra: { kept?: KeptFinding[]; viewed?: string[] | null; others?: PriorFinding[] } = {},
+  extra: { kept?: KeptFinding[]; others?: PriorFinding[] } = {},
 ): string {
   const open = result.findings.filter(
     (f) => f.status === "open" || f.status === "reopened",
@@ -237,8 +248,6 @@ export function renderComment(
   }
   const coverage = materials ? coverageNote(materials) : null;
   if (coverage) parts.push(coverage, "");
-  if (extra.viewed) parts.push(`_Просмотрено файлов репозитория: ${extra.viewed.length}._`, "");
-
   if (open.length === 0) {
     parts.push(
       coverage
@@ -248,24 +257,27 @@ export function renderComment(
       "",
     );
   } else {
-    parts.push(`**Существенные находки (${open.length}):**`, "");
-    for (const f of open) {
+    // Most serious first: the list on top and the sections below keep the same numbers.
+    const sorted = [...open].sort((a, b) => severityRank(b.severity ?? null) - severityRank(a.severity ?? null));
+    parts.push(`**Нашёл ${open.length} ${plural(open.length, "проблему", "проблемы", "проблем")}:**`);
+    sorted.forEach((f, i) => parts.push(`${i + 1}. ${publicText(f.title)} — ${severityLabel(f.severity ?? null)}`));
+    parts.push("");
+    sorted.forEach((f, i) => {
       const badge = f.status === "reopened" ? " (открыта повторно)" : "";
-      parts.push(`### ${publicText(f.title)}${badge}`);
-      parts.push(`_${areaLabel(f.area ?? null)} · ${severityLabel(f.severity ?? null)}_`, "");
-      if (f.description) parts.push(publicText(f.description), "");
+      parts.push("---", `### ${i + 1}. ${publicText(f.title)}${badge}`);
+      parts.push(`_${capitalize(severityLabel(f.severity ?? null))} · ${areaLabel(f.area ?? null).toLowerCase()}_`, "");
+      if (f.description) parts.push(`**Что не так:** ${publicText(f.description)}`, "");
+      if (f.evidence) parts.push(codeBlock(f.evidence), "");
       if (f.impact) parts.push(`**Почему это важно:** ${publicText(f.impact)}`, "");
       if (f.locations && f.locations.length > 0) {
-        parts.push("**Основания:**");
-        for (const l of f.locations) {
-          parts.push(`- ${l.kind === "other" ? publicText(locationText(l)) : `\`${locationText(l).replace(/`/g, "")}\``}`);
-        }
-        parts.push("");
+        const where = f.locations.map((l) =>
+          l.kind === "other" ? publicText(locationText(l)) : `\`${locationText(l).replace(/`/g, "")}\``,
+        );
+        parts.push(`**Где:** ${where.join(", ")}`, "");
       }
-      if (f.evidence) parts.push(`**Подтверждение:** ${publicText(f.evidence)}`, "");
-      if (f.verify) parts.push(`**Замечание будет снято, когда:** ${publicText(f.verify)}`, "");
       if (f.recommendation) parts.push(`**Что сделать:** ${publicText(f.recommendation)}`, "");
-    }
+      if (f.verify) parts.push(`**Замечание будет снято, когда:** ${publicText(f.verify)}`, "");
+    });
   }
 
   const resolved = changes.filter((c) => RESOLVED_LABEL[c.newStatus]);
@@ -477,7 +489,7 @@ async function runReview(
 
   return {
     analysisId,
-    comment: renderComment(shown, statusChanges, materials, { kept, viewed, others }),
+    comment: renderComment(shown, statusChanges, materials, { kept, others }),
     outcome: "ok",
     summary: parsed.summary,
     statusChanges,
