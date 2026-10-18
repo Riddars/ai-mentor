@@ -263,7 +263,7 @@ export function renderComment(
         parts.push("");
       }
       if (f.evidence) parts.push(`**Подтверждение:** ${publicText(f.evidence)}`, "");
-      if (f.verify) parts.push(`**Как проверить исправление:** ${publicText(f.verify)}`, "");
+      if (f.verify) parts.push(`**Замечание будет снято, когда:** ${publicText(f.verify)}`, "");
       if (f.recommendation) parts.push(`**Что сделать:** ${publicText(f.recommendation)}`, "");
     }
   }

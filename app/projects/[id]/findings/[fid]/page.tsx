@@ -177,7 +177,7 @@ export default async function FindingPage({
               </Field>
             )}
             {finding.verify && (
-              <Field title="Как проверить исправление">
+              <Field title="Замечание будет снято, когда">
                 <Text value={finding.verify} />
               </Field>
             )}
