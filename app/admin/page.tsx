@@ -7,8 +7,10 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { AddProjectForm } from "@/components/admin/AddProjectForm";
 import { CreateSupervisorForm } from "@/components/admin/CreateSupervisorForm";
+import { CorePromptForm } from "@/components/admin/CorePromptForm";
 import { roleLabel } from "@/lib/format";
 import { projectsHome } from "@/lib/config";
+import { getCorePrompt } from "@/lib/curator/prompts";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +23,7 @@ export default async function AdminPage() {
   const users = isHead ? listUsers() : [];
   const byId = new Map(users.map((u) => [u.id, u]));
   const home = projectsHome();
+  const corePrompt = isHead ? getCorePrompt() : null;
   const newRepoUrl = home
     ? `https://github.com/new?${new URLSearchParams({
         owner: home.org,
@@ -130,6 +133,18 @@ export default async function AdminPage() {
               </ul>
             </CardBody>
           </Card>
+          )}
+
+          {corePrompt && (
+            <Card className="shadow-card">
+              <CardHeader className="flex items-center justify-between">
+                <CardTitle>Промпт куратора: что считать находкой</CardTitle>
+                <Badge tone="neutral">{corePrompt.custom ? "изменён" : "по умолчанию"}</Badge>
+              </CardHeader>
+              <CardBody>
+                <CorePromptForm text={corePrompt.text} custom={corePrompt.custom} />
+              </CardBody>
+            </Card>
           )}
         </div>
       </PageShell>

@@ -28,6 +28,7 @@ import {
 import type { Viewer } from "@/lib/auth";
 import { getRepoInstallationId } from "@/lib/github/auth";
 import { startOverview } from "@/lib/curator/overview";
+import { CORE_MAX_CHARS, getCorePrompt, resetCorePrompt, saveCorePrompt } from "@/lib/curator/prompts";
 
 export type ActionState = { error?: string; ok?: string } | null;
 
@@ -296,4 +297,25 @@ export async function deleteUserAction(
   deleteUser(id);
   refresh();
   redirect("/admin");
+}
+
+/** Replace the core of the curator's prompt; the default text itself means no edit. */
+export async function saveCorePromptAction(_prev: ActionState, form: FormData): Promise<ActionState> {
+  await requireHead();
+  const text = String(form.get("text") ?? "").replace(/\r\n/g, "\n").trim();
+  if (!text) return { error: "Текст не может быть пустым." };
+  if (text.length > CORE_MAX_CHARS) return { error: `Не длиннее ${CORE_MAX_CHARS} знаков.` };
+  const current = getCorePrompt();
+  if (text === current.text) return { ok: "Без изменений." };
+  if (text === current.defaultText) resetCorePrompt();
+  else saveCorePrompt(text);
+  refresh();
+  return { ok: "Сохранено." };
+}
+
+export async function resetCorePromptAction(): Promise<ActionState> {
+  await requireHead();
+  resetCorePrompt();
+  refresh();
+  return { ok: "Возвращён текст по умолчанию." };
 }

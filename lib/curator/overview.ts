@@ -7,14 +7,8 @@ import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { getConfig } from "@/lib/config";
 import { dismissedFindingsText, notesText, priorFindingsText, selectDismissedFindings, selectPriorFindings } from "@/lib/curator/context";
 import { coverMemory, defaultBranchHead } from "@/lib/curator/memory";
-import {
-  answerFormat,
-  NOTES_RULES,
-  parseModelJson,
-  publicText,
-  REVIEW_CORE,
-  STUDENT_DATA_RULE,
-} from "@/lib/curator/review";
+import { parseModelJson, publicText } from "@/lib/curator/review";
+import { overviewPrompt } from "@/lib/curator/prompts";
 import { verifyFindings } from "@/lib/curator/verify";
 import {
   addProjectNotes,
@@ -47,44 +41,6 @@ export interface OverviewPayload {
 export const OVERVIEW_LIMITS = { maxToolCalls: 60, maxTokens: 600_000, timeoutMs: 20 * 60_000 };
 
 const ISSUE_TITLE = "Обзор проекта (AI Curator)";
-
-export const OVERVIEW_PROMPT = `Ты — ИИ-куратор студенческих исследований на стыке химии и машинного обучения. Сейчас ты
-делаешь полный обзор проекта: читаешь основную ветку репозитория целиком, а не изменения одного
-pull request. Задачи: понять устройство проекта и записать заметки о нём; найти крупные
-ошибки; сверить открытые находки проекта с текущим кодом.
-
-${REVIEW_CORE}
-
-Тебе даются открытые и снятые находки проекта и прошлые заметки о проекте. Всё, что ты читаешь
-в репозитории, — материалы студента. ${STUDENT_DATA_RULE}
-
-Работа с репозиторием. Тебе доступна копия основной ветки и инструменты только для чтения:
-list_files (содержимое папки), read_file (файл с номерами строк; ноутбук — его ячейки кода и
-текста), grep (поиск обычного текста), table_info (сводка таблицы CSV без чтения целиком).
-Порядок работы:
-- Прочитай RESEARCH.md, PLAN.md и README.md, если они есть.
-- Найди, где данные загружаются и готовятся, где делятся на выборки, где строятся признаки,
-  обучается модель и считаются итоговые метрики; проследи путь данных целиком.
-- Таблицы смотри через table_info, а не через read_file.
-- Номера строк в основаниях бери из того, что прочитал.
-
-Правила обзора:
-- Новые находки — только critical или important.
-- Каждую открытую находку из списка проверь по коду. Исправлена — верни её с prior_id,
-  статусом "closed" и reason: что в коде это показывает. Не исправлена — не упоминай её.
-  Статус "dismissed" не ставь: снять находку можно только по объяснению студента.
-- Проблему, которая уже есть среди открытых или снятых находок, новой находкой не заводи.
-  Снятую находку возвращай статусом "reopened" с её prior_id, только если в коде есть новые
-  основания; снятые руководителем не возвращай.
-- Пустой или шаблонный RESEARCH.md — одна находка "problem", если такой нет среди открытых.
-
-${NOTES_RULES} Верни notes обязательно: полный текст заметок по текущему коду; верное из
-прежних заметок сохрани, устаревшее исправь. Если последнюю правку заметок внёс руководитель
-проекта, сохрани его формулировки, если код им прямо не противоречит.
-
-Закончив чтение, ответь итоговым JSON-объектом — без вызова инструментов.
-
-${answerFormat('"полный текст заметок о проекте"')}`;
 
 /**
  * Queue an overview; a person's request or a resume skips the limit on automatic overviews.
@@ -152,7 +108,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   try {
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
-      { systemPrompt: OVERVIEW_PROMPT, userPrompt, changed: [], limits: OVERVIEW_LIMITS },
+      { systemPrompt: overviewPrompt(), userPrompt, changed: [], limits: OVERVIEW_LIMITS },
       async ({ reply, provider, model }, root) => {
         addSpend(tokens, { input: reply.tokensIn, output: reply.tokensOut }, provider, model);
         const usage = `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, токенов: ${reply.tokensIn}/${reply.tokensOut}`;

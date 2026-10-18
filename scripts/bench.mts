@@ -15,12 +15,13 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { AGENT_KEY_ENV, openAICompatibleModel, runAgent } from "@/lib/agent/agent.mjs";
-import { AGENT_RULES, repositorySection } from "@/lib/agent/prompt";
+import { repositorySection } from "@/lib/agent/prompt";
 import { transcript } from "@/lib/agent/transcript.mjs";
 import { agentLimits } from "@/lib/agent/run";
 import { listRepoFiles, relatedFiles, repoMap } from "@/lib/agent/workspace";
 import { buildReviewPrompt, formatChanges, selectPriorFindings, type PrFile } from "@/lib/curator/context";
-import { SYSTEM_PROMPT, parseModelJson } from "@/lib/curator/review";
+import { parseModelJson } from "@/lib/curator/review";
+import { agentRules, reviewPrompt } from "@/lib/curator/prompts";
 import type { PriorFinding, ReconciledFinding, StudentResponse } from "@/lib/curator/store";
 import { verifyFindings } from "@/lib/curator/verify";
 import { chat, openAICompatibleEndpoint, type ChatMessage } from "@/lib/llm/chat";
@@ -236,7 +237,7 @@ async function main() {
       const started = Date.now();
       const result = await runAgent({
         root: built.root,
-        systemPrompt: `${SYSTEM_PROMPT}\n${AGENT_RULES}`,
+        systemPrompt: `${reviewPrompt()}\n\n${agentRules()}`,
         userPrompt,
         models: runner.models,
         model: runner.model,

@@ -25,7 +25,8 @@ import {
   type Model,
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { SYSTEM_PROMPT, parseModelJson } from "@/lib/curator/review";
+import { parseModelJson } from "@/lib/curator/review";
+import { reviewPrompt } from "@/lib/curator/prompts";
 
 const BASE_URL = "https://api.selectel.ru/aig/v1";
 const DEFAULT_MODELS = [
@@ -40,7 +41,7 @@ const MAX_TOOL_CALLS = 20;
 const RUN_TIMEOUT_MS = 5 * 60_000;
 const MAX_READ_LINES = 400;
 
-const AGENT_PROMPT = `${SYSTEM_PROMPT}
+const AGENT_PROMPT = `${reviewPrompt()}
 
 Работа с репозиторием. Тебе доступна копия репозитория на коммите PR и инструменты только для
 чтения: list_files (список файлов) и read_file (чтение файла с номерами строк). Изменения часто
