@@ -201,9 +201,9 @@ export function publicText(text: string): string {
     .join("");
 }
 
-/** What part of the PR the model saw, when not all of it. */
-function coverageNote(materials: AnalysisMaterials): string | null {
-  const omitted = materials.omitted ?? [];
+/** What part of the PR the model saw, when not all of it; files the agent opened count as seen. */
+function coverageNote(materials: AnalysisMaterials, viewed: string[] = []): string | null {
+  const omitted = (materials.omitted ?? []).filter((f) => !viewed.includes(f));
   const unlisted = materials.unlisted ?? 0;
   if (omitted.length === 0 && unlisted === 0) return null;
   const total = materials.files.length + unlisted;
@@ -234,7 +234,7 @@ export function renderComment(
   result: ReconcileResult,
   changes: StatusChange[],
   materials?: AnalysisMaterials,
-  extra: { kept?: KeptFinding[]; others?: PriorFinding[] } = {},
+  extra: { kept?: KeptFinding[]; viewed?: string[] | null; others?: PriorFinding[] } = {},
 ): string {
   const open = result.findings.filter(
     (f) => f.status === "open" || f.status === "reopened",
@@ -246,7 +246,7 @@ export function renderComment(
     const summary = result.summary.replace(/\s*\(?\bid\s*=\s*\d+\)?/gi, "").replace(/(находк\S*)\s+#\d+/gi, "$1");
     parts.push(publicText(summary), "");
   }
-  const coverage = materials ? coverageNote(materials) : null;
+  const coverage = materials ? coverageNote(materials, extra.viewed ?? []) : null;
   if (coverage) parts.push(coverage, "");
   if (open.length === 0) {
     parts.push(
@@ -494,7 +494,7 @@ async function runReview(
 
   return {
     analysisId,
-    comment: renderComment(shown, statusChanges, materials, { kept, others }),
+    comment: renderComment(shown, statusChanges, materials, { kept, viewed, others }),
     outcome: "ok",
     summary: parsed.summary,
     statusChanges,
