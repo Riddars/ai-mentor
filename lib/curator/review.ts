@@ -270,9 +270,14 @@ export function renderComment(
       if (f.evidence) parts.push(codeBlock(f.evidence), "");
       if (f.impact) parts.push(`**Почему это важно:** ${publicText(f.impact)}`, "");
       if (f.locations && f.locations.length > 0) {
-        const where = f.locations.map((l) =>
-          l.kind === "other" ? publicText(locationText(l)) : `\`${locationText(l).replace(/`/g, "")}\``,
-        );
+        const where = f.locations.map((l) => {
+          if (l.kind === "other") return publicText(locationText(l));
+          // Line numbers stay with the path; a described place follows it as words.
+          if (l.detail && !/^[\d\s,.–-]+$/.test(l.detail)) {
+            return `\`${l.target.replace(/`/g, "")}\` (${publicText(l.detail)})`;
+          }
+          return `\`${locationText(l).replace(/`/g, "")}\``;
+        });
         parts.push(`**Где:** ${where.join(", ")}`, "");
       }
       if (f.recommendation) parts.push(`**Что сделать:** ${publicText(f.recommendation)}`, "");
