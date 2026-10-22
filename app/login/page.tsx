@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import Image from "next/image";
 import { LoginForm } from "@/components/LoginForm";
 import { authEnabled } from "@/lib/auth";
 import { getViewer } from "@/lib/users";
@@ -23,7 +24,8 @@ export default async function LoginPage() {
   return (
     <main className="flex flex-1 items-center justify-center p-6">
       <div className="flex w-full max-w-xs flex-col items-center gap-6">
-        <div className="text-center">
+        <div className="flex flex-col items-center text-center">
+          <Image src="/logo.jpg" alt="" width={56} height={56} className="mb-3 size-14 rounded-xl" />
           <h1 className="text-lg font-semibold tracking-tight">ИИ-куратор</h1>
           <p className="mt-1 text-sm text-muted-foreground">Панель руководителя</p>
         </div>

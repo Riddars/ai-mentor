@@ -106,9 +106,11 @@ export default async function UsagePage({
             <Tile label="Сбои" value={String(failures)} warn={failures > 0} />
             {day && (
               <Tile
-                label={project ? "За сутки, бюджет проекта" : "За сутки, бюджет сервиса"}
+                label={
+                  project ? "Токены за сутки, бюджет проекта" : "Токены за сутки, бюджет сервиса"
+                }
                 value={formatTokens(day.tokens)}
-                note={day.budget > 0 ? `из ${formatTokens(day.budget)}` : undefined}
+                note={day.budget > 0 ? `из ${formatTokens(day.budget)} токенов` : undefined}
                 warn={day.budget > 0 && day.tokens >= day.budget}
               />
             )}

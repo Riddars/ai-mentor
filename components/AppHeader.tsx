@@ -1,3 +1,4 @@
+import Image from "next/image";
 import Link from "next/link";
 import { logoutAction } from "@/app/actions/auth";
 import type { Viewer } from "@/lib/auth";
@@ -10,9 +11,7 @@ export function AppHeader({ viewer }: { viewer: Viewer }) {
     <header className="sticky top-0 z-10 border-b border-border bg-card/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-6xl items-center gap-4 px-4 sm:px-6">
         <Link href="/" className="flex items-center gap-2">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
-            К
-          </span>
+          <Image src="/logo.jpg" alt="" width={28} height={28} className="size-7 rounded-lg" />
           <span className="hidden text-sm font-semibold tracking-tight sm:inline">
             ИИ-куратор
           </span>
