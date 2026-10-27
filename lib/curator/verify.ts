@@ -147,7 +147,8 @@ export async function verifyFindings(
       {
         role: "user",
         content:
-          `${await readDoc(root, "RESEARCH.md")}\n\n${await readDoc(root, "PLAN.md")}\n\n` +
+          `${await readDoc(root, "README.md")}\n\n${await readDoc(root, "RESEARCH.md")}\n\n` +
+          `${await readDoc(root, "PLAN.md")}\n\n` +
           `=== НАХОДКИ ===\n\n${
             findingsText.length > MAX_FINDINGS_CHARS ? `${findingsText.slice(0, MAX_FINDINGS_CHARS)}\n…(обрезано)` : findingsText
           }`,

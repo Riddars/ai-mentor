@@ -150,7 +150,8 @@ export async function formatChanges(
       body = "(изменения без текстового diff — бинарный или слишком большой файл)\n";
     }
     if (out.length + header.length + body.length > LIMITS.diff) {
-      omitted.push(file.filename); // не влез — пропускаем и идём дальше
+      // Data and binary files are never reviewed by content, so they are not reported as omitted.
+      if (rank(file.filename) !== 4) omitted.push(file.filename);
       continue;
     }
     out += header + body + "\n";

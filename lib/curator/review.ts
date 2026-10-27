@@ -9,7 +9,13 @@ import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
 import { advanceMemory } from "@/lib/curator/memory";
 import { verifyFindings } from "@/lib/curator/verify";
-import { startOverview } from "@/lib/curator/overview";
+import {
+  BRANCH_REVIEW_DEADLINE_MS,
+  notesFromBranch,
+  settleBranchNotes,
+  startOverview,
+  waitForBranchOverview,
+} from "@/lib/curator/overview";
 import { agentRules, reviewPrompt } from "@/lib/curator/prompts";
 import {
   FINDING_AREAS,
@@ -31,6 +37,7 @@ import {
   takeOverviewRequest,
   getPullRequestHead,
   hasJobForHead,
+  extendJobDeadline,
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
@@ -744,7 +751,8 @@ export interface ClosedPullRequest {
 function overviewAfterMerge(prId: number): void {
   const pr = getPullRequest(prId);
   const reason = pr ? takeOverviewRequest(prId) : null;
-  if (pr && reason) {
+  // Notes made from the merged commit of this PR's branch already describe what was merged.
+  if (pr && reason && !notesFromBranch(pr.projectId, pr.number, pr.headSha)) {
     console.log(`[curator] PR #${pr.number} merged, re-reading the project: ${reason}`);
     startOverview(pr.projectId, "merge");
   }
@@ -789,6 +797,11 @@ export async function handlePullRequestClosed(
       );
     }
   }
+  if (mergedIntoDefault || !data.merged) {
+    await settleBranchNotes(project.id, number, mergedIntoDefault).catch((error) =>
+      console.warn(`[curator] notes of ${project.owner}/${project.repo} not settled after PR #${number}:`, error),
+    );
+  }
   if (data.merged) return;
   for (const checkRunId of supersedeCommitJobs(prId)) {
     await concludeCheck(
@@ -803,6 +816,13 @@ export async function handlePullRequestClosed(
 export class StaleReviewError extends Error {
   constructor() {
     super("Pull request changed during the review");
+  }
+}
+
+/** The review waits for the overview of its PR's branch; the job runs again later. */
+export class WaitForOverviewError extends Error {
+  constructor() {
+    super("Waiting for the overview of the pull request branch");
   }
 }
 
@@ -822,6 +842,11 @@ export async function executeCommitJob(
     return pr !== null && pr.headSha === params.headSha && pr.state !== "closed";
   };
   if (!isCurrent()) throw new StaleReviewError();
+  const project = getProjectByRepo(params.owner, params.repo);
+  if (project && (await waitForBranchOverview(project, { number: params.prNumber, headSha: params.headSha }, params.installationId))) {
+    extendJobDeadline(jobId, BRANCH_REVIEW_DEADLINE_MS);
+    throw new WaitForOverviewError();
+  }
   const { analysisId, comment } = await runReview(params, prId, "commit", {
     isCurrent,
     fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,

@@ -275,6 +275,42 @@ check("automatic overviews are limited", store.enqueueOverviewJob(notesProject, 
 check("a person may run one any time", store.enqueueOverviewJob(notesProject, { reason: "manual" }, true) === "queued");
 db.prepare("UPDATE review_jobs SET status = 'done' WHERE kind = 'overview'").run();
 const overviewPr = store.ensureOverviewPullRequest(notesProject);
+
+// --- overview of a PR's branch ---------------------------------------------------------
+
+check("no branch overview yet", store.getBranchOverviewJob(notesProject, 5) === null);
+store.enqueueOverviewJob(notesProject, { reason: "branch", branch: { prNumber: 5, headSha: "s5" } }, true);
+check("a branch overview is found by its PR", store.getBranchOverviewJob(notesProject, 5)?.status === "queued");
+check("…and only by its PR", store.getBranchOverviewJob(notesProject, 6) === null);
+const branchJob = (db.prepare("SELECT id FROM review_jobs WHERE kind = 'overview' ORDER BY id DESC LIMIT 1").get() as { id: number }).id;
+store.markJobRunning(branchJob);
+store.postponeJob(branchJob, 60_000);
+const postponed = db.prepare("SELECT status, attempts FROM review_jobs WHERE id = ?").get(branchJob) as { status: string; attempts: number };
+check("a postponed job waits without spending an attempt", postponed.status === "queued" && postponed.attempts === 0, JSON.stringify(postponed));
+db.prepare("UPDATE review_jobs SET status = 'failed' WHERE id = ?").run(branchJob);
+check("a failed branch overview still counts", store.getBranchOverviewJob(notesProject, 5)?.status === "failed");
+store.upsertPullRequest(notesProject, 5, { state: "open", headSha: "s5", headRef: "feat-s", mergedIntoDefault: false });
+const branchRun = store.recordAnalysis({
+  prId: overviewPr, headSha: "s5", trigger: "overview", outcome: "ok",
+  materials: { files: [], researchDoc: false, truncated: false, priorFindings: 0, studentResponses: 0, branchPr: 5 },
+});
+const branchOrigin = store.getAnalysisOrigin(branchRun);
+check("a branch overview names its PR, not yet merged",
+  branchOrigin?.branchPr === 5 && branchOrigin.headSha === "s5" && !branchOrigin.branchMerged, JSON.stringify(branchOrigin));
+store.addProjectNotes(notesProject, "branch notes", { analysisId: branchRun });
+const beforeBranch = store.getProjectNotesBefore(notesProject, store.getProjectNotes(notesProject)!.id);
+check("notes keep the version before the branch, with its author",
+  beforeBranch?.body === "initial notes" && beforeBranch.actor === "sup", JSON.stringify(beforeBranch));
+check("a PR is found by its number", store.getPullRequestByNumber(notesProject, 5)?.headSha === "s5");
+db.prepare("UPDATE review_jobs SET status = 'queued', deadline_at = datetime('now') WHERE id = ?").run(branchJob);
+store.extendJobDeadline(branchJob, 3_600_000);
+const extended = db.prepare("SELECT deadline_at > datetime('now', '+50 minutes') AS later FROM review_jobs WHERE id = ?").get(branchJob) as { later: number };
+check("a waiting review gets a later deadline", extended.later === 1);
+check("a finishing overview does not block the next one",
+  store.enqueueOverviewJob(notesProject, { reason: "merge" }, true, branchJob) === "queued");
+db.prepare("UPDATE review_jobs SET status = 'done' WHERE kind = 'overview'").run();
+store.upsertPullRequest(notesProject, 5, { state: "merged", headSha: "s5", headRef: "feat-s", mergedIntoDefault: true });
+check("…and know when the PR is merged", store.getAnalysisOrigin(branchRun)?.branchMerged === true);
 const fresh = store.createProjectManual("org", "fresh");
 store.ensureOverviewPullRequest(fresh);
 check("the overview PR does not lock renaming a fresh project", !store.projectHasPullRequests(fresh));
