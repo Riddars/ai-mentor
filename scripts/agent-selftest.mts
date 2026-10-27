@@ -260,6 +260,23 @@ async function processChecks(work: string): Promise<void> {
   check("process: started, unpacked and replied over IPC", existsSync(join(root, "RESEARCH.md")), `${Date.now() - started} ms`);
   check("process: link recorded as not unpacked", reply.skipped.some((s) => s.path === "link"));
   check("process: model failure reported as an error", reply.error !== null && reply.text === "", String(reply.error));
+  const onCopy = await runAgentProcess(
+    {
+      type: "run",
+      root,
+      systemPrompt: "verify",
+      userPrompt: "go",
+      changed: [],
+      model: { baseUrl: "http://127.0.0.1:9/v1", model: "none" },
+      limits: { maxToolCalls: 5, maxTokens: 10_000, timeoutMs: 30_000 },
+    },
+    "test-key",
+  );
+  check(
+    "process: runs over a copy already on disk",
+    onCopy.error !== null && onCopy.skipped.length === 0 && existsSync(join(root, "RESEARCH.md")),
+    String(onCopy.error),
+  );
 
   process.env.GITHUB_WEBHOOK_SECRET ??= "service-secret";
   const env = childEnv("model-key");
