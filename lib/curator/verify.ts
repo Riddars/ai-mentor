@@ -1,7 +1,6 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { AgentProcessError, agentModel, runAgentOnCopy } from "@/lib/agent/run";
-import type { ChatMessage, ChatResult } from "@/lib/llm/chat";
+import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
 import { addSpend, emptySpend, type Spend } from "@/lib/llm/spend";
 import { notebookCells } from "@/lib/curator/notebook";
 import { lineRange } from "@/lib/curator/scope";
@@ -10,9 +9,8 @@ import type { ReconcileResult, ReconciledFinding } from "@/lib/curator/store";
 
 // Second look at new findings against the real repository text. First our code checks that
 // every cited file:lines exists; a finding whose citations all lead nowhere is dropped. Then a
-// short agent run over the same repository copy sees the findings with the actual cited lines
-// (not the agent's quotes), may read further, and drops what the repository does not support.
-// If that check fails, findings are kept.
+// short model request sees the findings with the actual cited lines (not the agent's quotes)
+// and drops what they do not support. If that check fails, findings are kept.
 
 const CONTEXT_LINES = 3;
 const MAX_EXCERPT_LINES = 60;
@@ -20,19 +18,6 @@ const MAX_LINE_CHARS = 500;
 const MAX_FINDINGS_CHARS = 120_000;
 const MAX_TEXT_BYTES = 5 * 1024 * 1024;
 const DOC_CHARS = 6_000;
-
-/** The check reads only what the claims rest on. */
-const VERIFY_LIMITS = { maxToolCalls: 15, maxTokens: 150_000, timeoutMs: 5 * 60_000 };
-
-/** The checking agent over the repository copy, answering as one chat reply. */
-async function askAgent(root: string, messages: ChatMessage[]): Promise<ChatResult> {
-  const { reply, provider, model } = await runAgentOnCopy(root, {
-    systemPrompt: messages[0].content,
-    userPrompt: messages[1].content,
-    limits: VERIFY_LIMITS,
-  });
-  return { content: reply.text, provider, model: `${model} (agent)`, usage: { input: reply.tokensIn, output: reply.tokensOut } };
-}
 
 export interface DroppedFinding {
   title: string;
@@ -126,7 +111,7 @@ function parseVerdicts(raw: string): Map<number, { keep: boolean; reason: string
 export async function verifyFindings(
   result: ReconcileResult,
   root: string,
-  ask: (messages: ChatMessage[]) => Promise<ChatResult> = (messages) => askAgent(root, messages),
+  ask: (messages: ChatMessage[]) => Promise<ChatResult> = chat,
 ): Promise<VerifyOutcome> {
   const dropped: DroppedFinding[] = [];
   const drop = new Set<number>();
@@ -184,8 +169,7 @@ export async function verifyFindings(
         });
       }
     } catch (error) {
-      if (error instanceof AgentProcessError) tokens = addSpend(tokens, error.spent, agentModel().provider);
-      console.warn("[verify] the check failed, findings are kept:", error);
+      console.warn("[verify] the model check failed, findings are kept:", error);
     }
   }
 

@@ -26,8 +26,6 @@ export interface AnalysisMaterials {
   /** Notes about the project were given. */
   notes?: boolean;
   studentResponses: number;
-  /** An overview of this PR's branch, made before the PR was merged. */
-  branchPr?: number;
 }
 
 /** Находка в том виде, в каком её отдаём модели для сверки (без объёмных текстов). */
@@ -1046,6 +1044,15 @@ export function getProjectNotes(projectId: number): ProjectNotes | null {
   return row ?? null;
 }
 
+/** Notes longer than the limit are cut at the last line break, not in the middle of a word. */
+function clipNotes(body: string): string {
+  const text = body.trim();
+  if (text.length <= NOTES_MAX_CHARS) return text;
+  const cut = text.slice(0, NOTES_MAX_CHARS);
+  const lineEnd = cut.lastIndexOf("\n");
+  return (lineEnd > 0 ? cut.slice(0, lineEnd) : cut).trimEnd();
+}
+
 /** Save a new version of the notes; an empty text clears them. */
 export function addProjectNotes(
   projectId: number,
@@ -1059,7 +1066,7 @@ export function addProjectNotes(
     )
     .run({
       projectId,
-      body: body.trim().slice(0, NOTES_MAX_CHARS),
+      body: clipNotes(body),
       analysisId: source.analysisId ?? null,
       actor: source.actor ?? null,
     });
@@ -1128,15 +1135,14 @@ export function ensureOverviewPullRequest(projectId: number): number {
 const AUTO_OVERVIEW_DAYS = 7;
 
 /**
- * Queue an overview of the project. Not queued when one is already queued or running (but
- * `finishing`, the job that queues it), or — unless `force` (a person asked, the project was
- * resumed) — when one was queued in the last AUTO_OVERVIEW_DAYS days.
+ * Queue an overview of the project. Not queued when one is already queued or running, or —
+ * unless `force` (a person asked, the project was resumed) — when one was queued in the last
+ * AUTO_OVERVIEW_DAYS days.
  */
 export function enqueueOverviewJob(
   projectId: number,
   payload: unknown,
   force: boolean,
-  finishing?: number,
 ): "queued" | "active" | "recent" {
   const db = getDb();
   const latest = db
@@ -1144,10 +1150,9 @@ export function enqueueOverviewJob(
       `SELECT j.status, j.created_at > datetime('now', @window) AS recent
        FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
        WHERE pr.project_id = @projectId AND j.kind = 'overview' AND j.status != 'superseded'
-         AND j.id != @finishing
        ORDER BY j.id DESC LIMIT 1`,
     )
-    .get({ projectId, window: `-${AUTO_OVERVIEW_DAYS} days`, finishing: finishing ?? 0 }) as { status: JobStatus; recent: number } | undefined;
+    .get({ projectId, window: `-${AUTO_OVERVIEW_DAYS} days` }) as { status: JobStatus; recent: number } | undefined;
   if (latest && (latest.status === "queued" || latest.status === "running")) return "active";
   if (!force && latest?.recent) return "recent";
   db.prepare(
@@ -1169,72 +1174,6 @@ export function getLatestOverviewJob(
     )
     .get({ projectId }) as { status: JobStatus; createdAt: string; lastError: string | null } | undefined;
   return row ?? null;
-}
-
-/** Latest overview job of a PR's branch (any outcome but superseded). */
-export function getBranchOverviewJob(
-  projectId: number,
-  prNumber: number,
-): { status: JobStatus; createdAt: string } | null {
-  const row = getDb()
-    .prepare(
-      `SELECT j.status, j.created_at AS createdAt
-       FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
-       WHERE pr.project_id = @projectId AND j.kind = 'overview' AND j.status != 'superseded'
-         AND json_extract(j.payload, '$.branch.prNumber') = @prNumber
-       ORDER BY j.id DESC LIMIT 1`,
-    )
-    .get({ projectId, prNumber }) as { status: JobStatus; createdAt: string } | undefined;
-  return row ?? null;
-}
-
-/**
- * The commit an analysis read and, for an overview of a PR's branch, that PR's number and
- * whether it has been merged into the main branch since.
- */
-export function getAnalysisOrigin(
-  analysisId: number,
-): { headSha: string; branchPr: number | null; branchMerged: boolean } | null {
-  const row = getDb()
-    .prepare(
-      `SELECT a.head_sha AS headSha, json_extract(a.materials, '$.branchPr') AS branchPr,
-              COALESCE(b.merged_into_default, 0) AS branchMerged
-       FROM analyses a
-       JOIN pull_requests pr ON pr.id = a.pull_request_id
-       LEFT JOIN pull_requests b
-         ON b.project_id = pr.project_id AND b.number = json_extract(a.materials, '$.branchPr')
-       WHERE a.id = @analysisId`,
-    )
-    .get({ analysisId }) as { headSha: string; branchPr: number | null; branchMerged: number } | undefined;
-  return row ? { ...row, branchMerged: row.branchMerged === 1 } : null;
-}
-
-/** The version of the notes before the given one; null when there was none. */
-export function getProjectNotesBefore(
-  projectId: number,
-  notesId: number,
-): { body: string; actor: string | null; analysisId: number | null } | null {
-  const row = getDb()
-    .prepare(
-      `SELECT body, actor, analysis_id AS analysisId FROM project_notes
-       WHERE project_id = @projectId AND id < @notesId ORDER BY id DESC LIMIT 1`,
-    )
-    .get({ projectId, notesId }) as { body: string; actor: string | null; analysisId: number | null } | undefined;
-  return row ?? null;
-}
-
-/** A PR of the project by its number, as last seen. */
-export function getPullRequestByNumber(
-  projectId: number,
-  number: number,
-): { state: PullRequestState | null; headSha: string | null; mergedIntoDefault: boolean } | null {
-  const row = getDb()
-    .prepare(
-      `SELECT state, head_sha AS headSha, merged_into_default AS merged FROM pull_requests
-       WHERE project_id = @projectId AND number = @number`,
-    )
-    .get({ projectId, number }) as { state: PullRequestState | null; headSha: string | null; merged: number } | undefined;
-  return row ? { state: row.state, headSha: row.headSha, mergedIntoDefault: row.merged === 1 } : null;
 }
 
 /** Commit of the main branch the project memory covers; null — no overview has been made. */
@@ -1989,27 +1928,6 @@ export function rescheduleJob(
        WHERE id = @id AND status IN ${ACTIVE_JOB}`,
     )
     .run({ id, at: when.at ?? null, delay: seconds(when.delayMs ?? 0), error: error ?? null });
-}
-
-/** Move the job's deadline to at least `ms` from now. */
-export function extendJobDeadline(id: number, ms: number): void {
-  getDb()
-    .prepare(
-      `UPDATE review_jobs SET deadline_at = MAX(COALESCE(deadline_at, ''), datetime('now', @delay))
-       WHERE id = @id AND status IN ${ACTIVE_JOB}`,
-    )
-    .run({ id, delay: seconds(ms) });
-}
-
-/** Put a running job back to wait; the run does not count as an attempt. */
-export function postponeJob(id: number, delayMs: number): void {
-  getDb()
-    .prepare(
-      `UPDATE review_jobs SET status = 'queued', attempts = MAX(attempts - 1, 0),
-         run_after = datetime('now', @delay), updated_at = datetime('now')
-       WHERE id = @id AND status IN ${ACTIVE_JOB}`,
-    )
-    .run({ id, delay: seconds(delayMs) });
 }
 
 /** Jobs marked running in the database that this process is not running (lost). */

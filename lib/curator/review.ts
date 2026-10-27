@@ -9,13 +9,7 @@ import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
 import { advanceMemory } from "@/lib/curator/memory";
 import { verifyFindings } from "@/lib/curator/verify";
-import {
-  BRANCH_REVIEW_DEADLINE_MS,
-  notesFromBranch,
-  settleBranchNotes,
-  startOverview,
-  waitForBranchOverview,
-} from "@/lib/curator/overview";
+import { bringsFirstWork, startOverview } from "@/lib/curator/overview";
 import { agentRules, reviewPrompt } from "@/lib/curator/prompts";
 import {
   FINDING_AREAS,
@@ -37,7 +31,6 @@ import {
   takeOverviewRequest,
   getPullRequestHead,
   hasJobForHead,
-  extendJobDeadline,
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
@@ -486,7 +479,7 @@ async function runReview(
     branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
   });
   // Reviewed after the merge into the main branch: a requested overview starts now.
-  if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId);
+  if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId, false);
   // Findings of other PRs the model only left open go to the list of the rest of the project,
   // not among this PR's findings; so the student sees the whole project without repeats.
   const open = loadOpenFindings(prId).filter((f) => f.status !== "pending");
@@ -748,11 +741,10 @@ export interface ClosedPullRequest {
 }
 
 /** The PR reached the main branch: queue the overview its review asked for, if any. */
-function overviewAfterMerge(prId: number): void {
+function overviewAfterMerge(prId: number, firstWork: boolean): void {
   const pr = getPullRequest(prId);
-  const reason = pr ? takeOverviewRequest(prId) : null;
-  // Notes made from the merged commit of this PR's branch already describe what was merged.
-  if (pr && reason && !notesFromBranch(pr.projectId, pr.number, pr.headSha)) {
+  const reason = (pr ? takeOverviewRequest(prId) : null) ?? (firstWork ? "первый код или данные в проекте" : null);
+  if (pr && reason) {
     console.log(`[curator] PR #${pr.number} merged, re-reading the project: ${reason}`);
     startOverview(pr.projectId, "merge");
   }
@@ -790,17 +782,17 @@ export async function handlePullRequestClosed(
   });
   recordPullRequestClosed(prId, !data.merged ? "closed" : mergedIntoDefault ? "merged-default" : "merged-other");
   if (mergedIntoDefault) {
-    overviewAfterMerge(prId);
+    // Checked before the memory moves on to the merge commit.
+    const firstWork = await bringsFirstWork(project, number, installationId).catch((error) => {
+      console.warn(`[curator] ${project.owner}/${project.repo}: first code of PR #${number} not checked:`, error);
+      return false;
+    });
+    overviewAfterMerge(prId, firstWork);
     if (data.merge_commit_sha) {
       await advanceMemory(project, data.merge_commit_sha, installationId).catch((error) =>
         console.warn(`[curator] memory of ${project.owner}/${project.repo} not advanced:`, error),
       );
     }
-  }
-  if (mergedIntoDefault || !data.merged) {
-    await settleBranchNotes(project.id, number, mergedIntoDefault).catch((error) =>
-      console.warn(`[curator] notes of ${project.owner}/${project.repo} not settled after PR #${number}:`, error),
-    );
   }
   if (data.merged) return;
   for (const checkRunId of supersedeCommitJobs(prId)) {
@@ -816,13 +808,6 @@ export async function handlePullRequestClosed(
 export class StaleReviewError extends Error {
   constructor() {
     super("Pull request changed during the review");
-  }
-}
-
-/** The review waits for the overview of its PR's branch; the job runs again later. */
-export class WaitForOverviewError extends Error {
-  constructor() {
-    super("Waiting for the overview of the pull request branch");
   }
 }
 
@@ -842,11 +827,6 @@ export async function executeCommitJob(
     return pr !== null && pr.headSha === params.headSha && pr.state !== "closed";
   };
   if (!isCurrent()) throw new StaleReviewError();
-  const project = getProjectByRepo(params.owner, params.repo);
-  if (project && (await waitForBranchOverview(project, { number: params.prNumber, headSha: params.headSha }, params.installationId))) {
-    extendJobDeadline(jobId, BRANCH_REVIEW_DEADLINE_MS);
-    throw new WaitForOverviewError();
-  }
   const { analysisId, comment } = await runReview(params, prId, "commit", {
     isCurrent,
     fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,

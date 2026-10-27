@@ -15,8 +15,8 @@ export interface AgentLimitsSpec {
 
 export interface AgentRequest {
   type: "run";
-  /** Downloaded GitHub tarball to unpack into `root`; absent when `root` already holds the copy. */
-  tarPath?: string;
+  /** Downloaded GitHub tarball to unpack into `root`. */
+  tarPath: string;
   root: string;
   systemPrompt: string;
   /** The review prompt; the repository map is appended by the agent process. */

@@ -5,7 +5,6 @@ import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
 import { addSpend, emptySpend, mergeSpend } from "@/lib/llm/spend";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { getConfig } from "@/lib/config";
-import { parseDbDate } from "@/lib/format";
 import { isDataFile } from "@/lib/curator/data-files";
 import { dismissedFindingsText, notesText, priorFindingsText, selectDismissedFindings, selectPriorFindings } from "@/lib/curator/context";
 import { coverMemory, defaultBranchHead } from "@/lib/curator/memory";
@@ -16,11 +15,6 @@ import {
   addProjectNotes,
   applyReconciliation,
   enqueueOverviewJob,
-  getAnalysisOrigin,
-  getBranchOverviewJob,
-  getLatestOverviewJob,
-  getProjectNotesBefore,
-  getPullRequestByNumber,
   getMemorySha,
   getOverviewIssue,
   getProject,
@@ -37,15 +31,11 @@ import {
 // Project overview: the agent reads the whole main branch, finds major problems, reconciles the
 // open findings with the current code and rewrites the notes about the project. The notes are
 // published as one GitHub issue per project, updated in place when they change.
-// While the main branch has no code or data yet, the first PR that brings them gets an overview
-// of its branch before its review: only the notes, so the review and the issue describe the work.
 
-export type OverviewReason = "initial" | "gap" | "resume" | "manual" | "merge" | "branch";
+export type OverviewReason = "initial" | "gap" | "resume" | "manual" | "merge";
 
 export interface OverviewPayload {
   reason: OverviewReason;
-  /** For "branch": the PR whose head is read instead of the main branch. */
-  branch?: { prNumber: number; headSha: string };
 }
 
 /** Larger than a PR review: the agent reads the project, not one change. */
@@ -62,7 +52,6 @@ const ISSUE_TITLE = "Обзор проекта (AI Curator)";
 export function startOverview(
   projectId: number,
   reason: OverviewReason,
-  branch?: OverviewPayload["branch"],
 ): "queued" | "active" | "recent" | "unavailable" {
   try {
     if (getConfig().reviewer !== "llm") return "unavailable";
@@ -70,9 +59,41 @@ export function startOverview(
   } catch {
     return "unavailable";
   }
-  const payload: OverviewPayload = branch ? { reason, branch } : { reason };
+  const payload: OverviewPayload = { reason };
   // A person, a resume or a merged PR whose review named a reason skip the limit on automatic overviews.
   return enqueueOverviewJob(projectId, payload, reason !== "initial" && reason !== "gap");
+}
+
+const CODE_FILE = /\.(py|ipynb|r|jl|m|c|cc|cpp|h|hpp|java|js|ts|rs|go|sh|sql)$/i;
+
+/** Code, a notebook or data: what makes a repository more than its templates. */
+function isWorkFile(path: string): boolean {
+  return !path.startsWith(".github/") && (CODE_FILE.test(path) || isDataFile(path));
+}
+
+/**
+ * Whether a merged PR brought the first code or data: the commit the memory describes had
+ * none, and the PR adds some. Such a merge is always followed by an overview.
+ */
+export async function bringsFirstWork(
+  project: { id: number; owner: string; repo: string },
+  prNumber: number,
+  installationId: number,
+): Promise<boolean> {
+  const memory = getMemorySha(project.id);
+  if (!memory) return false; // no overview yet: the memory gap check starts one
+  const token = await getInstallationToken(installationId);
+  const base = `/repos/${project.owner}/${project.repo}`;
+  const files = await githubRequest<Array<{ filename: string; status: string }>>(
+    `${base}/pulls/${prNumber}/files?per_page=100`,
+    { token },
+  );
+  if (!files.some((f) => f.status !== "removed" && isWorkFile(f.filename))) return false;
+  const tree = await githubRequest<{ tree: Array<{ path: string; type: string }>; truncated: boolean }>(
+    `${base}/git/trees/${memory}?recursive=1`,
+    { token },
+  );
+  return !tree.truncated && !tree.tree.some((entry) => entry.type === "blob" && isWorkFile(entry.path));
 }
 
 async function exists(root: string, name: string): Promise<boolean> {
@@ -91,25 +112,16 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   const project = getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
   const installationId = await getRepoInstallationId(project.owner, project.repo);
-  const { branch } = job.payload as OverviewPayload;
-  const pr = branch ? getPullRequestByNumber(project.id, branch.prNumber) : null;
-  // Closed without merge meanwhile: its code is gone, there is nothing to describe.
-  if (pr?.state === "closed") return;
-  const headSha = branch ? (pr?.headSha ?? branch.headSha) : await defaultBranchHead(project, installationId);
+  const headSha = await defaultBranchHead(project, installationId);
 
   const prId = job.prId;
-  // A branch is read for its notes only: the PR's own review deals with its problems.
-  const prior = branch ? [] : selectPriorFindings(loadOpenFindings(prId), 0);
-  const dismissed = branch ? [] : selectDismissedFindings(loadDismissedFindings(prId), new Set());
+  const prior = selectPriorFindings(loadOpenFindings(prId), 0);
+  const dismissed = selectDismissedFindings(loadDismissedFindings(prId), new Set());
   const notes = getProjectNotes(project.id);
-  const userPrompt = branch
-    ? `${notesText(notes?.body ?? null, notes?.actor != null)}\n\n` +
-      `Репозиторий ${project.owner}/${project.repo}, ветка pull request #${branch.prNumber} (ещё не слита в ` +
-      `основную ветку), коммит ${headSha}. Находки в этот раз не нужны — верни пустой findings; главное — ` +
-      "notes."
-    : `${priorFindingsText(prior, 0)}\n\n${dismissedFindingsText(dismissed, 0)}\n\n` +
-      `${notesText(notes?.body ?? null, notes?.actor != null)}\n\n` +
-      `Репозиторий ${project.owner}/${project.repo}, основная ветка, коммит ${headSha}.`;
+  const userPrompt =
+    `${priorFindingsText(prior, 0)}\n\n${dismissedFindingsText(dismissed, 0)}\n\n` +
+    `${notesText(notes?.body ?? null, notes?.actor != null)}\n\n` +
+    `Репозиторий ${project.owner}/${project.repo}, основная ветка, коммит ${headSha}.`;
 
   const tokens = emptySpend();
   const record = (outcome: AnalysisOutcome, extra: Partial<Parameters<typeof recordAnalysis>[0]> = {}) =>
@@ -140,7 +152,6 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
         }
         const parsed = parseModelJson(reply.text);
         const materials = {
-          ...(branch ? { branchPr: branch.prNumber } : {}),
           files: [],
           researchDoc: await exists(root, "RESEARCH.md"),
           planDoc: await exists(root, "PLAN.md"),
@@ -154,23 +165,6 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
         if (!parsed) {
           // Kept for the supervisor; not retried, a new run would cost as much again.
           record("parse_error", { ...base, rawResponse: `${reply.text}\n\n[agent] ${usage}` });
-          return;
-        }
-        if (branch) {
-          const analysisId = record("ok", {
-            ...base,
-            summary: parsed.summary || null,
-            rawResponse: `${reply.text}\n\n[agent] ${usage}\n[agent] прочитано: ${reply.viewed.join(", ") || "—"}`,
-          });
-          const now = getPullRequestByNumber(project.id, branch.prNumber);
-          if (now?.state !== "closed") saveNotes(project.id, notes?.id ?? null, parsed.notes, analysisId);
-          // Merged while it was read: the merged code may differ from what was read.
-          if (now?.mergedIntoDefault && now.headSha !== headSha) {
-            enqueueOverviewJob(project.id, { reason: "merge" } satisfies OverviewPayload, true, job.id);
-          }
-          const published = await publishOverviewIssue(project.id, installationId);
-          setAnalysisComment(analysisId, published.body);
-          done = true;
           return;
         }
         const verified = await verifyFindings(parsed, root);
@@ -194,7 +188,10 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
           wholeRepository: true,
           changed: new Map(),
         });
-        saveNotes(project.id, notes?.id ?? null, parsed.notes, analysisId);
+        // Notes edited meanwhile (by a supervisor or a merged PR) are not overwritten.
+        if (parsed.notes && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
+          addProjectNotes(project.id, parsed.notes, { analysisId });
+        }
         // The overview is saved: from here on a failure must not repeat it.
         await coverMemory(project, headSha, installationId).catch((error) =>
           console.warn(`[overview] memory of ${project.owner}/${project.repo} not moved:`, error),
@@ -220,122 +217,17 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   }
 }
 
-/** Notes edited meanwhile (by a supervisor or another overview) are not overwritten. */
-function saveNotes(projectId: number, readId: number | null, body: string | null | undefined, analysisId: number): void {
-  if (body && (getProjectNotes(projectId)?.id ?? null) === readId) {
-    addProjectNotes(projectId, body, { analysisId });
-  }
-}
-
-/** Waiting for an overview of the PR's branch holds its review at most this long. */
-const BRANCH_WAIT_MS = 30 * 60_000;
-
-/** Deadline of a review that waits for an overview of its PR's branch: the wait and the review. */
-export const BRANCH_REVIEW_DEADLINE_MS = BRANCH_WAIT_MS + 15 * 60_000;
-
-const CODE_FILE = /\.(py|ipynb|r|jl|m|c|cc|cpp|h|hpp|java|js|ts|rs|go|sh|sql)$/i;
-
-/** Code, a notebook or data: what makes a repository more than its templates. */
-function isWorkFile(path: string): boolean {
-  return !path.startsWith(".github/") && (CODE_FILE.test(path) || isDataFile(path));
-}
-
-/** Projects whose main branch was seen with code or data: no branch overview is needed there. */
-const mainHasWork = new Set<number>();
-
-function waiting(job: { status: string; createdAt: string } | null): boolean {
-  if (!job || (job.status !== "queued" && job.status !== "running")) return false;
-  return Date.now() - (parseDbDate(job.createdAt)?.getTime() ?? 0) < BRANCH_WAIT_MS;
-}
-
-/** Whether the PR brings code or data into a main branch that has none. */
-async function bringsFirstWork(
-  project: { id: number; owner: string; repo: string },
-  prNumber: number,
-  installationId: number,
-): Promise<boolean> {
-  const token = await getInstallationToken(installationId);
-  const base = `/repos/${project.owner}/${project.repo}`;
-  const files = await githubRequest<Array<{ filename: string; status: string }>>(
-    `${base}/pulls/${prNumber}/files?per_page=100`,
-    { token },
-  );
-  if (!files.some((f) => f.status !== "removed" && isWorkFile(f.filename))) return false;
-  const main = await githubRequest<{ tree: Array<{ path: string; type: string }>; truncated: boolean }>(
-    `${base}/git/trees/${await defaultBranchHead(project, installationId)}?recursive=1`,
-    { token },
-  );
-  if (main.truncated || main.tree.some((entry) => entry.type === "blob" && isWorkFile(entry.path))) {
-    mainHasWork.add(project.id);
-    return false;
-  }
-  return true;
-}
-
-/**
- * Whether the review of a PR should wait for an overview of its branch. That overview is made
- * once per PR, when the main branch has no code or data yet and the PR brings them; it is
- * queued here. An overview of the project already running is waited for first, so the two do
- * not write the notes in the wrong order. A failed check lets the review go on.
- */
-export async function waitForBranchOverview(
-  project: { id: number; owner: string; repo: string },
-  pr: { number: number; headSha: string },
-  installationId: number,
-): Promise<boolean> {
-  const own = getBranchOverviewJob(project.id, pr.number);
-  if (own) return waiting(own);
-  if (mainHasWork.has(project.id)) return false;
-  // No overview of the project yet: its first one is waited for, then this check runs again.
-  if (getMemorySha(project.id) === null) return waiting(getLatestOverviewJob(project.id));
-  try {
-    if (!(await bringsFirstWork(project, pr.number, installationId))) return false;
-  } catch (error) {
-    console.warn(`[overview] ${project.owner}/${project.repo}: branch of PR #${pr.number} not checked:`, error);
-    return false;
-  }
-  const latest = getLatestOverviewJob(project.id);
-  if (latest && (latest.status === "queued" || latest.status === "running")) return waiting(latest);
-  const queued = startOverview(project.id, "branch", { prNumber: pr.number, headSha: pr.headSha });
-  if (queued === "queued") console.log(`[overview] ${project.owner}/${project.repo}: branch of PR #${pr.number} queued`);
-  return queued === "queued";
-}
-
-/**
- * The PR whose branch the notes describe was closed: merged, the issue now names the main
- * branch; closed without merge, the notes go back to the version before it.
- */
-export async function settleBranchNotes(projectId: number, prNumber: number, merged: boolean): Promise<void> {
-  const notes = getProjectNotes(projectId);
-  if (!notes || !notesFromBranch(projectId, prNumber)) return;
-  if (!merged) {
-    const before = getProjectNotesBefore(projectId, notes.id);
-    addProjectNotes(projectId, before?.body ?? "", { analysisId: before?.analysisId, actor: before?.actor });
-  }
-  await publishOverviewIssue(projectId);
-}
-
-/** Whether the current notes come from an overview of this PR's branch — of `headSha`, if given. */
-export function notesFromBranch(projectId: number, prNumber: number, headSha?: string | null): boolean {
-  const notes = getProjectNotes(projectId);
-  const origin = notes?.analysisId != null ? getAnalysisOrigin(notes.analysisId) : null;
-  return origin?.branchPr === prNumber && (headSha === undefined || origin.headSha === headSha);
-}
-
 /**
  * The issue text: how the curator understands the project. Findings stay in the PR comments,
  * so the issue changes only with the notes.
  */
 function overviewIssueBody(projectId: number): string {
   const notes = getProjectNotes(projectId);
-  const origin = notes?.analysisId != null ? getAnalysisOrigin(notes.analysisId) : null;
-  const unmerged = origin?.branchPr != null && !origin.branchMerged;
-  const sha = unmerged ? origin.headSha : getMemorySha(projectId);
-  const source = unmerged ? `по ветке pull request #${origin.branchPr}, ещё не слитой в основную` : "по основной ветке";
+  const sha = getMemorySha(projectId);
   return [
     "🤖 **AI Curator — как куратор понимает проект**",
     "",
-    `Описание составлено ${source}${sha ? ` (коммит \`${sha.slice(0, 7)}\`)` : ""}. ` +
+    `Описание составлено по основной ветке${sha ? ` (коммит \`${sha.slice(0, 7)}\`)` : ""}. ` +
       "Куратор опирается на него при разборе pull request; оно обновляется при полном обзоре " +
       "проекта и при правке руководителем.",
     "",

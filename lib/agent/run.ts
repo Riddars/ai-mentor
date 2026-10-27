@@ -213,33 +213,6 @@ export async function withAgentRun<T>(
   }
 }
 
-/**
- * A short agent run over a copy already on disk (made by `withAgentRun`), e.g. to check the
- * findings of the run that made it. A failed run is thrown with the tokens it spent.
- */
-export async function runAgentOnCopy(
-  root: string,
-  input: { systemPrompt: string; userPrompt: string; limits: AgentLimitsSpec },
-): Promise<AgentRun> {
-  const { provider, baseUrl, model, apiKey } = agentModel();
-  const reply = await runAgentProcess(
-    {
-      type: "run",
-      root,
-      systemPrompt: input.systemPrompt,
-      userPrompt: input.userPrompt,
-      changed: [],
-      model: { baseUrl, model },
-      limits: input.limits,
-    },
-    apiKey,
-  );
-  if (reply.error) {
-    throw new AgentProcessError(reply.error, { input: reply.tokensIn, output: reply.tokensOut });
-  }
-  return { reply, provider, model };
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((done) => setTimeout(done, ms));
 }
@@ -250,7 +223,7 @@ function sleep(ms: number): Promise<void> {
  */
 export async function removeStaleAgentDirs(): Promise<void> {
   const base = tmpdir();
-  // Twice the longest run, which leaves room for the verification run after it.
+  // Twice the longest run, which leaves room for the verification request after it.
   const maxAgeMs = 2 * (agentLimits().timeoutMs + CHILD_GRACE_MS + DOWNLOAD_TIMEOUT_MS);
   let entries: string[];
   try {

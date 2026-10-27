@@ -16,7 +16,6 @@ import {
   reportReviewFailure,
   StaleReviewError,
   startCommitReview,
-  WaitForOverviewError,
   type CommentReviewParams,
   type ReviewParams,
 } from "@/lib/curator/review";
@@ -29,7 +28,6 @@ import {
   listOverdueJobs,
   markCheckConcluded,
   markJobRunning,
-  postponeJob,
   queueProblems,
   recentAnalysesOfProject,
   recentTokens,
@@ -68,9 +66,6 @@ const realDeps: WorkerDeps = {
     if (job.kind !== "overview") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind);
   },
 };
-
-/** How often a review waiting for the overview of its PR's branch checks it again. */
-const WAIT_FOR_OVERVIEW_MS = 60_000;
 
 /** An overview reads the whole project, so a failed one is repeated only once. */
 const OVERVIEW_ATTEMPTS = 2;
@@ -161,10 +156,6 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     if (error instanceof StaleReviewError) {
       await concludeIfOpen(job, "Заменён новым коммитом — разбирается последний.", deps);
       finishJob(job.id, "superseded");
-      return;
-    }
-    if (error instanceof WaitForOverviewError) {
-      postponeJob(job.id, WAIT_FOR_OVERVIEW_MS);
       return;
     }
     const message = error instanceof Error ? error.message : String(error);

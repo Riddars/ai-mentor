@@ -12,9 +12,7 @@ const controller = new AbortController();
 
 async function handle(request: AgentRequest): Promise<AgentReply> {
   await mkdir(request.root, { recursive: true });
-  const extracted = request.tarPath
-    ? await extractTarball(request.tarPath, request.root)
-    : { skipped: [], stoppedOn: null };
+  const extracted = await extractTarball(request.tarPath, request.root);
   const files = await listRepoFiles(request.root);
   const related = await relatedFiles(request.root, request.changed, files);
   const { models, model } = openAICompatibleModel(request.model);
