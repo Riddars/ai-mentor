@@ -4,6 +4,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
+import { DATA_PREVIEW_LINES, isDataFile } from "@/lib/curator/data-files";
 import { notebookCells } from "@/lib/curator/notebook";
 import { formatSize } from "@/lib/agent/workspace";
 
@@ -203,13 +204,15 @@ export function createTools(root: string, log: ToolLog): AgentTool[] {
     description:
       `Read a text file with line numbers, at most ${MAX_LINES} lines per call; use from/to for longer files. ` +
       "Notebooks are shown as their code and markdown cells; line numbers refer to that view. " +
-      "For tables use table_info.",
+      `Data files show only their first ${DATA_PREVIEW_LINES} lines; for tables use table_info.`,
     parameters: readParams,
     execute: (_id, { path, from, to }) =>
       record("read_file", { path, from, to }, async () => {
         const { full, rel } = await resolveInside(root, path);
-        const start = from ?? 1;
-        const end = Math.min(to ?? start + MAX_LINES - 1, start + MAX_LINES - 1);
+        const data = isDataFile(rel);
+        const start = data ? 1 : (from ?? 1);
+        const last = start + (data ? DATA_PREVIEW_LINES : MAX_LINES) - 1;
+        const end = data ? last : Math.min(to ?? last, last);
         let lines: string[];
         let total: number;
         if (!isNotebook(rel) && (await stat(full)).size > MAX_GREP_FILE_BYTES) {
@@ -221,7 +224,10 @@ export function createTools(root: string, log: ToolLog): AgentTool[] {
           total = all.length;
         }
         log.viewed.add(rel);
-        const tail = start + lines.length - 1 < total ? `\n… (всего строк: ${total})` : "";
+        const tail =
+          start + lines.length - 1 < total
+            ? `\n… (всего строк: ${total}${data ? "; файл данных целиком не читается, сводка — table_info" : ""})`
+            : "";
         return text(`${rel}\n${numbered(lines, start)}${tail}`);
       }),
   };

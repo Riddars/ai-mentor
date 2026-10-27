@@ -132,6 +132,16 @@ async function toolChecks(work: string): Promise<void> {
       .execute("call", { path: "data/density_measurements.csv" } as never),
   );
   check("tools: table_info on 200k rows", table.includes("строк данных: 200000"), `${Date.now() - started} ms`);
+  const head = textOf(
+    await createTools(join(benchDir, "projects", "des-density"), log)
+      .find((t) => t.name === "read_file")!
+      .execute("call", { path: "data/density_measurements.csv", from: 1000, to: 1300 } as never),
+  );
+  check(
+    "tools: read_file shows only the head of a data file",
+    head.includes("\n20\t") && !head.includes("\n21\t") && !head.includes("\n1000\t"),
+    head.split("\n").at(-1),
+  );
   check("tools: viewed files logged", log.viewed.has("notebooks/eda.ipynb"));
 
   const linked = join(work, "linked");
