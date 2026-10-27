@@ -31,10 +31,17 @@ export interface AgentLimits {
 }
 
 export const DEFAULT_AGENT_LIMITS: AgentLimits = {
-  maxToolCalls: 30,
-  maxTokens: 400_000,
+  maxToolCalls: 50,
+  maxTokens: 600_000,
   timeoutMs: 10 * 60_000,
 };
+
+/**
+ * Every step resends the whole conversation. When the budget left is under this many steps like
+ * the last one (a step whose tool calls are refused, the final answer and a margin), tool calls
+ * are refused and the model is asked to answer with what it has read.
+ */
+const WRAP_UP_STEPS = 2.5;
 
 export interface AgentResult {
   /** Text of the final answer; empty when the run failed. */
@@ -130,6 +137,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let toolCalls = 0;
   let tokensIn = 0;
   let tokensOut = 0;
+  let wrapUp = false;
   let stopReason: string | null = null;
 
   const agent = new Agent({
@@ -147,6 +155,9 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       if (toolCalls > limits.maxToolCalls) {
         return { block: true, reason: "Лимит вызовов инструментов исчерпан: ответь итоговым JSON сейчас." };
       }
+      if (wrapUp) {
+        return { block: true, reason: "Бюджет токенов почти исчерпан: ответь итоговым JSON сейчас по тому, что уже прочитал." };
+      }
       return undefined;
     },
   });
@@ -158,6 +169,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   agent.subscribe((event) => {
     if (event.type !== "turn_end") return;
     const message = event.message as AssistantMessage;
+    const before = tokensIn + tokensOut;
     const usage = message.usage;
     if (usage && usage.input + usage.cacheRead + usage.output > 0) {
       tokensIn += usage.input + usage.cacheRead;
@@ -168,7 +180,11 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       tokensOut += estimateTokens(JSON.stringify(message.content));
     }
     options.onUsage?.(tokensIn, tokensOut);
-    if (tokensIn + tokensOut > limits.maxTokens) abort(`token budget of ${limits.maxTokens} exceeded`);
+    const spent = tokensIn + tokensOut;
+    if (spent + WRAP_UP_STEPS * (spent - before) > limits.maxTokens) wrapUp = true;
+    // The final answer is kept even if its step went over the budget: the run ends with it anyway.
+    const final = !message.content.some((p) => p.type === "toolCall");
+    if (!final && spent > limits.maxTokens) abort(`token budget of ${limits.maxTokens} exceeded`);
     // A model that keeps calling tools after the limit is stopped for good.
     if (toolCalls > limits.maxToolCalls + 3) abort(`more than ${limits.maxToolCalls} tool calls`);
   });

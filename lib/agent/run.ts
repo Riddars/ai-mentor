@@ -34,8 +34,8 @@ function numberEnv(name: string, fallback: number): number {
 
 export function agentLimits(): AgentLimitsSpec {
   return {
-    maxToolCalls: numberEnv("AGENT_MAX_TOOL_CALLS", 30),
-    maxTokens: numberEnv("AGENT_TOKENS_PER_RUN", 400_000),
+    maxToolCalls: numberEnv("AGENT_MAX_TOOL_CALLS", 50),
+    maxTokens: numberEnv("AGENT_TOKENS_PER_RUN", 600_000),
     timeoutMs: numberEnv("AGENT_TIMEOUT_MS", 10 * 60_000),
   };
 }

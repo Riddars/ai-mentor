@@ -219,6 +219,22 @@ async function agentChecks(): Promise<void> {
   });
   check("agent: token budget stops the run", budget.error?.includes("token budget") === true, String(budget.error));
 
+  faux.setResponses([
+    ...Array.from({ length: 3 }, () => fauxAssistantMessage(fauxToolCall("read_file", { path: "src/train.py" }), { stopReason: "toolUse" })),
+    fauxAssistantMessage(fauxText(FINAL_JSON)),
+  ]);
+  const wrapped = await runAgent({
+    root,
+    systemPrompt: "review",
+    userPrompt: `go ${"x".repeat(30_000)}`,
+    models,
+    model: faux.getModel(),
+    limits: { maxToolCalls: 100, maxTokens: 35_000, timeoutMs: 60_000 },
+  });
+  const refused = JSON.stringify(wrapped.messages).includes("Бюджет токенов почти исчерпан");
+  check("agent: near the token budget tool calls are refused and the answer is kept",
+    refused && wrapped.error === null && wrapped.text === FINAL_JSON, `${wrapped.error} ${wrapped.tokensIn}`);
+
   const controller = new AbortController();
   controller.abort();
   faux.setResponses([fauxAssistantMessage(fauxText(FINAL_JSON))]);
