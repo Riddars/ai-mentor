@@ -161,8 +161,8 @@ export async function POST(req: Request) {
         await concludeCheckRun({
           ...args,
           checkRunId,
-          conclusion: "success",
-          output: { title: "AI Curator", summary: skipReason },
+          conclusion: "neutral",
+          output: { title: "Не разобрано", summary: skipReason },
         });
       } catch (error) {
         return failed("failed to conclude skipped check", error);

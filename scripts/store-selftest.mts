@@ -310,6 +310,11 @@ const prH = pr(8, "feat-h");
 store.recordAnalysis({ prId: prH, headSha: "old", trigger: "commit", outcome: "error", tokensIn: 900, tokensOut: 200 });
 const { jobId } = store.enqueueCommitJob({ prId: prH, headSha: "sha8", payload: {}, delayMs: 0, deadlineMs: 60_000 });
 store.setJobCheckRun(jobId as number, 42);
+db.prepare("UPDATE review_jobs SET deadline_at = datetime('now', '-1 minute') WHERE id = @id").run({ id: jobId });
+check("overdue queued job is detected", store.listOverdueJobs().some((j) => j.id === jobId));
+store.markJobRunning(jobId as number);
+check("overdue running job is detected", store.listOverdueJobs().some((j) => j.id === jobId));
+db.prepare("UPDATE review_jobs SET status = 'queued', deadline_at = datetime('now', '+1 minute') WHERE id = @id").run({ id: jobId });
 const job = store.listDueJobs(10).find((j) => j.id === jobId);
 let ran = false;
 let note = "";
@@ -326,6 +331,7 @@ await runJob(job!, {
   concludeUnreviewed: async (_job, summary) => {
     note = summary;
   },
+  concludePublished: async () => {},
   reportFailure: async () => {},
 });
 const state = db.prepare("SELECT status, check_concluded AS concluded, run_after > datetime('now') AS later FROM review_jobs WHERE id = @id").get({
@@ -347,12 +353,53 @@ await runJob(again!, {
   runComment: async () => {},
   runOverview: async () => {},
   concludeUnreviewed: async () => {},
+  concludePublished: async () => {},
   reportFailure: async () => {},
 });
 check("a zero budget means no limit", ran);
 
 const budgetNote = db.prepare("SELECT note FROM review_jobs WHERE id = @id").get({ id: jobId }) as { note: string };
 check("a job stopped by the token budget is marked \"budget\"", budgetNote.note === "budget", budgetNote.note);
+
+// A restart or failed GitHub PATCH after publishing must retry only the check.
+const prPublished = pr(9, "feat-published");
+const publishedId = store.recordAnalysis({ prId: prPublished, headSha: "sha9", trigger: "commit", outcome: "ok", tokensIn: 10, tokensOut: 5 });
+const { jobId: publishedJobId } = store.enqueueCommitJob({ prId: prPublished, headSha: "sha9", payload: {}, delayMs: 0, deadlineMs: 60_000 });
+store.setJobCheckRun(publishedJobId as number, 43);
+store.setJobPublishedAnalysis(publishedJobId as number, publishedId, "review was posted");
+let publishedCalls = 0;
+let repeatedModel = false;
+let sentNeutral = false;
+const publishedDeps = {
+  runCommit: async () => { repeatedModel = true; },
+  runComment: async () => {},
+  runOverview: async () => {},
+  concludeUnreviewed: async () => { sentNeutral = true; },
+  concludePublished: async () => {
+    publishedCalls += 1;
+    if (publishedCalls === 1) throw new Error("temporary GitHub failure");
+  },
+  reportFailure: async () => {},
+};
+await runJob(store.listDueJobs(10).find((j) => j.id === publishedJobId)!, publishedDeps);
+check("failed check PATCH leaves published job queued", (db.prepare("SELECT status FROM review_jobs WHERE id = ?").get(publishedJobId) as { status: string }).status === "queued");
+db.prepare("UPDATE review_jobs SET run_after = datetime('now') WHERE id = ?").run(publishedJobId);
+await runJob(store.listDueJobs(10).find((j) => j.id === publishedJobId)!, publishedDeps);
+check("published review resumes with check update only", publishedCalls === 2 && !repeatedModel && !sentNeutral);
+check("published job completes after check retry", (db.prepare("SELECT status FROM review_jobs WHERE id = ?").get(publishedJobId) as { status: string }).status === "done");
+
+// GitHub Re-run creates a fresh job for the same head and must not inherit its prior result.
+const { jobId: rerunJobId } = store.enqueueCommitJob({ prId: prPublished, headSha: "sha9", payload: {}, delayMs: 0, deadlineMs: 60_000 });
+store.setJobCheckRun(rerunJobId as number, 44);
+check("rerun has no published result of its own", store.publishedCommitAnalysisOutcome(rerunJobId as number) === null);
+db.prepare("UPDATE review_jobs SET deadline_at = datetime('now', '-1 minute') WHERE id = ?").run(rerunJobId);
+check("rerun has its own 30-minute deadline", store.listOverdueJobs().some((j) => j.id === rerunJobId));
+let rerunRan = false;
+await runJob(store.listDueJobs(10).find((j) => j.id === rerunJobId)!, {
+  ...publishedDeps,
+  runCommit: async () => { rerunRan = true; },
+});
+check("explicit rerun invokes the review", rerunRan);
 
 // An overview a person asked for is not held back by the project's budget.
 process.env.TOKENS_PER_PROJECT_DAY = "1000";
@@ -371,6 +418,7 @@ const runOverviewOnce = async (reason: string) => {
       ranOverview = true;
     },
     concludeUnreviewed: async () => {},
+    concludePublished: async () => {},
     reportFailure: async () => {},
   });
   return ranOverview;

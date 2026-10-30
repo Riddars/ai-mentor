@@ -770,6 +770,44 @@ export function hasSuccessfulCommitAnalysis(prId: number, headSha: string): bool
   return row !== undefined;
 }
 
+/** Outcome of the most recent review of this head, for a check created after its job ended. */
+export function latestCommitAnalysisOutcome(prId: number, headSha: string): AnalysisOutcome | null {
+  const row = getDb()
+    .prepare(
+      `SELECT outcome FROM analyses
+       WHERE pull_request_id = @prId AND head_sha = @headSha AND trigger = 'commit'
+       ORDER BY id DESC LIMIT 1`,
+    )
+    .get({ prId, headSha }) as { outcome: AnalysisOutcome } | undefined;
+  return row?.outcome ?? null;
+}
+
+/** A comment was published, so retrying the check must not repeat the model or PR comment. */
+export function publishedCommitAnalysisOutcome(jobId: number): AnalysisOutcome | null {
+  const row = getDb()
+    .prepare(
+      `SELECT a.outcome FROM review_jobs j JOIN analyses a ON a.id = j.published_analysis_id
+       WHERE j.id = @jobId AND a.comment IS NOT NULL`,
+    )
+    .get({ jobId }) as { outcome: AnalysisOutcome } | undefined;
+  return row?.outcome ?? null;
+}
+
+/** The PR comment is out; atomically attach its analysis to this job for check retries. */
+export function setJobPublishedAnalysis(jobId: number, analysisId: number, comment: string): void {
+  const db = getDb();
+  db.exec("BEGIN");
+  try {
+    setAnalysisComment(analysisId, comment);
+    db.prepare("UPDATE review_jobs SET published_analysis_id = @analysisId WHERE id = @jobId")
+      .run({ jobId, analysisId });
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function recordAnalysis(params: {
   prId: number;
   headSha: string;
@@ -1882,8 +1920,9 @@ export function listOverdueJobs(): ReviewJob[] {
     getDb()
       .prepare(
         `${JOB_SELECT}
-         WHERE j.kind = 'commit' AND j.status = 'queued' AND j.check_concluded = 0
-           AND j.check_run_id IS NOT NULL AND j.deadline_at <= datetime('now')`,
+         WHERE j.kind = 'commit' AND j.status IN ${ACTIVE_JOB} AND j.check_concluded = 0
+           AND j.check_run_id IS NOT NULL AND j.deadline_at <= datetime('now')
+           AND j.published_analysis_id IS NULL`,
       )
       .all() as unknown as RawJob[]
   ).map(toJob);
@@ -1954,7 +1993,7 @@ export function markCheckConcluded(id: number, note: "deadline" | "limit" | "bud
   getDb()
     .prepare(
       `UPDATE review_jobs SET check_concluded = 1, note = @note, updated_at = datetime('now')
-       WHERE id = @id`,
+       WHERE id = @id AND status IN ('queued', 'running', 'failed') AND check_concluded = 0`,
     )
     .run({ id, note });
 }

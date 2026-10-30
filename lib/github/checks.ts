@@ -3,7 +3,7 @@ import { githubRequest } from "@/lib/github/api";
 
 export const CHECK_NAME = "AI Curator";
 
-export type CheckConclusion = "success" | "action_required";
+export type CheckConclusion = "success" | "neutral" | "action_required";
 
 interface CheckOutput {
   title: string;
@@ -39,29 +39,62 @@ export async function createCheckRun(params: {
   return data.id;
 }
 
-export async function concludeCheckRun(params: {
+export interface CheckRunUpdate {
   owner: string;
   repo: string;
   checkRunId: number;
   conclusion: CheckConclusion;
   output: CheckOutput;
   installationId: number;
-}): Promise<void> {
-  const token = await getInstallationToken(params.installationId);
+}
+
+/**
+ * Serialize updates to one check. A late deadline must not replace a completed review with
+ * "not reviewed". Keep the last conclusion for the review retry window (24 hours).
+ */
+export function createCheckRunConcluder(send: (params: CheckRunUpdate) => Promise<void>) {
+  const updates = new Map<number, Promise<void>>();
+  const completed = new Map<number, CheckConclusion>();
+  return (params: CheckRunUpdate): Promise<boolean> => {
+    const previous = updates.get(params.checkRunId) ?? Promise.resolve();
+    let applied = false;
+    const current = previous.catch(() => {}).then(async () => {
+      const last = completed.get(params.checkRunId);
+      if (params.conclusion === "neutral" && last !== undefined && last !== "neutral") return;
+      await send(params);
+      completed.set(params.checkRunId, params.conclusion);
+      applied = true;
+    });
+    updates.set(params.checkRunId, current);
+    // A check cannot be updated by this process forever; leave a margin beyond retryWindowMs.
+    const expiry = setTimeout(() => {
+      if (updates.get(params.checkRunId) === current) {
+        updates.delete(params.checkRunId);
+        completed.delete(params.checkRunId);
+      }
+    }, 25 * 60 * 60_000);
+    expiry.unref();
+    return current.then(() => applied);
+  };
+}
+
+export const concludeCheckRun = createCheckRunConcluder(async (params) => {
+  const { owner, repo, checkRunId, conclusion, output, installationId } = params;
+  const token = await getInstallationToken(installationId);
   await githubRequest(
-    `/repos/${params.owner}/${params.repo}/check-runs/${params.checkRunId}`,
+    `/repos/${owner}/${repo}/check-runs/${checkRunId}`,
     {
       method: "PATCH",
       token,
       body: {
         status: "completed",
-        conclusion: params.conclusion,
+        conclusion,
         completed_at: new Date().toISOString(),
-        output: params.output,
+        output,
       },
     },
   );
-}
+});
 
 export async function findCheckRunId(params: {
   owner: string;

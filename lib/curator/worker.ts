@@ -9,6 +9,8 @@ import { memoryGap } from "@/lib/curator/memory";
 import { executeOverviewJob, OVERVIEW_LIMITS, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
   concludeCheck,
+  concludeUnreviewedCheck,
+  CheckUpdateError,
   executeCommentJob,
   executeCommitJob,
   handlePullRequestClosed,
@@ -28,6 +30,7 @@ import {
   listOverdueJobs,
   markCheckConcluded,
   markJobRunning,
+  publishedCommitAnalysisOutcome,
   queueProblems,
   recentAnalysesOfProject,
   recentTokens,
@@ -50,7 +53,8 @@ export interface WorkerDeps {
   runCommit(job: ReviewJob): Promise<void>;
   runComment(job: ReviewJob): Promise<void>;
   runOverview(job: ReviewJob): Promise<void>;
-  concludeUnreviewed(job: ReviewJob, summary: string): Promise<void>;
+  concludeUnreviewed(job: ReviewJob, summary: string): Promise<boolean | void>;
+  concludePublished(job: ReviewJob, outcome: "ok" | "parse_error" | "error" | "stale"): Promise<void>;
   reportFailure(job: ReviewJob): Promise<void>;
 }
 
@@ -60,7 +64,13 @@ const realDeps: WorkerDeps = {
   runComment: (job) => executeCommentJob(job.payload as CommentReviewParams),
   runOverview: (job) => executeOverviewJob(job),
   concludeUnreviewed: (job, summary) =>
-    concludeCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
+    concludeUnreviewedCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
+  concludePublished: async (job, outcome) => {
+    if (job.checkRunId === null) return;
+    const params = job.payload as ReviewParams;
+    if (outcome === "ok") await concludeCheck(params, job.checkRunId, "Разбор изменений завершён.");
+    else await concludeUnreviewedCheck(params, job.checkRunId, "Не разобрано: ответ модели не удалось разобрать.");
+  },
   // A failed overview is already recorded with what it spent; it has no PR to report to.
   reportFailure: async (job) => {
     if (job.kind !== "overview") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind);
@@ -90,8 +100,9 @@ export async function concludeOverdue(deps: WorkerDeps = realDeps): Promise<void
   for (const job of listOverdueJobs()) {
     markProgress();
     try {
-      await deps.concludeUnreviewed(job, NOT_REVIEWED_DEADLINE);
-      markCheckConcluded(job.id, "deadline");
+      if (await deps.concludeUnreviewed(job, NOT_REVIEWED_DEADLINE) !== false) {
+        markCheckConcluded(job.id, "deadline");
+      }
     } catch (error) {
       console.error(`[queue] failed to conclude overdue check of job ${job.id}:`, error);
     }
@@ -102,8 +113,7 @@ export async function concludeOverdue(deps: WorkerDeps = realDeps): Promise<void
 async function concludeIfOpen(job: ReviewJob, summary: string, deps: WorkerDeps): Promise<boolean> {
   if (job.kind !== "commit" || job.checkRunId === null || job.checkConcluded) return false;
   try {
-    await deps.concludeUnreviewed(job, summary);
-    return true;
+    return (await deps.concludeUnreviewed(job, summary)) !== false;
   } catch (error) {
     console.error(`[queue] failed to conclude check of job ${job.id}:`, error);
     return false;
@@ -117,6 +127,22 @@ async function concludeIfOpen(job: ReviewJob, summary: string, deps: WorkerDeps)
  */
 export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promise<void> {
   const settings = queueSettings();
+
+  // A prior attempt already published its comment. After a restart or failed GitHub PATCH,
+  // finish only the check; never spend tokens or post the same comment again.
+  const published = job.kind === "commit"
+    ? publishedCommitAnalysisOutcome(job.id)
+    : null;
+  if (published !== null) {
+    try {
+      await deps.concludePublished(job, published);
+      finishJob(job.id, "done");
+    } catch (error) {
+      console.error(`[queue] check update of job ${job.id} failed, retrying:`, error);
+      rescheduleJob(job.id, { delayMs: 60_000 }, "check update failed");
+    }
+    return;
+  }
 
   if (getProject(job.projectId)?.status !== "active") {
     await concludeIfOpen(job, "Проект на паузе — разбор не выполняется.", deps);
@@ -153,6 +179,11 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     else await deps.runComment(job);
     finishJob(job.id, "done");
   } catch (error) {
+    if (error instanceof CheckUpdateError) {
+      console.error(`[queue] check update of job ${job.id} failed, retrying:`, error);
+      rescheduleJob(job.id, { delayMs: 60_000 }, "check update failed");
+      return;
+    }
     if (error instanceof StaleReviewError) {
       await concludeIfOpen(job, "Заменён новым коммитом — разбирается последний.", deps);
       finishJob(job.id, "superseded");

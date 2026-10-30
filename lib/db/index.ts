@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS review_jobs (
   run_after       TEXT NOT NULL DEFAULT (datetime('now')),
   deadline_at     TEXT,
   check_concluded INTEGER NOT NULL DEFAULT 0,
+  published_analysis_id INTEGER REFERENCES analyses(id),
   note            TEXT,
   last_error      TEXT,
   created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -366,6 +367,11 @@ function migrate(db: DatabaseSync): void {
       if (columns.includes(column)) db.exec(`ALTER TABLE analyses DROP COLUMN ${column}`);
     }
     db.exec("PRAGMA user_version = 14");
+  }
+  if (version < 15) {
+    // Tie a published result to its queue job so an explicit Re-run of the same SHA runs again.
+    addColumns(db, "review_jobs", { published_analysis_id: "INTEGER REFERENCES analyses(id)" });
+    db.exec("PRAGMA user_version = 15");
   }
 }
 

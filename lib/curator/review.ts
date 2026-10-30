@@ -34,9 +34,11 @@ import {
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
+  latestCommitAnalysisOutcome,
   recordAnalysis,
   recordPullRequestClosed,
   setAnalysisComment,
+  setJobPublishedAnalysis,
   supersedeCommitJobs,
   upsertParticipant,
   upsertPullRequest,
@@ -700,30 +702,51 @@ export async function startCommitReview(
     finishJob(jobId, "superseded", "failed to create the check-run");
     throw error;
   }
-  if (setJobCheckRun(jobId, checkRunId) === "done") {
-    // The review finished before the check existed — conclude it now.
-    await concludeCheck(params, checkRunId, "Разбор изменений завершён.");
+  const checkJobStatus = setJobCheckRun(jobId, checkRunId);
+  if (checkJobStatus === "done") {
+    // The review finished before the check existed — use its actual outcome.
+    const outcome = latestCommitAnalysisOutcome(prId, params.headSha);
+    if (outcome === "ok") await concludeCheck(params, checkRunId, "Разбор изменений завершён.");
+    else await concludeUnreviewedCheck(params, checkRunId, "Не разобрано: разбор не завершился успешно.");
+  } else if (checkJobStatus === "superseded" || checkJobStatus === "failed") {
+    await concludeUnreviewedCheck(params, checkRunId, "Не разобрано: задача завершилась до создания проверки.");
   }
   for (const id of supersededCheckRunIds) {
-    await concludeCheck(params, id, "Заменён новым коммитом — разбирается последний.").catch(
+    await concludeUnreviewedCheck(params, id, "Не разобрано: заменён новым коммитом — разбирается последний.").catch(
       (error) => console.error(`[curator] failed to conclude replaced check ${id}:`, error),
     );
   }
   return "queued";
 }
 
-/** Conclude a required check as success with a short note (no review happened). */
+/** A completed review remains advisory and allows merging. */
 export async function concludeCheck(
   params: Pick<ReviewParams, "owner" | "repo" | "installationId">,
   checkRunId: number,
   summary: string,
-): Promise<void> {
-  await concludeCheckRun({
+): Promise<boolean> {
+  return concludeCheckRun({
     owner: params.owner,
     repo: params.repo,
     checkRunId,
     conclusion: "success",
-    output: { title: "AI Curator", summary },
+    output: { title: "Разбор выполнен", summary },
+    installationId: params.installationId,
+  });
+}
+
+/** The required check is complete, but there is no successful review yet. */
+export async function concludeUnreviewedCheck(
+  params: Pick<ReviewParams, "owner" | "repo" | "installationId">,
+  checkRunId: number,
+  summary: string,
+): Promise<boolean> {
+  return concludeCheckRun({
+    owner: params.owner,
+    repo: params.repo,
+    checkRunId,
+    conclusion: "neutral",
+    output: { title: "Не разобрано", summary },
     installationId: params.installationId,
   });
 }
@@ -796,7 +819,7 @@ export async function handlePullRequestClosed(
   }
   if (data.merged) return;
   for (const checkRunId of supersedeCommitJobs(prId)) {
-    await concludeCheck(
+    await concludeUnreviewedCheck(
       { owner: project.owner, repo: project.repo, installationId },
       checkRunId,
       "Pull request закрыт без слияния — разбор не нужен.",
@@ -808,6 +831,13 @@ export async function handlePullRequestClosed(
 export class StaleReviewError extends Error {
   constructor() {
     super("Pull request changed during the review");
+  }
+}
+
+/** The review comment was published; retry only the GitHub check update. */
+export class CheckUpdateError extends Error {
+  constructor(cause: unknown) {
+    super("Failed to conclude the published review check", { cause });
   }
 }
 
@@ -827,7 +857,7 @@ export async function executeCommitJob(
     return pr !== null && pr.headSha === params.headSha && pr.state !== "closed";
   };
   if (!isCurrent()) throw new StaleReviewError();
-  const { analysisId, comment } = await runReview(params, prId, "commit", {
+  const { analysisId, comment, outcome } = await runReview(params, prId, "commit", {
     isCurrent,
     fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
     attempt,
@@ -839,17 +869,20 @@ export async function executeCommitJob(
     body: comment,
     installationId: params.installationId,
   });
-  setAnalysisComment(analysisId, comment);
+  setJobPublishedAnalysis(jobId, analysisId, comment);
   // Reviewed after a merge into another PR's branch: what it found passes to that PR.
   const reviewed = getPullRequest(prId);
   if (reviewed?.state === "merged" && !reviewed.mergedIntoDefault) recordPullRequestClosed(prId, "merged-other");
-  // The comment is out: from here on a failure must not repeat the review. The check is
-  // updated also after an early "not reviewed" conclusion; if this fails, it stays as is.
+  // The comment is out: a failed check update retries without another model call or comment.
   const checkRunId = getJobCheckRun(jobId);
   if (checkRunId !== null) {
-    await concludeCheck(params, checkRunId, "Разбор изменений завершён.").catch((error) =>
-      console.error(`[curator] failed to conclude check ${checkRunId}:`, error),
-    );
+    const conclude = outcome === "ok" ? concludeCheck : concludeUnreviewedCheck;
+    const summary = outcome === "ok" ? "Разбор изменений завершён." : "Не разобрано: ответ модели не удалось разобрать.";
+    try {
+      await conclude(params, checkRunId, summary);
+    } catch (error) {
+      throw new CheckUpdateError(error);
+    }
   }
 }
 
