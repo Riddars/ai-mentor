@@ -1,0 +1,504 @@
+PROJECT: The fictional Velin microclimate notebook
+Observer group: Lantern Survey Cohort
+All place names, measurements, and people in this notebook are invented.
+Scale: light on a 0-9 dial; breeze on a 0-4 dial.
+
+ENTRY F001 | 2061-04-01 | Paven / roof
+Light dial 7; breeze dial 3; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F002 | 2061-04-01 | Istral / garden
+Light dial 4; breeze dial 1; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F003 | 2061-04-01 | Merrow / library
+Light dial 1; breeze dial 4; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F004 | 2061-04-01 | Talden / canopy
+Light dial 8; breeze dial 2; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F005 | 2061-04-02 | Norus / courtyard
+Light dial 5; breeze dial 0; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F006 | 2061-04-02 | Velin / riverbank
+Light dial 2; breeze dial 3; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F007 | 2061-04-02 | Paven / roof
+Light dial 9; breeze dial 1; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F008 | 2061-04-02 | Istral / garden
+Light dial 6; breeze dial 4; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F009 | 2061-04-03 | Merrow / library
+Light dial 3; breeze dial 2; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F010 | 2061-04-03 | Talden / canopy
+Light dial 0; breeze dial 0; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F011 | 2061-04-03 | Norus / courtyard
+Light dial 7; breeze dial 3; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F012 | 2061-04-03 | Velin / riverbank
+Light dial 4; breeze dial 1; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F013 | 2061-04-04 | Paven / roof
+Light dial 1; breeze dial 4; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F014 | 2061-04-04 | Istral / garden
+Light dial 8; breeze dial 2; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F015 | 2061-04-04 | Merrow / library
+Light dial 5; breeze dial 0; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F016 | 2061-04-04 | Talden / canopy
+Light dial 2; breeze dial 3; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F017 | 2061-04-05 | Norus / courtyard
+Light dial 9; breeze dial 1; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F018 | 2061-04-05 | Velin / riverbank
+Light dial 6; breeze dial 4; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F019 | 2061-04-05 | Paven / roof
+Light dial 3; breeze dial 2; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F020 | 2061-04-05 | Istral / garden
+Light dial 0; breeze dial 0; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F021 | 2061-04-06 | Merrow / library
+Light dial 7; breeze dial 3; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F022 | 2061-04-06 | Talden / canopy
+Light dial 4; breeze dial 1; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F023 | 2061-04-06 | Norus / courtyard
+Light dial 1; breeze dial 4; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F024 | 2061-04-06 | Velin / riverbank
+Light dial 8; breeze dial 2; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F025 | 2061-04-07 | Paven / roof
+Light dial 5; breeze dial 0; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F026 | 2061-04-07 | Istral / garden
+Light dial 2; breeze dial 3; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F027 | 2061-04-07 | Merrow / library
+Light dial 9; breeze dial 1; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F028 | 2061-04-07 | Talden / canopy
+Light dial 6; breeze dial 4; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F029 | 2061-04-08 | Norus / courtyard
+Light dial 3; breeze dial 2; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F030 | 2061-04-08 | Velin / riverbank
+Light dial 0; breeze dial 0; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F031 | 2061-04-08 | Paven / roof
+Light dial 7; breeze dial 3; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F032 | 2061-04-08 | Istral / garden
+Light dial 4; breeze dial 1; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F033 | 2061-04-09 | Merrow / library
+Light dial 1; breeze dial 4; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F034 | 2061-04-09 | Talden / canopy
+Light dial 8; breeze dial 2; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F035 | 2061-04-09 | Norus / courtyard
+Light dial 5; breeze dial 0; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F036 | 2061-04-09 | Velin / riverbank
+Light dial 2; breeze dial 3; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F037 | 2061-04-10 | Paven / roof
+Light dial 9; breeze dial 1; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F038 | 2061-04-10 | Istral / garden
+Light dial 6; breeze dial 4; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F039 | 2061-04-10 | Merrow / library
+Light dial 3; breeze dial 2; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F040 | 2061-04-10 | Talden / canopy
+Light dial 0; breeze dial 0; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F041 | 2061-04-11 | Norus / courtyard
+Light dial 7; breeze dial 3; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F042 | 2061-04-11 | Velin / riverbank
+Light dial 4; breeze dial 1; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F043 | 2061-04-11 | Paven / roof
+Light dial 1; breeze dial 4; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F044 | 2061-04-11 | Istral / garden
+Light dial 8; breeze dial 2; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F045 | 2061-04-12 | Merrow / library
+Light dial 5; breeze dial 0; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F046 | 2061-04-12 | Talden / canopy
+Light dial 2; breeze dial 3; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F047 | 2061-04-12 | Norus / courtyard
+Light dial 9; breeze dial 1; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F048 | 2061-04-12 | Velin / riverbank
+Light dial 6; breeze dial 4; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F049 | 2061-04-13 | Paven / roof
+Light dial 3; breeze dial 2; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F050 | 2061-04-13 | Istral / garden
+Light dial 0; breeze dial 0; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F051 | 2061-04-13 | Merrow / library
+Light dial 7; breeze dial 3; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F052 | 2061-04-13 | Talden / canopy
+Light dial 4; breeze dial 1; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F053 | 2061-04-14 | Norus / courtyard
+Light dial 1; breeze dial 4; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F054 | 2061-04-14 | Velin / riverbank
+Light dial 8; breeze dial 2; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F055 | 2061-04-14 | Paven / roof
+Light dial 5; breeze dial 0; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F056 | 2061-04-14 | Istral / garden
+Light dial 2; breeze dial 3; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F057 | 2061-04-15 | Merrow / library
+Light dial 9; breeze dial 1; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F058 | 2061-04-15 | Talden / canopy
+Light dial 6; breeze dial 4; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F059 | 2061-04-15 | Norus / courtyard
+Light dial 3; breeze dial 2; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F060 | 2061-04-15 | Velin / riverbank
+Light dial 0; breeze dial 0; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F061 | 2061-04-16 | Paven / roof
+Light dial 7; breeze dial 3; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F062 | 2061-04-16 | Istral / garden
+Light dial 4; breeze dial 1; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F063 | 2061-04-16 | Merrow / library
+Light dial 1; breeze dial 4; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F064 | 2061-04-16 | Talden / canopy
+Light dial 8; breeze dial 2; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F065 | 2061-04-17 | Norus / courtyard
+Light dial 5; breeze dial 0; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F066 | 2061-04-17 | Velin / riverbank
+Light dial 2; breeze dial 3; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F067 | 2061-04-17 | Paven / roof
+Light dial 9; breeze dial 1; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F068 | 2061-04-17 | Istral / garden
+Light dial 6; breeze dial 4; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F069 | 2061-04-18 | Merrow / library
+Light dial 3; breeze dial 2; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F070 | 2061-04-18 | Talden / canopy
+Light dial 0; breeze dial 0; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F071 | 2061-04-18 | Norus / courtyard
+Light dial 7; breeze dial 3; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F072 | 2061-04-18 | Velin / riverbank
+Light dial 4; breeze dial 1; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F073 | 2061-04-19 | Paven / roof
+Light dial 1; breeze dial 4; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F074 | 2061-04-19 | Istral / garden
+Light dial 8; breeze dial 2; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F075 | 2061-04-19 | Merrow / library
+Light dial 5; breeze dial 0; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F076 | 2061-04-19 | Talden / canopy
+Light dial 2; breeze dial 3; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F077 | 2061-04-20 | Norus / courtyard
+Light dial 9; breeze dial 1; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F078 | 2061-04-20 | Velin / riverbank
+Light dial 6; breeze dial 4; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F079 | 2061-04-20 | Paven / roof
+Light dial 3; breeze dial 2; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F080 | 2061-04-20 | Istral / garden
+Light dial 0; breeze dial 0; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F081 | 2061-04-21 | Merrow / library
+Light dial 7; breeze dial 3; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F082 | 2061-04-21 | Talden / canopy
+Light dial 4; breeze dial 1; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F083 | 2061-04-21 | Norus / courtyard
+Light dial 1; breeze dial 4; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F084 | 2061-04-21 | Velin / riverbank
+Light dial 8; breeze dial 2; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F085 | 2061-04-22 | Paven / roof
+Light dial 5; breeze dial 0; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F086 | 2061-04-22 | Istral / garden
+Light dial 2; breeze dial 3; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F087 | 2061-04-22 | Merrow / library
+Light dial 9; breeze dial 1; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F088 | 2061-04-22 | Talden / canopy
+Light dial 6; breeze dial 4; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.
+
+ENTRY F089 | 2061-04-23 | Norus / courtyard
+Light dial 3; breeze dial 2; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V06 after the noon bell if the chalk line is dry.
+
+ENTRY F090 | 2061-04-23 | Velin / riverbank
+Light dial 0; breeze dial 0; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V07 after the noon bell if the chalk line is dry.
+
+ENTRY F091 | 2061-04-23 | Paven / roof
+Light dial 7; breeze dial 3; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V08 after the noon bell if the chalk line is dry.
+
+ENTRY F092 | 2061-04-23 | Istral / garden
+Light dial 4; breeze dial 1; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V09 after the noon bell if the chalk line is dry.
+
+ENTRY F093 | 2061-04-24 | Merrow / library
+Light dial 1; breeze dial 4; marker sable.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V10 after the noon bell if the chalk line is dry.
+
+ENTRY F094 | 2061-04-24 | Talden / canopy
+Light dial 8; breeze dial 2; marker twill.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V11 after the noon bell if the chalk line is dry.
+
+ENTRY F095 | 2061-04-24 | Norus / courtyard
+Light dial 5; breeze dial 0; marker violet.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V12 after the noon bell if the chalk line is dry.
+
+ENTRY F096 | 2061-04-24 | Velin / riverbank
+Light dial 2; breeze dial 3; marker amber.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V01 after the noon bell if the chalk line is dry.
+
+ENTRY F097 | 2061-04-25 | Paven / roof
+Light dial 9; breeze dial 1; marker cobalt.
+Sketch note: A paper vane faced the pond; the painted marker remained legible.
+Follow-up: Repeat at station V02 after the noon bell if the chalk line is dry.
+
+ENTRY F098 | 2061-04-25 | Istral / garden
+Light dial 6; breeze dial 4; marker fern.
+Sketch note: A paper vane faced the path; the painted marker remained legible.
+Follow-up: Repeat at station V03 after the noon bell if the chalk line is dry.
+
+ENTRY F099 | 2061-04-25 | Merrow / library
+Light dial 3; breeze dial 2; marker lumen.
+Sketch note: A paper vane faced the wall; the painted marker remained legible.
+Follow-up: Repeat at station V04 after the noon bell if the chalk line is dry.
+
+ENTRY F100 | 2061-04-25 | Talden / canopy
+Light dial 0; breeze dial 0; marker quartz.
+Sketch note: A paper vane faced the arch; the painted marker remained legible.
+Follow-up: Repeat at station V05 after the noon bell if the chalk line is dry.

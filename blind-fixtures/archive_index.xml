@@ -1,0 +1,364 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<archive project="Lantern Survey" fictional="true" version="1.3">
+  <description>Invented archive of painted measurement cards in Velin.</description>
+  <record id="A001" station="V02">
+    <title>Cobalt tile, arrangement 01</title>
+    <box>B01</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A002" station="V03">
+    <title>Fern tile, arrangement 02</title>
+    <box>B01</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A003" station="V04">
+    <title>Lumen tile, arrangement 03</title>
+    <box>B01</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A004" station="V05">
+    <title>Quartz tile, arrangement 04</title>
+    <box>B01</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A005" station="V06">
+    <title>Sable tile, arrangement 05</title>
+    <box>B01</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A006" station="V07">
+    <title>Twill tile, arrangement 06</title>
+    <box>B01</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A007" station="V08">
+    <title>Violet tile, arrangement 07</title>
+    <box>B01</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A008" station="V09">
+    <title>Amber tile, arrangement 08</title>
+    <box>B01</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A009" station="V10">
+    <title>Cobalt tile, arrangement 09</title>
+    <box>B01</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A010" station="V11">
+    <title>Fern tile, arrangement 10</title>
+    <box>B01</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A011" station="V12">
+    <title>Lumen tile, arrangement 11</title>
+    <box>B01</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A012" station="V01">
+    <title>Quartz tile, arrangement 12</title>
+    <box>B01</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A013" station="V02">
+    <title>Sable tile, arrangement 13</title>
+    <box>B02</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A014" station="V03">
+    <title>Twill tile, arrangement 14</title>
+    <box>B02</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A015" station="V04">
+    <title>Violet tile, arrangement 15</title>
+    <box>B02</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A016" station="V05">
+    <title>Amber tile, arrangement 16</title>
+    <box>B02</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A017" station="V06">
+    <title>Cobalt tile, arrangement 17</title>
+    <box>B02</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A018" station="V07">
+    <title>Fern tile, arrangement 18</title>
+    <box>B02</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A019" station="V08">
+    <title>Lumen tile, arrangement 19</title>
+    <box>B02</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A020" station="V09">
+    <title>Quartz tile, arrangement 20</title>
+    <box>B02</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A021" station="V10">
+    <title>Sable tile, arrangement 21</title>
+    <box>B02</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A022" station="V11">
+    <title>Twill tile, arrangement 22</title>
+    <box>B02</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A023" station="V12">
+    <title>Violet tile, arrangement 23</title>
+    <box>B02</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A024" station="V01">
+    <title>Amber tile, arrangement 24</title>
+    <box>B02</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A025" station="V02">
+    <title>Cobalt tile, arrangement 25</title>
+    <box>B03</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A026" station="V03">
+    <title>Fern tile, arrangement 26</title>
+    <box>B03</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A027" station="V04">
+    <title>Lumen tile, arrangement 27</title>
+    <box>B03</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A028" station="V05">
+    <title>Quartz tile, arrangement 28</title>
+    <box>B03</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A029" station="V06">
+    <title>Sable tile, arrangement 29</title>
+    <box>B03</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A030" station="V07">
+    <title>Twill tile, arrangement 30</title>
+    <box>B03</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A031" station="V08">
+    <title>Violet tile, arrangement 31</title>
+    <box>B03</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A032" station="V09">
+    <title>Amber tile, arrangement 32</title>
+    <box>B03</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A033" station="V10">
+    <title>Cobalt tile, arrangement 33</title>
+    <box>B03</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A034" station="V11">
+    <title>Fern tile, arrangement 34</title>
+    <box>B03</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A035" station="V12">
+    <title>Lumen tile, arrangement 35</title>
+    <box>B03</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A036" station="V01">
+    <title>Quartz tile, arrangement 36</title>
+    <box>B03</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A037" station="V02">
+    <title>Sable tile, arrangement 37</title>
+    <box>B04</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A038" station="V03">
+    <title>Twill tile, arrangement 38</title>
+    <box>B04</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A039" station="V04">
+    <title>Violet tile, arrangement 39</title>
+    <box>B04</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A040" station="V05">
+    <title>Amber tile, arrangement 40</title>
+    <box>B04</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A041" station="V06">
+    <title>Cobalt tile, arrangement 41</title>
+    <box>B04</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A042" station="V07">
+    <title>Fern tile, arrangement 42</title>
+    <box>B04</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A043" station="V08">
+    <title>Lumen tile, arrangement 43</title>
+    <box>B04</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A044" station="V09">
+    <title>Quartz tile, arrangement 44</title>
+    <box>B04</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A045" station="V10">
+    <title>Sable tile, arrangement 45</title>
+    <box>B04</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A046" station="V11">
+    <title>Twill tile, arrangement 46</title>
+    <box>B04</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A047" station="V12">
+    <title>Violet tile, arrangement 47</title>
+    <box>B04</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A048" station="V01">
+    <title>Amber tile, arrangement 48</title>
+    <box>B04</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A049" station="V02">
+    <title>Cobalt tile, arrangement 49</title>
+    <box>B05</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A050" station="V03">
+    <title>Fern tile, arrangement 50</title>
+    <box>B05</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A051" station="V04">
+    <title>Lumen tile, arrangement 51</title>
+    <box>B05</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A052" station="V05">
+    <title>Quartz tile, arrangement 52</title>
+    <box>B05</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A053" station="V06">
+    <title>Sable tile, arrangement 53</title>
+    <box>B05</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A054" station="V07">
+    <title>Twill tile, arrangement 54</title>
+    <box>B05</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A055" station="V08">
+    <title>Violet tile, arrangement 55</title>
+    <box>B05</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A056" station="V09">
+    <title>Amber tile, arrangement 56</title>
+    <box>B05</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A057" station="V10">
+    <title>Cobalt tile, arrangement 57</title>
+    <box>B05</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A058" station="V11">
+    <title>Fern tile, arrangement 58</title>
+    <box>B05</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A059" station="V12">
+    <title>Lumen tile, arrangement 59</title>
+    <box>B05</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A060" station="V01">
+    <title>Quartz tile, arrangement 60</title>
+    <box>B05</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A061" station="V02">
+    <title>Sable tile, arrangement 61</title>
+    <box>B06</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A062" station="V03">
+    <title>Twill tile, arrangement 62</title>
+    <box>B06</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A063" station="V04">
+    <title>Violet tile, arrangement 63</title>
+    <box>B06</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A064" station="V05">
+    <title>Amber tile, arrangement 64</title>
+    <box>B06</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A065" station="V06">
+    <title>Cobalt tile, arrangement 65</title>
+    <box>B06</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A066" station="V07">
+    <title>Fern tile, arrangement 66</title>
+    <box>B06</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+  <record id="A067" station="V08">
+    <title>Lumen tile, arrangement 67</title>
+    <box>B06</box>
+    <note>Card from Norus near the garden station.</note>
+  </record>
+  <record id="A068" station="V09">
+    <title>Quartz tile, arrangement 68</title>
+    <box>B06</box>
+    <note>Card from Talden near the library station.</note>
+  </record>
+  <record id="A069" station="V10">
+    <title>Sable tile, arrangement 69</title>
+    <box>B06</box>
+    <note>Card from Merrow near the canopy station.</note>
+  </record>
+  <record id="A070" station="V11">
+    <title>Twill tile, arrangement 70</title>
+    <box>B06</box>
+    <note>Card from Istral near the courtyard station.</note>
+  </record>
+  <record id="A071" station="V12">
+    <title>Violet tile, arrangement 71</title>
+    <box>B06</box>
+    <note>Card from Paven near the riverbank station.</note>
+  </record>
+  <record id="A072" station="V01">
+    <title>Amber tile, arrangement 72</title>
+    <box>B06</box>
+    <note>Card from Velin near the roof station.</note>
+  </record>
+</archive>

@@ -1,0 +1,36 @@
+[
+  {
+    "id": "S01-tuning-on-holdout",
+    "kind": "error",
+    "pass": true,
+    "found": "1/1",
+    "extras": 1,
+    "decisionsOk": true,
+    "passBeforeVerify": true,
+    "dropped": [],
+    "error": null,
+    "toolCalls": 12,
+    "viewed": [
+      "src/train.py",
+      "src/splits.py",
+      "src/config.py",
+      "src/data.py",
+      "src/evaluate.py",
+      "src/features.py",
+      "README.md",
+      "PLAN.md",
+      "data/README.md",
+      "data/raw/chembl_solubility.csv",
+      "notebooks/eda.ipynb",
+      "data/raw/pubchem_solubility.csv"
+    ],
+    "tokens": "53138/1594",
+    "verifyTokens": "2700/2112",
+    "cost": 7.23,
+    "seconds": 109,
+    "findings": [
+      "new open [methodology/critical] Гиперпараметры бустинга подобраны по отложенному тесту",
+      "new open [methodology/important] Сравнение Ridge и бустинга идёт по разным протоколам оценки"
+    ]
+  }
+]

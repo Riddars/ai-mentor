@@ -1,0 +1,31 @@
+[
+  {
+    "id": "S01-tuning-on-holdout",
+    "kind": "error",
+    "pass": true,
+    "found": "1/1",
+    "extras": 1,
+    "decisionsOk": true,
+    "passBeforeVerify": true,
+    "dropped": [],
+    "error": null,
+    "toolCalls": 7,
+    "viewed": [
+      "src/train.py",
+      "src/splits.py",
+      "src/config.py",
+      "src/data.py",
+      "src/evaluate.py",
+      "README.md",
+      "src/features.py"
+    ],
+    "tokens": "21628/1259",
+    "verifyTokens": "2733/547",
+    "cost": 3.19,
+    "seconds": 16,
+    "findings": [
+      "new open [methodology/critical] Гиперпараметры бустинга подбираются по отложенному тесту",
+      "new open [methodology/important] Метрики бустинга и Ridge считаются на разных выборках"
+    ]
+  }
+]

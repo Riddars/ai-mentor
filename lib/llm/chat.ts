@@ -65,8 +65,38 @@ function fallbackTarget(): Target | null {
 }
 
 interface ChatCompletionResponse {
-  choices?: { message?: { content?: string }; finish_reason?: string }[];
+  id?: string;
+  choices?: { message?: { content?: unknown; reasoning_content?: unknown; refusal?: unknown; tool_calls?: unknown }; finish_reason?: string }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number };
+}
+
+/** Metadata only: never log model text, prompts, keys or the raw response. */
+export function emptyResponseMetadata(
+  provider: string,
+  model: string,
+  data: ChatCompletionResponse,
+  gatewayRequestId?: string | null,
+): Record<string, unknown> {
+  const choice = data.choices?.[0];
+  const message = choice?.message;
+  const safeId = (value: string | null | undefined) => value?.slice(0, 120).replace(/[^a-zA-Z0-9._:-]/g, "?") ?? null;
+  return {
+    provider,
+    model,
+    responseId: safeId(data.id),
+    gatewayRequestId: safeId(gatewayRequestId),
+    choiceCount: data.choices?.length ?? 0,
+    finishReason: choice?.finish_reason ?? null,
+    contentType: typeof message?.content,
+    contentLength: typeof message?.content === "string" ? message.content.length : null,
+    hasReasoningContent: typeof message?.reasoning_content === "string" && message.reasoning_content.length > 0,
+    hasRefusal: message?.refusal != null,
+    hasToolCalls: Array.isArray(message?.tool_calls) && message.tool_calls.length > 0,
+    usage: data.usage ? {
+      input: data.usage.prompt_tokens ?? null,
+      output: data.usage.completion_tokens ?? null,
+    } : null,
+  };
 }
 
 export interface ChatUsage {
@@ -134,6 +164,10 @@ async function callOpenAICompatible(
   const choice = data.choices?.[0];
   const content = choice?.message?.content;
   if (typeof content !== "string" || content.trim() === "") {
+    console.warn("[llm] empty response metadata:", JSON.stringify(emptyResponseMetadata(
+      target.provider, target.model, data,
+      response.headers.get("x-gateway-request-id") ?? response.headers.get("x-request-id"),
+    )));
     throw new Error(`LLM ${target.provider} returned an empty response`);
   }
   if (choice?.finish_reason === "length") {

@@ -2,7 +2,7 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { SEVERITIES } from "@/lib/curator/finding";
 import { locationText } from "@/lib/format";
-import { isDataFile } from "@/lib/curator/data-files";
+import { fileKind } from "@/lib/curator/file-policy";
 import { notebookCells } from "@/lib/curator/notebook";
 import { changedLines, type ChangedLines } from "@/lib/curator/scope";
 import {
@@ -112,6 +112,7 @@ const DATA =
 
 /** Code and documents first, notebooks and data last: what matters most fits the limit. */
 export function rank(path: string): number {
+  if (fileKind(path) !== "text") return 4;
   if (DATA.test(path)) return 4;
   if (path.toLowerCase().endsWith(".ipynb")) return 3;
   if (CODE.test(path)) return 0;
@@ -123,6 +124,16 @@ export function rank(path: string): number {
 export function notebookText(raw: string): string | null {
   const text = notebookCells(raw);
   return text === null ? null : cut(text, LIMITS.notebook, "ноутбук");
+}
+
+function generatedChangeSummary(patch: string | undefined): string {
+  if (!patch) return "";
+  const relevant = patch.split("\n")
+    .filter((line) => /^[+-][^+-]/.test(line) &&
+      /node_modules\/|["']version["']\s*:|\bversion\s*=|\bname\s*=|^[+-][^\n]{1,120}(?:@|:)$/.test(line))
+    .slice(0, 12)
+    .map((line) => line.length > 160 ? `${line.slice(0, 160)}…` : line);
+  return relevant.length ? `Изменённые записи (фрагменты, не весь файл):\n${relevant.join("\n")}\n` : "";
 }
 
 /** The changed files as one text within the diff limit; notebooks are read whole via `readText`. */
@@ -142,8 +153,16 @@ export async function formatChanges(
       : null;
     if (notebook) {
       body = "Ноутбук целиком — текущие ячейки кода и текста, без выводов:\n```\n" + notebook + "\n```\n";
-    } else if (isDataFile(file.filename)) {
-      body = "(файл данных: содержимое в разбор не передаётся)\n";
+    } else if (fileKind(file.filename) !== "text") {
+      body = `(тип: ${fileKind(file.filename)}; полный текст в разбор не передаётся; +${file.additions}/-${file.deletions} строк)\n` +
+        (fileKind(file.filename) === "generated" ? generatedChangeSummary(file.patch) : "");
+    } else if (file.patch && /\.(?:json|xml|html?)$/i.test(file.filename) && file.patch.length > 10_000) {
+      const markers: string[] = [];
+      for (const match of file.patch.matchAll(/(?:"([A-Za-z_][\w-]{0,40})"\s*:|<([A-Za-z][\w:-]{0,40})(?:\s|>))/g)) {
+        markers.push(match[1] ?? match[2]);
+        if (markers.length === 20) break;
+      }
+      body = `(крупный структурированный diff: ${file.patch.length} символов; полный текст не передаётся; ключи/теги: ${[...new Set(markers)].join(", ") || "не определены"})\n`;
     } else if (file.patch) {
       body = "```diff\n" + file.patch + "\n```\n";
     } else {

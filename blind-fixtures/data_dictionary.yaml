@@ -1,0 +1,108 @@
+project: Lantern Survey
+fictional: true
+version: 3
+description: Painted tiles and paper vanes in invented Velin
+fields:
+  sample_id:
+    type: string
+    description: Identifier printed on a card
+    required: true
+  day:
+    type: date
+    description: Imaginary observation date
+    required: true
+  station:
+    type: string
+    description: Cardboard station label
+    required: true
+  zone:
+    type: category
+    description: Placement zone
+    required: true
+  light_dial:
+    type: integer
+    description: Nine-step light scale with zero
+    required: true
+  breeze_dial:
+    type: integer
+    description: Five-step vane scale with zero
+    required: true
+  tile_count:
+    type: integer
+    description: Count of ceramic tiles
+    required: true
+  status:
+    type: category
+    description: Review state of a paper form
+    required: true
+stations:
+  - id: V01
+    place: Velin
+    zone: canopy
+    tile: amber
+    reference_edge: north
+  - id: V02
+    place: Norus
+    zone: courtyard
+    tile: cobalt
+    reference_edge: east
+  - id: V03
+    place: Talden
+    zone: riverbank
+    tile: fern
+    reference_edge: south
+  - id: V04
+    place: Merrow
+    zone: roof
+    tile: lumen
+    reference_edge: west
+  - id: V05
+    place: Istral
+    zone: garden
+    tile: quartz
+    reference_edge: north
+  - id: V06
+    place: Paven
+    zone: library
+    tile: sable
+    reference_edge: east
+  - id: V07
+    place: Velin
+    zone: canopy
+    tile: twill
+    reference_edge: south
+  - id: V08
+    place: Norus
+    zone: courtyard
+    tile: violet
+    reference_edge: west
+  - id: V09
+    place: Talden
+    zone: riverbank
+    tile: amber
+    reference_edge: north
+  - id: V10
+    place: Merrow
+    zone: roof
+    tile: cobalt
+    reference_edge: east
+  - id: V11
+    place: Istral
+    zone: garden
+    tile: fern
+    reference_edge: south
+  - id: V12
+    place: Paven
+    zone: library
+    tile: lumen
+    reference_edge: west
+quality_flags:
+  accepted:
+    meaning: Card has two legible dial readings
+    retain_in_archive: true
+  review:
+    meaning: Card awaits a second inspection
+    retain_in_archive: true
+  void:
+    meaning: Card was never placed
+    retain_in_archive: true

@@ -114,7 +114,7 @@ async function toolChecks(work: string): Promise<void> {
   const call = (name: string, args: Record<string, unknown>) => tools[name].execute("call", args as never);
   const textOf = (r: Awaited<ReturnType<typeof call>>) => r.content.map((c) => ("text" in c ? c.text : "")).join("");
 
-  check("tools: exactly the four read-only tools", Object.keys(tools).sort().join(",") === "grep,list_files,read_file,table_info");
+  check("tools: only the ten read-only tools", Object.keys(tools).sort().join(",") === "grep,html_info,html_section,json_get,json_info,list_files,read_file,table_info,xml_get,xml_info");
   const outside = await rejects(call("read_file", { path: "../../../../Windows/win.ini" }));
   check("tools: path outside the copy refused", outside !== null, String(outside));
   const absolute = await rejects(call("read_file", { path: "/etc/passwd" }));

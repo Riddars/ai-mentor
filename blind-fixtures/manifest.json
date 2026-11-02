@@ -1,0 +1,104 @@
+{
+  "collection": "Lantern Survey fictional student repository",
+  "files": [
+    {
+      "file": "field_notebook.txt",
+      "purpose": "Invented field observation notes",
+      "facts": [
+        "Contains 100 numbered entries, F001 through F100.",
+        "The light dial is defined on a 0-9 scale."
+      ],
+      "bytes": 24667
+    },
+    {
+      "file": "calibration_journal.md",
+      "purpose": "Fictional weekly calibration journal",
+      "facts": [
+        "Has headings for Week 01 through Week 16.",
+        "Lists twelve cardboard stations labeled V01-V12."
+      ],
+      "bytes": 8091
+    },
+    {
+      "file": "station_readings.csv",
+      "purpose": "Synthetic station measurements",
+      "facts": [
+        "Contains 360 data rows plus a header.",
+        "Sample S0037 has status review."
+      ],
+      "bytes": 16424
+    },
+    {
+      "file": "specimen_catalog.tsv",
+      "purpose": "Invented collection card catalog",
+      "facts": [
+        "Contains 120 cards, C001 through C120.",
+        "Cards are divided into six collections of twenty."
+      ],
+      "bytes": 7707
+    },
+    {
+      "file": "response_bundle.json",
+      "purpose": "Fictional response bundle",
+      "facts": [
+        "The top-level fictional flag is true.",
+        "Contains 48 responses grouped into six sessions."
+      ],
+      "bytes": 11871
+    },
+    {
+      "file": "activity_log.jsonl",
+      "purpose": "Synthetic chronological activity log",
+      "facts": [
+        "Contains 180 JSON objects on separate lines.",
+        "The first event ID is E0001 and the last is E0180."
+      ],
+      "bytes": 30312
+    },
+    {
+      "file": "archive_index.xml",
+      "purpose": "Invented archive metadata",
+      "facts": [
+        "The archive element has fictional=\"true\".",
+        "There are 72 record elements in six boxes."
+      ],
+      "bytes": 12555
+    },
+    {
+      "file": "data_dictionary.yaml",
+      "purpose": "Field definitions and station metadata",
+      "facts": [
+        "Defines eight fields under fields.",
+        "Lists twelve stations under stations."
+      ],
+      "bytes": 2186
+    },
+    {
+      "file": "card_exhibit.html",
+      "purpose": "Fictional HTML card exhibit",
+      "facts": [
+        "The table body contains 48 card rows.",
+        "The page title is Lantern Survey | Card Exhibit."
+      ],
+      "bytes": 6800
+    },
+    {
+      "file": "reading_list.bib",
+      "purpose": "Invented BibTeX reading list",
+      "facts": [
+        "Contains 40 misc entries keyed lantern01 through lantern40.",
+        "Every entry is described as a fictional classroom note."
+      ],
+      "bytes": 10288
+    },
+    {
+      "file": "seed_archive.sql",
+      "purpose": "Fictional relational seed data",
+      "facts": [
+        "Creates stations and tiles tables.",
+        "Inserts 12 stations and 144 tiles."
+      ],
+      "bytes": 8866
+    }
+  ]
+}

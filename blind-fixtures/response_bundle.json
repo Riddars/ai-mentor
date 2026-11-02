@@ -1,0 +1,451 @@
+{
+  "project": "Lantern Survey",
+  "fictional": true,
+  "instrument": {
+    "version": "2.1",
+    "scale": {
+      "clarity": [
+        1,
+        5
+      ],
+      "comfort": [
+        1,
+        5
+      ]
+    }
+  },
+  "responses": [
+    {
+      "response_id": "R001",
+      "session": "G01",
+      "station": "V02",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "sable",
+      "comment": "The courtyard card showed a lumen mark beside the drawn scale."
+    },
+    {
+      "response_id": "R002",
+      "session": "G01",
+      "station": "V03",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "fern",
+      "comment": "The riverbank card showed a quartz mark beside the drawn scale."
+    },
+    {
+      "response_id": "R003",
+      "session": "G01",
+      "station": "V04",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "violet",
+      "comment": "The roof card showed a sable mark beside the drawn scale."
+    },
+    {
+      "response_id": "R004",
+      "session": "G01",
+      "station": "V05",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "quartz",
+      "comment": "The garden card showed a twill mark beside the drawn scale."
+    },
+    {
+      "response_id": "R005",
+      "session": "G01",
+      "station": "V06",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "cobalt",
+      "comment": "The library card showed a violet mark beside the drawn scale."
+    },
+    {
+      "response_id": "R006",
+      "session": "G01",
+      "station": "V07",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "twill",
+      "comment": "The canopy card showed a amber mark beside the drawn scale."
+    },
+    {
+      "response_id": "R007",
+      "session": "G01",
+      "station": "V08",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "lumen",
+      "comment": "The courtyard card showed a cobalt mark beside the drawn scale."
+    },
+    {
+      "response_id": "R008",
+      "session": "G01",
+      "station": "V09",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "amber",
+      "comment": "The riverbank card showed a fern mark beside the drawn scale."
+    },
+    {
+      "response_id": "R009",
+      "session": "G02",
+      "station": "V10",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "sable",
+      "comment": "The roof card showed a lumen mark beside the drawn scale."
+    },
+    {
+      "response_id": "R010",
+      "session": "G02",
+      "station": "V11",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "fern",
+      "comment": "The garden card showed a quartz mark beside the drawn scale."
+    },
+    {
+      "response_id": "R011",
+      "session": "G02",
+      "station": "V12",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "violet",
+      "comment": "The library card showed a sable mark beside the drawn scale."
+    },
+    {
+      "response_id": "R012",
+      "session": "G02",
+      "station": "V01",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "quartz",
+      "comment": "The canopy card showed a twill mark beside the drawn scale."
+    },
+    {
+      "response_id": "R013",
+      "session": "G02",
+      "station": "V02",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "cobalt",
+      "comment": "The courtyard card showed a violet mark beside the drawn scale."
+    },
+    {
+      "response_id": "R014",
+      "session": "G02",
+      "station": "V03",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "twill",
+      "comment": "The riverbank card showed a amber mark beside the drawn scale."
+    },
+    {
+      "response_id": "R015",
+      "session": "G02",
+      "station": "V04",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "lumen",
+      "comment": "The roof card showed a cobalt mark beside the drawn scale."
+    },
+    {
+      "response_id": "R016",
+      "session": "G02",
+      "station": "V05",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "amber",
+      "comment": "The garden card showed a fern mark beside the drawn scale."
+    },
+    {
+      "response_id": "R017",
+      "session": "G03",
+      "station": "V06",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "sable",
+      "comment": "The library card showed a lumen mark beside the drawn scale."
+    },
+    {
+      "response_id": "R018",
+      "session": "G03",
+      "station": "V07",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "fern",
+      "comment": "The canopy card showed a quartz mark beside the drawn scale."
+    },
+    {
+      "response_id": "R019",
+      "session": "G03",
+      "station": "V08",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "violet",
+      "comment": "The courtyard card showed a sable mark beside the drawn scale."
+    },
+    {
+      "response_id": "R020",
+      "session": "G03",
+      "station": "V09",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "quartz",
+      "comment": "The riverbank card showed a twill mark beside the drawn scale."
+    },
+    {
+      "response_id": "R021",
+      "session": "G03",
+      "station": "V10",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "cobalt",
+      "comment": "The roof card showed a violet mark beside the drawn scale."
+    },
+    {
+      "response_id": "R022",
+      "session": "G03",
+      "station": "V11",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "twill",
+      "comment": "The garden card showed a amber mark beside the drawn scale."
+    },
+    {
+      "response_id": "R023",
+      "session": "G03",
+      "station": "V12",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "lumen",
+      "comment": "The library card showed a cobalt mark beside the drawn scale."
+    },
+    {
+      "response_id": "R024",
+      "session": "G03",
+      "station": "V01",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "amber",
+      "comment": "The canopy card showed a fern mark beside the drawn scale."
+    },
+    {
+      "response_id": "R025",
+      "session": "G04",
+      "station": "V02",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "sable",
+      "comment": "The courtyard card showed a lumen mark beside the drawn scale."
+    },
+    {
+      "response_id": "R026",
+      "session": "G04",
+      "station": "V03",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "fern",
+      "comment": "The riverbank card showed a quartz mark beside the drawn scale."
+    },
+    {
+      "response_id": "R027",
+      "session": "G04",
+      "station": "V04",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "violet",
+      "comment": "The roof card showed a sable mark beside the drawn scale."
+    },
+    {
+      "response_id": "R028",
+      "session": "G04",
+      "station": "V05",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "quartz",
+      "comment": "The garden card showed a twill mark beside the drawn scale."
+    },
+    {
+      "response_id": "R029",
+      "session": "G04",
+      "station": "V06",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "cobalt",
+      "comment": "The library card showed a violet mark beside the drawn scale."
+    },
+    {
+      "response_id": "R030",
+      "session": "G04",
+      "station": "V07",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "twill",
+      "comment": "The canopy card showed a amber mark beside the drawn scale."
+    },
+    {
+      "response_id": "R031",
+      "session": "G04",
+      "station": "V08",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "lumen",
+      "comment": "The courtyard card showed a cobalt mark beside the drawn scale."
+    },
+    {
+      "response_id": "R032",
+      "session": "G04",
+      "station": "V09",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "amber",
+      "comment": "The riverbank card showed a fern mark beside the drawn scale."
+    },
+    {
+      "response_id": "R033",
+      "session": "G05",
+      "station": "V10",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "sable",
+      "comment": "The roof card showed a lumen mark beside the drawn scale."
+    },
+    {
+      "response_id": "R034",
+      "session": "G05",
+      "station": "V11",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "fern",
+      "comment": "The garden card showed a quartz mark beside the drawn scale."
+    },
+    {
+      "response_id": "R035",
+      "session": "G05",
+      "station": "V12",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "violet",
+      "comment": "The library card showed a sable mark beside the drawn scale."
+    },
+    {
+      "response_id": "R036",
+      "session": "G05",
+      "station": "V01",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "quartz",
+      "comment": "The canopy card showed a twill mark beside the drawn scale."
+    },
+    {
+      "response_id": "R037",
+      "session": "G05",
+      "station": "V02",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "cobalt",
+      "comment": "The courtyard card showed a violet mark beside the drawn scale."
+    },
+    {
+      "response_id": "R038",
+      "session": "G05",
+      "station": "V03",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "twill",
+      "comment": "The riverbank card showed a amber mark beside the drawn scale."
+    },
+    {
+      "response_id": "R039",
+      "session": "G05",
+      "station": "V04",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "lumen",
+      "comment": "The roof card showed a cobalt mark beside the drawn scale."
+    },
+    {
+      "response_id": "R040",
+      "session": "G05",
+      "station": "V05",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "amber",
+      "comment": "The garden card showed a fern mark beside the drawn scale."
+    },
+    {
+      "response_id": "R041",
+      "session": "G06",
+      "station": "V06",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "sable",
+      "comment": "The library card showed a lumen mark beside the drawn scale."
+    },
+    {
+      "response_id": "R042",
+      "session": "G06",
+      "station": "V07",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "fern",
+      "comment": "The canopy card showed a quartz mark beside the drawn scale."
+    },
+    {
+      "response_id": "R043",
+      "session": "G06",
+      "station": "V08",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "violet",
+      "comment": "The courtyard card showed a sable mark beside the drawn scale."
+    },
+    {
+      "response_id": "R044",
+      "session": "G06",
+      "station": "V09",
+      "clarity": 3,
+      "comfort": 5,
+      "chosen_marker": "quartz",
+      "comment": "The riverbank card showed a twill mark beside the drawn scale."
+    },
+    {
+      "response_id": "R045",
+      "session": "G06",
+      "station": "V10",
+      "clarity": 1,
+      "comfort": 2,
+      "chosen_marker": "cobalt",
+      "comment": "The roof card showed a violet mark beside the drawn scale."
+    },
+    {
+      "response_id": "R046",
+      "session": "G06",
+      "station": "V11",
+      "clarity": 4,
+      "comfort": 4,
+      "chosen_marker": "twill",
+      "comment": "The garden card showed a amber mark beside the drawn scale."
+    },
+    {
+      "response_id": "R047",
+      "session": "G06",
+      "station": "V12",
+      "clarity": 2,
+      "comfort": 1,
+      "chosen_marker": "lumen",
+      "comment": "The library card showed a cobalt mark beside the drawn scale."
+    },
+    {
+      "response_id": "R048",
+      "session": "G06",
+      "station": "V01",
+      "clarity": 5,
+      "comfort": 3,
+      "chosen_marker": "amber",
+      "comment": "The canopy card showed a fern mark beside the drawn scale."
+    }
+  ]
+}
