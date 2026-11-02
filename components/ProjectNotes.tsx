@@ -5,6 +5,7 @@ import { saveProjectNotesAction, startOverviewAction } from "@/app/actions/revie
 import type { ActionState } from "@/app/actions/admin";
 import { Button } from "@/components/ui/Button";
 import { FormMessage, inputClass } from "@/components/admin/fields";
+import { Markdown } from "@/components/Markdown";
 
 /** The curator's notes about the project, editable by its supervisor. */
 export function ProjectNotes({ projectId, notes }: { projectId: number; notes: string | null }) {
@@ -19,7 +20,7 @@ export function ProjectNotes({ projectId, notes }: { projectId: number; notes: s
     return (
       <div className="flex flex-col gap-3">
         {notes ? (
-          <p className="text-sm whitespace-pre-wrap">{notes}</p>
+          <Markdown>{notes}</Markdown>
         ) : (
           <p className="text-sm text-muted-foreground">Описания пока нет — его составит полный обзор.</p>
         )}
