@@ -46,3 +46,9 @@ next-env.d.ts
 
 # Agent bench runs (results and transcripts)
 /bench-runs/
+
+# Video production binaries, raw captures, and exports
+/.video-tools/
+/video-production/
+/video-test.mp4
+/video-test-frame.png
