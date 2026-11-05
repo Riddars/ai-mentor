@@ -470,8 +470,15 @@ check("usage by kind: the head sees more than one project", store.usageByKind(30
 check("usage by project: the head sees all projects", store.usageByProject(30).length > 1);
 db.prepare("UPDATE analyses SET created_at = datetime('now', '-10 days') WHERE head_sha = 'o4'").run();
 check("usage: the period leaves older runs out", store.usageByKind(7, undefined, own)[2].runs === 0);
+const publishedAnalysis = db.prepare("SELECT id FROM analyses WHERE head_sha = 'o4'").get() as { id: number };
+db.prepare(
+  "INSERT INTO review_jobs (pull_request_id, kind, payload, published_analysis_id) VALUES (@pr, 'overview', '{}', @analysis)",
+).run({ pr: prOwn, analysis: publishedAnalysis.id });
 store.deleteProjectCascade(own);
 check("deleting a project removes its usage", store.usageByProject(30).every((p) => p.id !== own));
+check("deleting a project removes jobs linked to published analyses", db.prepare(
+  "SELECT 1 FROM review_jobs WHERE published_analysis_id = @id",
+).get({ id: publishedAnalysis.id }) === undefined);
 
 // --- heartbeat: queue problems -----------------------------------------------------------
 

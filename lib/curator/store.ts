@@ -554,7 +554,7 @@ export function projectHasPullRequests(id: number): boolean {
 /**
  * Delete a project with everything the memory holds about it, in one transaction.
  * Order follows the foreign keys (PRAGMA foreign_keys = ON): history → responses → notes →
- * findings → analyses → review jobs → pull requests → participants → assignments →
+ * findings → review jobs → analyses → pull requests → participants → assignments →
  * project.
  * github_events are not tied to a project and stay.
  */
@@ -570,9 +570,9 @@ export function deleteProjectCascade(id: number): void {
     `DELETE FROM project_notes WHERE project_id = @id`,
     `DELETE FROM findings WHERE pull_request_id IN
        (SELECT id FROM pull_requests WHERE project_id = @id)`,
-    `DELETE FROM analyses WHERE pull_request_id IN
-       (SELECT id FROM pull_requests WHERE project_id = @id)`,
     `DELETE FROM review_jobs WHERE pull_request_id IN
+       (SELECT id FROM pull_requests WHERE project_id = @id)`,
+    `DELETE FROM analyses WHERE pull_request_id IN
        (SELECT id FROM pull_requests WHERE project_id = @id)`,
     `DELETE FROM pull_requests WHERE project_id = @id`,
     `DELETE FROM participants WHERE project_id = @id`,
