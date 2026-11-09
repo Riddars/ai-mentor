@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { AddProjectForm } from "@/components/admin/AddProjectForm";
 import { CreateSupervisorForm } from "@/components/admin/CreateSupervisorForm";
+import { TransferRepositoryGuide } from "@/components/admin/TransferRepositoryGuide";
 import { roleLabel } from "@/lib/format";
 import { projectsHome } from "@/lib/config";
 
@@ -59,6 +60,7 @@ export default async function AdminPage() {
                   </li>
                   <li>Подключите его здесь. Если приложение куратора не видит репозиторий, добавьте его в доступ приложения GitHub.</li>
                 </ol>
+                {home && <TransferRepositoryGuide org={home.org} />}
                 <AddProjectForm defaultOwner={home?.org} />
                 {home && <p className="text-xs text-muted-foreground">
                   Если куратор не видит новый репозиторий, откройте{" "}
