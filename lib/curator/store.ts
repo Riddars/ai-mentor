@@ -738,6 +738,16 @@ export function completeMergedSync(projectId: number, startedAt: string): void {
   getDb().prepare("UPDATE projects SET merged_sync_at = ? WHERE id = ?").run(startedAt, projectId);
 }
 
+export function isPullRequestAcknowledged(prId: number): boolean {
+  const row = getDb().prepare("SELECT acknowledged FROM pull_requests WHERE id = ?")
+    .get(prId) as { acknowledged: number } | undefined;
+  return row?.acknowledged === 1;
+}
+
+export function markPullRequestAcknowledged(prId: number): void {
+  getDb().prepare("UPDATE pull_requests SET acknowledged = 1 WHERE id = ?").run(prId);
+}
+
 /** Numbers of the project's PRs that are open in memory (to catch missed close events). */
 export function listOpenPullRequestNumbers(projectId: number): number[] {
   return (
@@ -797,6 +807,15 @@ export function latestCommitAnalysisOutcome(prId: number, headSha: string): Anal
     )
     .get({ prId, headSha }) as { outcome: AnalysisOutcome } | undefined;
   return row?.outcome ?? null;
+}
+
+export function latestCommitAnalysis(prId: number, headSha: string): { id: number; outcome: AnalysisOutcome } | null {
+  const row = getDb().prepare(
+    `SELECT id, outcome FROM analyses
+     WHERE pull_request_id = @prId AND head_sha = @headSha AND trigger = 'commit'
+     ORDER BY id DESC LIMIT 1`,
+  ).get({ prId, headSha }) as { id: number; outcome: AnalysisOutcome } | undefined;
+  return row ?? null;
 }
 
 /** A comment was published, so retrying the check must not repeat the model or PR comment. */
@@ -1785,7 +1804,7 @@ export function enqueueCommitJob(params: {
   }
 }
 
-/** Attach the required check-run created for a job; returns the job's status by then. */
+/** Attach the informational check-run created for a job; returns the job's status by then. */
 export function setJobCheckRun(jobId: number, checkRunId: number): JobStatus | null {
   const db = getDb();
   db.prepare("UPDATE review_jobs SET check_run_id = @checkRunId WHERE id = @jobId").run({
@@ -1932,7 +1951,7 @@ export function listDueJobs(limit: number): ReviewJob[] {
   return due;
 }
 
-/** Commit jobs past their deadline whose required check is still open. */
+/** Commit jobs past their deadline whose informational check is still open. */
 export function listOverdueJobs(): ReviewJob[] {
   return (
     getDb()
@@ -2004,7 +2023,7 @@ export function requeueStrayRunningJobs(runningHere: ReadonlySet<number>): numbe
 }
 
 /**
- * The job's required check was concluded without a review: "deadline", "limit" (daily count
+ * The job's check was concluded without a review: "deadline", "limit" (daily count
  * of reviews) or "budget" (daily tokens of the project or of the service).
  */
 export function markCheckConcluded(id: number, note: "deadline" | "limit" | "budget"): void {

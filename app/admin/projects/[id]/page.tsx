@@ -152,40 +152,18 @@ export default async function AdminProjectPage({
               </p>
               {setup === null && <p className="text-amber">Не удалось связаться с GitHub — попробуйте обновить позже.</p>}
               {setup?.installed === false && (
-                <p className="text-red">Куратор не видит репозиторий. Проверьте, что он создан в организации проектов.</p>
+                <p className="text-red">Куратор не видит репозиторий. Откройте <a href={`https://github.com/organizations/${project.owner}/settings/installations`} target="_blank" rel="noreferrer" className="underline">настройки GitHub Apps организации</a> и проверьте доступ приложения к этому репозиторию.</p>
               )}
-              {setup?.isPublic === false && (
-                <p>Репозиторий приватный. PR можно слить до завершения разбора. Результат появится в том же PR.</p>
+              {setup?.installed && (
+                <p className="text-green">Приложение куратора видит репозиторий. При открытии PR оно сообщит о начале разбора; результат появится в этом PR, даже после слияния.</p>
               )}
 
-              {setup?.isPublic === true && <SetupStep
-                n={1}
-                title="Защитите основную ветку"
-                done={setup ? Boolean(setup.pullRequestsOnly && setup.checkRequired) : null}
-                doneText="Готово: изменения попадают в проект только через pull request с проверкой куратора."
-              >
-                <ol className="flex list-decimal flex-col gap-1 pl-5">
-                  <li>
-                    <a href="/api/ruleset" download className="font-medium text-primary hover:underline">
-                      Скачайте файл настройки
-                    </a>
-                    .
-                  </li>
-                  <li>
-                    Откройте{" "}
-                    <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
-                      настройки репозитория
-                    </a>
-                    , нажмите <b>New ruleset</b> → <b>Import a ruleset</b> и выберите скачанный файл.
-                  </li>
-                  <li>
-                    Внизу страницы нажмите <b>Create</b>.
-                  </li>
-                </ol>
-              </SetupStep>}
+              {setup?.isPublic && setup.checkRequired && (
+                <p className="text-amber">Старое правило GitHub всё ещё требует завершения проверки AI Curator перед слиянием. Чтобы разрешить слияние во время разбора, откройте <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="underline">настройки rulesets</a> и уберите из действующего правила требование <b>Require status checks to pass before merging</b> для AI Curator. Остальные правила можно оставить.</p>
+              )}
 
               <SetupStep
-                n={setup?.isPublic ? 2 : 1}
+                n={1}
                 title="Пригласите студентов"
                 note="Для работы над проектом студенту нужен доступ на запись."
                 done={setup?.students?.length ? true : setup ? false : null}
@@ -220,7 +198,7 @@ export default async function AdminProjectPage({
               <p className="text-muted-foreground">
                 {project.status === "active"
                   ? "Проект в работе: pull requests разбираются."
-                  : "Проект на паузе: pull requests не разбираются, обязательная проверка завершается сразу с пометкой о паузе. Накопленные замечания сохраняются."}
+                  : "Проект на паузе: pull requests не разбираются, проверка завершается с пометкой о паузе. Накопленные замечания сохраняются."}
               </p>
               <form action={setProjectStatusAction}>
                 <input type="hidden" name="projectId" value={id} />

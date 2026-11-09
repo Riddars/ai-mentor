@@ -55,11 +55,18 @@ export default async function AdminPage() {
                     ) : (
                       "Создайте репозиторий из шаблона"
                     )}{" "}
-                    в GitHub, выберите видимость и нажмите Create repository.
+                    в GitHub, выберите видимость и нажмите Create repository. Куратор работает одинаково с публичными и приватными репозиториями.
                   </li>
-                  <li>Подключите его здесь. Страница проекта покажет, что ещё настроить в GitHub.</li>
+                  <li>Подключите его здесь. Если приложение куратора не видит репозиторий, добавьте его в доступ приложения GitHub.</li>
                 </ol>
                 <AddProjectForm defaultOwner={home?.org} />
+                {home && <p className="text-xs text-muted-foreground">
+                  Если куратор не видит новый репозиторий, откройте{" "}
+                  <a href={`https://github.com/organizations/${home.org}/settings/installations`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
+                    GitHub Apps организации
+                  </a>{" "}
+                  и добавьте репозиторий в доступ приложения AI Chem Curator.
+                </p>}
               </section>
               {projects.length > 0 && (
                 <ul className="flex flex-col divide-y divide-border">

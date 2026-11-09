@@ -1,7 +1,7 @@
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
-import { postIssueComment } from "@/lib/github/comments";
+import { findIssueComment, issueCommentExists, postIssueCommentOnce } from "@/lib/github/comments";
 import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
 import { addSpend, emptySpend, mergeSpend, type Spend } from "@/lib/llm/spend";
 import { getConfig, reviewMode } from "@/lib/config";
@@ -35,6 +35,7 @@ import {
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
+  latestCommitAnalysis,
   latestCommitAnalysisOutcome,
   recordAnalysis,
   recordPullRequestClosed,
@@ -648,8 +649,8 @@ async function fetchLivePullRequest(
 }
 
 /**
- * Поставить разбор коммита в очередь и поставить обязательную проверку (она блокирует
- * слияние до разбора или до срока). Источник:
+ * Поставить разбор коммита в очередь и создать информационную проверку. Она не
+ * ограничивает слияние; итоговое ревью публикуется в PR. Источник:
  * - `webhook` — событие коммита; разбор через задержку (разбирается только последний коммит);
  * - `sync` — сверка с GitHub: только коммиты, по которым задачи ещё не было;
  * - `rerun` — «Re-run» в GitHub: разобрать заново, даже если коммит уже разобран;
@@ -739,7 +740,7 @@ export async function concludeCheck(
   });
 }
 
-/** The required check is complete, but there is no successful review yet. */
+/** The informational check is complete, but there is no successful review yet. */
 export async function concludeUnreviewedCheck(
   params: Pick<ReviewParams, "owner" | "repo" | "installationId">,
   checkRunId: number,
@@ -824,7 +825,7 @@ export async function handlePullRequestClosed(
     }
   }
   if (data.merged) {
-    if (!data.base.repo.private || !data.head.sha || data.draft || getConfig().reviewer !== "llm") return;
+    if (!data.head.sha || data.draft || getConfig().reviewer !== "llm") return;
     if (getProjectByRepo(project.owner, project.repo)?.status !== "active") return;
     const member = await isProjectMember({
       owner: project.owner, repo: project.repo, installationId,
@@ -877,17 +878,39 @@ export async function executeCommitJob(
     return pr !== null && pr.headSha === params.headSha && pr.state !== "closed";
   };
   if (!isCurrent()) throw new StaleReviewError();
+  const published = await findIssueComment({
+    owner: params.owner, repo: params.repo, issueNumber: params.prNumber,
+    installationId: params.installationId, key: `review-${jobId}`,
+  });
+  if (published !== null) {
+    // The GitHub POST succeeded but its response was lost before the job was marked
+    // published. The analysis was recorded before that POST; do not call the model again.
+    const analysis = latestCommitAnalysis(prId, params.headSha);
+    if (!analysis) throw new Error(`Published review of job ${jobId} has no analysis`);
+    setJobPublishedAnalysis(jobId, analysis.id, published);
+    const checkRunId = getJobCheckRun(jobId);
+    if (checkRunId !== null) {
+      const conclude = analysis.outcome === "ok" ? concludeCheck : concludeUnreviewedCheck;
+      try {
+        await conclude(params, checkRunId, "Разбор изменений завершён.");
+      } catch (error) {
+        throw new CheckUpdateError(error);
+      }
+    }
+    return;
+  }
   const { analysisId, comment, outcome } = await runReview(params, prId, "commit", {
     isCurrent,
     fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
     attempt,
   });
-  await postIssueComment({
+  await postIssueCommentOnce({
     owner: params.owner,
     repo: params.repo,
     issueNumber: params.prNumber,
     body: comment,
     installationId: params.installationId,
+    key: `review-${jobId}`,
   });
   setJobPublishedAnalysis(jobId, analysisId, comment);
   // Reviewed after a merge into another PR's branch: what it found passes to that PR.
@@ -910,9 +933,10 @@ export async function executeCommitJob(
  * Разбор не удался за всё окно повторов: записать сбой (виден в панели) и сообщить в PR.
  */
 export async function reportReviewFailure(
-  params: { owner: string; repo: string; prNumber: number; installationId: number; headSha?: string },
+  params: { owner: string; repo: string; prNumber: number; installationId: number; headSha?: string; commentId?: number },
   prId: number,
   kind: "commit" | "comment" | "overview",
+  jobId?: number,
 ): Promise<void> {
   recordAnalysis({
     prId,
@@ -920,14 +944,16 @@ export async function reportReviewFailure(
     trigger: kind,
     outcome: "error",
   });
-  if (kind === "commit") {
-    await postIssueComment({
+  if (kind === "commit" || (kind === "comment" && params.commentId !== undefined)) {
+    await postIssueCommentOnce({
       owner: params.owner,
       repo: params.repo,
       issueNumber: params.prNumber,
-      body:
-        `${COMMENT_MARKER}\n\nНе удалось выполнить разбор изменений: сервис анализа был ` +
-        "недоступен. Руководитель видит это в панели и может перезапустить разбор.",
+      key: kind === "comment" ? `answer-${params.commentId}` : `review-${jobId ?? `${prId}-${params.headSha ?? "unknown"}`}`,
+      body: kind === "comment"
+        ? `${COMMENT_MARKER}\n\nНе удалось проверить комментарий: сервис анализа был недоступен. Руководитель видит сбой в панели.`
+        : `${COMMENT_MARKER}\n\nНе удалось выполнить разбор изменений: сервис анализа был ` +
+          "недоступен. Руководитель видит это в панели и может перезапустить разбор.",
       installationId: params.installationId,
     });
   }
@@ -944,10 +970,18 @@ export interface CommentReviewParams {
 
 /**
  * Сверка по ответу студента (задача очереди; сам ответ уже сохранён вебхуком). Новый
- * check-run НЕ создаём: проверка уже завершена и слияние разрешено (куратор
- * совещательный). Сверяем статусы на текущем head PR и коротко отвечаем студенту.
+ * check-run НЕ создаём: он относится к коммиту, а не к ответу студента.
+ * Сверяем статусы на текущем head PR и отвечаем студенту.
  */
 export async function executeCommentJob(params: CommentReviewParams): Promise<void> {
+  if (await issueCommentExists({
+    owner: params.owner, repo: params.repo, issueNumber: params.prNumber,
+    installationId: params.installationId, key: `answer-${params.commentId}`,
+  })) return;
+  const postReply = (body: string) => postIssueCommentOnce({
+    owner: params.owner, repo: params.repo, issueNumber: params.prNumber,
+    installationId: params.installationId, key: `answer-${params.commentId}`, body,
+  });
   const token = await getInstallationToken(params.installationId);
   const pr = await githubRequest<ClosedPullRequest & { head: { sha: string; ref: string }; user: { login: string } }>(
     `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`,
@@ -972,8 +1006,12 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
   try {
     // Closed without merge: its fixes never land and its branch findings no longer count,
     // so a reply there is kept but not reconciled — the model is not called.
-    if (reviewParams.state === "closed") return;
+    if (reviewParams.state === "closed") {
+      await postReply(`${COMMENT_MARKER}\n\nPR закрыт без слияния. Повторная проверка комментария не выполняется.`);
+      return;
+    }
     if (loadOpenFindings(prId).length === 0) {
+      await postReply(`${COMMENT_MARKER}\n\nКомментарий получен. Открытых замечаний для повторной проверки нет.`);
       return; // сверять нечего — модель не вызываем
     }
 
@@ -981,17 +1019,9 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
       fixesFinal: () => reviewParams.mergedIntoDefault ?? false,
     });
     const body = renderReplyComment(outcome.statusChanges, outcome.kept);
-    if (!body) {
-      return; // модель ничего не сказала о прошлых находках — не шумим в PR
-    }
-    await postIssueComment({
-      owner: params.owner,
-      repo: params.repo,
-      issueNumber: params.prNumber,
-      body,
-      installationId: params.installationId,
-    });
-    setAnalysisComment(outcome.analysisId, body);
+    const reply = body || `${COMMENT_MARKER}\n\nКомментарий проверен. Статус замечаний не изменился.`;
+    await postReply(reply);
+    setAnalysisComment(outcome.analysisId, reply);
   } finally {
     // A reply on a closed PR: settle its findings as its close does — the close event may
     // have been missed, and a fix accepted after a merge into another branch moves on.

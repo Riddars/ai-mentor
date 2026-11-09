@@ -47,12 +47,12 @@ async function requireViewer(): Promise<Viewer> {
 }
 
 /** A supervisor works only with repositories the curator's GitHub App is installed in. */
-async function appInstalled(owner: string, repo: string): Promise<boolean> {
+async function appAccess(owner: string, repo: string): Promise<"installed" | "missing" | "unavailable"> {
   try {
     await getRepoInstallationId(owner, repo);
-    return true;
-  } catch {
-    return false;
+    return "installed";
+  } catch (error) {
+    return error instanceof Error && / failed: 404 /.test(error.message) ? "missing" : "unavailable";
   }
 }
 
@@ -99,8 +99,11 @@ export async function addProjectAction(
   }
   if (getProjectByRepo(owner, repo)) return { error: `Проект ${owner}/${repo} уже подключён.` };
   const supervisorId = viewer.role === "head" ? undefined : viewer.userId;
-  if (!(await appInstalled(owner, repo))) {
-    return { error: `Приложение куратора не установлено в ${owner}/${repo} или GitHub недоступен.` };
+  const access = await appAccess(owner, repo);
+  if (access !== "installed") {
+    return { error: access === "missing"
+      ? `Куратор не видит ${owner}/${repo}. Добавьте репозиторий в доступ GitHub App организации и повторите подключение.`
+      : "Не удалось проверить доступ к GitHub. Попробуйте ещё раз позже." };
   }
   let projectId: number;
   try {
@@ -143,8 +146,8 @@ export async function updateProjectAction(
     const clash = getProjectByRepo(owner, repo);
     if (clash && clash.id !== id) return { error: `Проект ${owner}/${repo} уже существует.` };
     const viewer = await requireViewer();
-    if (viewer.role !== "head" && !(await appInstalled(owner, repo))) {
-      return { error: `Приложение куратора не установлено в ${owner}/${repo} или GitHub недоступен.` };
+    if (viewer.role !== "head" && (await appAccess(owner, repo)) !== "installed") {
+      return { error: `Куратор не видит ${owner}/${repo}. Проверьте доступ GitHub App и связь с GitHub.` };
     }
   }
 

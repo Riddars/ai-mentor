@@ -4,6 +4,7 @@ import { CHECK_NAME, concludeCheckRun, createCheckRun } from "@/lib/github/check
 import { isProjectMember } from "@/lib/github/members";
 import { handlePullRequest } from "@/lib/curator/simulate";
 import { handlePullRequestClosed, startCommitReview } from "@/lib/curator/review";
+import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator/acknowledgements";
 import {
   findProjectForRepository,
   forgetEvent,
@@ -139,8 +140,8 @@ export async function POST(req: Request) {
     }
   }
 
-  // Cases where the required check is concluded at once, without a review, so that it
-  // does not block the merge: a paused project, a PR from outside the project, a draft.
+  // Cases where the informational check is concluded at once, without a review:
+  // a paused project, a PR from outside the project, a draft.
   const skipReason =
     project.status === "paused"
       ? "Проект на паузе — разбор не выполняется."
@@ -174,6 +175,12 @@ export async function POST(req: Request) {
   if (isReviewEvent) {
     try {
       await handlePullRequest(payload);
+      if (config.reviewer === "llm") {
+        await acknowledgePullRequest({
+          owner: project.owner, repo: project.repo,
+          prNumber: payload.pull_request.number, installationId: payload.installation.id,
+        });
+      }
     } catch (error) {
       return failed("failed to handle pull_request", error);
     }
@@ -212,6 +219,15 @@ export async function POST(req: Request) {
         commentId: payload.comment.id,
       },
     });
+    try {
+      await acknowledgeStudentComment({
+        owner: project.owner, repo: project.repo,
+        prNumber: payload.issue.number, installationId: payload.installation.id,
+        commentId: payload.comment.id,
+      });
+    } catch (error) {
+      return failed("failed to acknowledge a student comment", error);
+    }
   } else if (isRerun && config.reviewer === "llm" && payload.installation?.id !== undefined) {
     // «Re-run» у проверки в GitHub — разобрать этот коммит заново.
     const prNumber: number | undefined = payload.check_run.pull_requests?.[0]?.number;

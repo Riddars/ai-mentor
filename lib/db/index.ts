@@ -377,6 +377,13 @@ function migrate(db: DatabaseSync): void {
     addColumns(db, "projects", { merged_sync_at: "TEXT" });
     db.exec("PRAGMA user_version = 16");
   }
+  if (version < 17) {
+    addColumns(db, "pull_requests", { acknowledged: "INTEGER NOT NULL DEFAULT 0" });
+    // Old public projects must not backfill every historical merge when recovery
+    // starts covering both visibility modes. Private projects with a checkpoint keep it.
+    db.exec("UPDATE projects SET merged_sync_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE merged_sync_at IS NULL");
+    db.exec("PRAGMA user_version = 17");
+  }
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

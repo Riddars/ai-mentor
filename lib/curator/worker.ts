@@ -5,6 +5,7 @@ import { getConfig } from "@/lib/config";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
 import { isProjectMember } from "@/lib/github/members";
+import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator/acknowledgements";
 import { memoryGap } from "@/lib/curator/memory";
 import { executeOverviewJob, OVERVIEW_LIMITS, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
@@ -61,9 +62,16 @@ export interface WorkerDeps {
 }
 
 const realDeps: WorkerDeps = {
-  runCommit: (job) =>
-    executeCommitJob(job.payload as ReviewParams, job.prId, job.id, job.attempts),
-  runComment: (job) => executeCommentJob(job.payload as CommentReviewParams),
+  runCommit: async (job) => {
+    const params = job.payload as ReviewParams;
+    await acknowledgePullRequest(params);
+    await executeCommitJob(params, job.prId, job.id, job.attempts);
+  },
+  runComment: async (job) => {
+    const params = job.payload as CommentReviewParams;
+    await acknowledgeStudentComment(params);
+    await executeCommentJob(params);
+  },
   runOverview: (job) => executeOverviewJob(job),
   concludeUnreviewed: (job, summary) =>
     concludeUnreviewedCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
@@ -75,7 +83,7 @@ const realDeps: WorkerDeps = {
   },
   // A failed overview is already recorded with what it spent; it has no PR to report to.
   reportFailure: async (job) => {
-    if (job.kind !== "overview") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind);
+    if (job.kind !== "overview") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind, job.id);
   },
 };
 
@@ -240,10 +248,8 @@ async function checkMemoryGap(project: { id: number; owner: string; repo: string
 }
 
 /** Advance the durable checkpoint only after every page has been processed. */
-export async function recoverPrivateMerges(project: { id: number; owner: string; repo: string }, installationId: number, token: string): Promise<void> {
+export async function recoverMergedPullRequests(project: { id: number; owner: string; repo: string }, installationId: number, token: string): Promise<void> {
   const base = `/repos/${project.owner}/${project.repo}`;
-  const info = await githubRequest<{ private: boolean }>(base, { token });
-  if (!info.private) return;
   const since = Date.parse(mergedSyncSince(project.id));
   // GitHub timestamps have one-second precision. Replay the boundary second.
   const startedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
@@ -310,8 +316,12 @@ async function syncOpenPullRequests(): Promise<void> {
           },
           "sync",
         );
+        await acknowledgePullRequest({
+          owner: project.owner, repo: project.repo,
+          prNumber: pr.number, installationId,
+        });
       }
-      await recoverPrivateMerges(project, installationId, token);
+      await recoverMergedPullRequests(project, installationId, token);
       await checkMemoryGap(project, installationId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
