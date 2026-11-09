@@ -130,15 +130,6 @@ export default async function AdminPage() {
                   <li>Создайте ему учётную запись в форме ниже и передайте данные для входа. Учётная запись сервиса и членство в GitHub оформляются отдельно.</li>
                   <li>Коллега входит в сервис, создаёт репозиторий из шаблона через блок «Новый проект» и подключает его. Затем в настройках проекта приглашает студентов в репозиторий с ролью <b>Write</b>. Добавлять студентов в организацию не требуется.</li>
                 </ol>
-                <p className="text-xs text-muted-foreground">
-                  Создание приватных репозиториев зависит от настроек организации. Если оно запрещено участникам, владелец создаёт репозиторий и выдаёт коллеге роль <b>Admin</b> в нём либо разрешает участникам создавать приватные репозитории в{" "}
-                  {home ? (
-                    <a href={`https://github.com/organizations/${home.org}/settings/member_privileges`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
-                      Settings → Member privileges → Repository creation
-                    </a>
-                  ) : "Settings → Member privileges → Repository creation"}.
-                  Роль head в сервисе не даёт прав владельца организации в GitHub.
-                </p>
               </section>
               <CreateSupervisorForm />
               <ul className="flex flex-col divide-y divide-border">
