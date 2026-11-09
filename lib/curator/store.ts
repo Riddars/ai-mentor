@@ -689,6 +689,12 @@ export function upsertPullRequest(
   } = {},
 ): number {
   const db = getDb();
+  // A merged PR cannot reopen. Late deliveries must not replace its final SHA or scope.
+  if (info.state !== "merged") {
+    const merged = db.prepare("SELECT id FROM pull_requests WHERE project_id = ? AND number = ? AND state = 'merged'")
+      .get(projectId, number) as { id: number } | undefined;
+    if (merged) return merged.id;
+  }
   const row = db
     .prepare(
       `INSERT INTO pull_requests
@@ -719,6 +725,17 @@ export function upsertPullRequest(
       merged: info.mergedIntoDefault == null ? null : Number(info.mergedIntoDefault),
     }) as { id: number };
   return row.id;
+}
+
+/** UTC lower bound for recovering merges, initially the moment the project was connected. */
+export function mergedSyncSince(projectId: number): string {
+  const row = getDb().prepare("SELECT COALESCE(merged_sync_at, strftime('%Y-%m-%dT%H:%M:%SZ', created_at)) AS since FROM projects WHERE id = ?")
+    .get(projectId) as { since: string };
+  return row.since;
+}
+
+export function completeMergedSync(projectId: number, startedAt: string): void {
+  getDb().prepare("UPDATE projects SET merged_sync_at = ? WHERE id = ?").run(startedAt, projectId);
 }
 
 /** Numbers of the project's PRs that are open in memory (to catch missed close events). */
@@ -763,7 +780,7 @@ export function hasSuccessfulCommitAnalysis(prId: number, headSha: string): bool
     .prepare(
       `SELECT 1 FROM analyses
        WHERE pull_request_id = @prId AND head_sha = @headSha
-         AND trigger = 'commit' AND outcome = 'ok'
+         AND trigger = 'commit' AND outcome = 'ok' AND comment IS NOT NULL
        LIMIT 1`,
     )
     .get({ prId, headSha });
@@ -1181,6 +1198,7 @@ export function enqueueOverviewJob(
   projectId: number,
   payload: unknown,
   force: boolean,
+  followRunning = false,
 ): "queued" | "active" | "recent" {
   const db = getDb();
   const latest = db
@@ -1191,7 +1209,7 @@ export function enqueueOverviewJob(
        ORDER BY j.id DESC LIMIT 1`,
     )
     .get({ projectId, window: `-${AUTO_OVERVIEW_DAYS} days` }) as { status: JobStatus; recent: number } | undefined;
-  if (latest && (latest.status === "queued" || latest.status === "running")) return "active";
+  if (latest?.status === "queued" || (latest?.status === "running" && !followRunning)) return "active";
   if (!force && latest?.recent) return "recent";
   db.prepare(
     `INSERT INTO review_jobs (pull_request_id, kind, payload) VALUES (@prId, 'overview', @payload)`,
@@ -2056,10 +2074,12 @@ export function listUnreviewedPrs(projectId: number): UnreviewedPr[] {
       `SELECT pr.id AS prId, pr.number, j.status, j.note
        FROM review_jobs j JOIN pull_requests pr ON pr.id = j.pull_request_id
        WHERE pr.project_id = @projectId AND j.kind = 'commit'
-         AND COALESCE(pr.state, 'open') = 'open'
+         AND COALESCE(pr.state, 'open') != 'closed' AND j.head_sha = pr.head_sha
          AND j.id = (SELECT MAX(id) FROM review_jobs
                      WHERE pull_request_id = pr.id AND kind = 'commit' AND status != 'superseded')
-         AND ((j.status IN ${ACTIVE_JOB} AND j.check_concluded = 1) OR j.status = 'failed')
+         AND ((j.status IN ${ACTIVE_JOB} AND j.check_concluded = 1) OR j.status = 'failed'
+           OR (j.status = 'done' AND EXISTS (SELECT 1 FROM analyses a
+               WHERE a.id = j.published_analysis_id AND a.outcome = 'parse_error')))
        ORDER BY pr.number`,
     )
     .all({ projectId }) as unknown as UnreviewedPr[];

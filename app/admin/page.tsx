@@ -26,7 +26,6 @@ export default async function AdminPage() {
         owner: home.org,
         template_owner: home.org,
         template_name: home.template,
-        visibility: "public",
       })}`
     : null;
 
@@ -56,7 +55,7 @@ export default async function AdminPage() {
                     ) : (
                       "Создайте репозиторий из шаблона"
                     )}{" "}
-                    в GitHub: введите имя, нажмите Create repository.
+                    в GitHub, выберите видимость и нажмите Create repository.
                   </li>
                   <li>Подключите его здесь. Страница проекта покажет, что ещё настроить в GitHub.</li>
                 </ol>

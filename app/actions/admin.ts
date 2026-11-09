@@ -99,7 +99,7 @@ export async function addProjectAction(
   }
   if (getProjectByRepo(owner, repo)) return { error: `Проект ${owner}/${repo} уже подключён.` };
   const supervisorId = viewer.role === "head" ? undefined : viewer.userId;
-  if (supervisorId && !(await appInstalled(owner, repo))) {
+  if (!(await appInstalled(owner, repo))) {
     return { error: `Приложение куратора не установлено в ${owner}/${repo} или GitHub недоступен.` };
   }
   let projectId: number;

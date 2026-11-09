@@ -23,6 +23,8 @@ import {
 } from "@/lib/curator/review";
 import {
   finishJob,
+  completeMergedSync,
+  mergedSyncSince,
   getProject,
   listAllProjects,
   listDueJobs,
@@ -237,11 +239,28 @@ async function checkMemoryGap(project: { id: number; owner: string; repo: string
   }
 }
 
-/**
- * Open PRs of active projects without a finished review of their head get a job; PRs open
- * in memory but not on GitHub had their close event lost and are closed now. A project whose
- * memory does not cover its main branch gets an overview.
- */
+/** Advance the durable checkpoint only after every page has been processed. */
+export async function recoverPrivateMerges(project: { id: number; owner: string; repo: string }, installationId: number, token: string): Promise<void> {
+  const base = `/repos/${project.owner}/${project.repo}`;
+  const info = await githubRequest<{ private: boolean }>(base, { token });
+  if (!info.private) return;
+  const since = Date.parse(mergedSyncSince(project.id));
+  // GitHub timestamps have one-second precision. Replay the boundary second.
+  const startedAt = new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
+  // Updated order lets us stop at the checkpoint, even if older PRs receive new comments.
+  for (let page = 1; ; page++) {
+    const pulls = await githubRequest<Array<{ number: number; updated_at: string; merged_at: string | null }>>(
+      `${base}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=${page}`, { token });
+    for (const pr of pulls) {
+      if (pr.merged_at && Date.parse(pr.merged_at) >= since) {
+        await handlePullRequestClosed(project, pr.number, installationId);
+      }
+    }
+    if (pulls.length < 100 || Date.parse(pulls[pulls.length - 1].updated_at) < since) break;
+  }
+  completeMergedSync(project.id, startedAt);
+}
+
 async function syncOpenPullRequests(): Promise<void> {
   for (const project of listAllProjects()) {
     if (project.status !== "active") continue;
@@ -292,6 +311,7 @@ async function syncOpenPullRequests(): Promise<void> {
           "sync",
         );
       }
+      await recoverPrivateMerges(project, installationId, token);
       await checkMemoryGap(project, installationId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

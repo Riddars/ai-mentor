@@ -2,11 +2,8 @@ import { CHECK_NAME } from "@/lib/github/checks";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
 
-// What a project repository needs on GitHub for the curator to work: the app installed, a
-// public repository (required checks of the free plan work only there) and a ruleset on the
-// main branch — changes only through pull requests, the `AI Curator` check required and bound
-// to the app. The ruleset is imported by a person (Settings → Rules → Rulesets → Import); the
-// app only reads it, with no rights beyond Metadata: read.
+// Public projects use a ruleset imported by their supervisor. Private projects only need
+// app access for advisory reviews, so setup skips the branch rules endpoint for them.
 
 /** The ruleset file people import into a project repository. */
 export function rulesetJson(appId: string): string {
@@ -74,7 +71,7 @@ export async function checkRepositorySetup(owner: string, repo: string, appId: s
   }
   const token = await getInstallationToken(installationId);
   const info = await githubRequest<{ private: boolean; default_branch: string }>(`/repos/${owner}/${repo}`, { token });
-  const rules = await githubRequest<BranchRule[]>(
+  const rules = info.private ? [] : await githubRequest<BranchRule[]>(
     `/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(info.default_branch)}`,
     { token },
   );

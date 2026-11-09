@@ -373,6 +373,10 @@ function migrate(db: DatabaseSync): void {
     addColumns(db, "review_jobs", { published_analysis_id: "INTEGER REFERENCES analyses(id)" });
     db.exec("PRAGMA user_version = 15");
   }
+  if (version < 16) {
+    addColumns(db, "projects", { merged_sync_at: "TEXT" });
+    db.exec("PRAGMA user_version = 16");
+  }
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

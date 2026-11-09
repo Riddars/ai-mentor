@@ -235,6 +235,7 @@ function overviewState(status: JobStatus | null, last: AnalysisRow | null): stri
 
 function unreviewedReason(status: string, note: string | null): string {
   if (status === "failed") return "разбор не удался";
+  if (status === "done") return "ответ модели не удалось разобрать";
   if (note === "limit") return "исчерпан дневной лимит, разбор в очереди";
   if (note === "budget") return "исчерпан дневной бюджет токенов, разбор в очереди";
   return "не успел вовремя, разбор в очереди";

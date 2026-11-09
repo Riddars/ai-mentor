@@ -148,17 +148,17 @@ export default async function AdminProjectPage({
             </CardHeader>
             <CardBody className="flex flex-col gap-5 pt-0 text-sm">
               <p className="text-muted-foreground">
-                Чтобы куратор проверял работу студентов, в репозитории на GitHub нужно сделать два шага.
+                Проверьте доступ к репозиторию и приглашения участников.
               </p>
               {setup === null && <p className="text-amber">Не удалось связаться с GitHub — попробуйте обновить позже.</p>}
               {setup?.installed === false && (
                 <p className="text-red">Куратор не видит репозиторий. Проверьте, что он создан в организации проектов.</p>
               )}
               {setup?.isPublic === false && (
-                <p className="text-red">Репозиторий закрытый — куратор работает только с публичными.</p>
+                <p>Репозиторий приватный. PR можно слить до завершения разбора. Результат появится в том же PR.</p>
               )}
 
-              <SetupStep
+              {setup?.isPublic === true && <SetupStep
                 n={1}
                 title="Защитите основную ветку"
                 done={setup ? Boolean(setup.pullRequestsOnly && setup.checkRequired) : null}
@@ -182,12 +182,12 @@ export default async function AdminProjectPage({
                     Внизу страницы нажмите <b>Create</b>.
                   </li>
                 </ol>
-              </SetupStep>
+              </SetupStep>}
 
               <SetupStep
-                n={2}
+                n={setup?.isPublic ? 2 : 1}
                 title="Пригласите студентов"
-                note="Смотреть публичный репозиторий может любой, а вносить изменения — только приглашённые."
+                note="Для работы над проектом студенту нужен доступ на запись."
                 done={setup?.students?.length ? true : setup ? false : null}
                 doneText={`В репозитории: ${setup?.students?.join(", ") ?? ""}.`}
                 keepInstructions

@@ -61,7 +61,7 @@ export function startOverview(
   }
   const payload: OverviewPayload = { reason };
   // A person, a resume or a merged PR whose review named a reason skip the limit on automatic overviews.
-  return enqueueOverviewJob(projectId, payload, reason !== "initial" && reason !== "gap");
+  return enqueueOverviewJob(projectId, payload, reason !== "initial" && reason !== "gap", reason === "merge");
 }
 
 const CODE_FILE = /\.(py|ipynb|r|jl|m|c|cc|cpp|h|hpp|java|js|ts|rs|go|sh|sql)$/i;

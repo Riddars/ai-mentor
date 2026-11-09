@@ -32,7 +32,8 @@ export async function restartReviewAction(
   }
   const project = getProject(pr.projectId);
   if (!project) return { error: "Проект не найден." };
-  if (pr.state !== null && pr.state !== "open") return { error: "Pull request уже закрыт." };
+  if (pr.state === "closed") return { error: "Pull request закрыт без слияния." };
+  if (project.status !== "active") return { error: "Проект на паузе." };
 
   // A job already waiting (backoff or daily limit) runs at once; the limit still applies.
   if (bringCommitJobForward(pr.id)) {

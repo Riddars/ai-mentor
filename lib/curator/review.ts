@@ -4,9 +4,10 @@ import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { postIssueComment } from "@/lib/github/comments";
 import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
 import { addSpend, emptySpend, mergeSpend, type Spend } from "@/lib/llm/spend";
-import { reviewMode } from "@/lib/config";
+import { getConfig, reviewMode } from "@/lib/config";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
+import { isProjectMember } from "@/lib/github/members";
 import { advanceMemory } from "@/lib/curator/memory";
 import { verifyFindings } from "@/lib/curator/verify";
 import { bringsFirstWork, startOverview } from "@/lib/curator/overview";
@@ -633,18 +634,17 @@ export function queueSettings() {
 }
 
 /** Where a commit review request comes from. */
-export type ReviewSource = "webhook" | "sync" | "rerun" | "restart";
+export type ReviewSource = "webhook" | "sync" | "rerun" | "restart" | "merge";
 
 /** Current head and state of a PR on GitHub — the source of truth outside webhooks. */
 async function fetchLivePullRequest(
   params: ReviewParams,
-): Promise<{ headSha: string; open: boolean }> {
+): Promise<ClosedPullRequest> {
   const token = await getInstallationToken(params.installationId);
-  const pr = await githubRequest<{ head: { sha: string }; state: string }>(
+  return githubRequest<ClosedPullRequest>(
     `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`,
     { token },
   );
-  return { headSha: pr.head.sha, open: pr.state === "open" };
 }
 
 /**
@@ -661,18 +661,19 @@ export async function startCommitReview(
   params: ReviewParams,
   source: ReviewSource,
 ): Promise<"queued" | "skipped"> {
-  if (source !== "webhook") {
+  if (source !== "webhook" && source !== "merge") {
     const live = await fetchLivePullRequest(params);
-    if (!live.open) return "skipped";
-    // A restart from the panel reviews whatever is the head now; other sources only the
-    // commit they were asked about.
-    if (source === "restart") params = { ...params, headSha: live.headSha };
-    else if (live.headSha !== params.headSha) return "skipped";
+    if (!live.head.sha || (source !== "restart" && live.head.sha !== params.headSha)) return "skipped";
+    if (live.state !== "open" && !(source === "restart" && live.merged)) return "skipped";
+    params = { ...params, headSha: live.head.sha, state: live.merged ? "merged" : "open",
+      headRef: live.head.ref, baseRef: live.base.ref,
+      mergedIntoDefault: live.merged && live.base.ref === live.base.repo.default_branch };
   }
 
   // Synchronous from here to the insert: no other event can interleave.
   const prId = persistPrContext(params);
-  if (hasJobForHead(prId, params.headSha, source !== "sync")) {
+  if (getPullRequest(prId)?.state === "merged" && params.state !== "merged") return "skipped";
+  if (hasJobForHead(prId, params.headSha, source !== "sync" && source !== "merge")) {
     return "skipped"; // этот коммит уже в очереди (или, для сверки, уже пробовали)
   }
   // Only "Re-run" in GitHub reviews an already reviewed commit again: a person asked for it
@@ -689,6 +690,14 @@ export async function startCommitReview(
     deadlineMs: settings.deadlineMs,
   });
   if (jobId === null) return "skipped";
+
+  for (const id of supersededCheckRunIds) {
+    await concludeUnreviewedCheck(params, id, "Не разобрано: заменён новым коммитом — разбирается последний.").catch(
+      (error) => console.error(`[curator] failed to conclude replaced check ${id}:`, error),
+    );
+  }
+  // A post-merge recovery has no merge check to create or hold open.
+  if (params.state === "merged") return "queued";
 
   let checkRunId: number;
   try {
@@ -710,11 +719,6 @@ export async function startCommitReview(
     else await concludeUnreviewedCheck(params, checkRunId, "Не разобрано: разбор не завершился успешно.");
   } else if (checkJobStatus === "superseded" || checkJobStatus === "failed") {
     await concludeUnreviewedCheck(params, checkRunId, "Не разобрано: задача завершилась до создания проверки.");
-  }
-  for (const id of supersededCheckRunIds) {
-    await concludeUnreviewedCheck(params, id, "Не разобрано: заменён новым коммитом — разбирается последний.").catch(
-      (error) => console.error(`[curator] failed to conclude replaced check ${id}:`, error),
-    );
   }
   return "queued";
 }
@@ -756,10 +760,12 @@ export interface ClosedPullRequest {
   number: number;
   state: string;
   merged: boolean;
+  author_association?: string;
+  draft?: boolean;
   title?: string | null;
   user?: { login: string } | null;
   head: { ref: string; sha?: string };
-  base: { ref: string; repo: { default_branch: string } };
+  base: { ref: string; repo: { default_branch: string; private?: boolean } };
   merge_commit_sha?: string | null;
 }
 
@@ -817,7 +823,21 @@ export async function handlePullRequestClosed(
       );
     }
   }
-  if (data.merged) return;
+  if (data.merged) {
+    if (!data.base.repo.private || !data.head.sha || data.draft || getConfig().reviewer !== "llm") return;
+    if (getProjectByRepo(project.owner, project.repo)?.status !== "active") return;
+    const member = await isProjectMember({
+      owner: project.owner, repo: project.repo, installationId,
+      login: data.user?.login, association: data.author_association,
+    });
+    if (!member) return;
+    await startCommitReview({
+      owner: project.owner, repo: project.repo, installationId, prNumber: number,
+      headSha: data.head.sha, headRef: data.head.ref, baseRef: data.base.ref,
+      author: data.user?.login, title: data.title, state: "merged", mergedIntoDefault,
+    }, "merge");
+    return;
+  }
   for (const checkRunId of supersedeCommitJobs(prId)) {
     await concludeUnreviewedCheck(
       { owner: project.owner, repo: project.repo, installationId },
