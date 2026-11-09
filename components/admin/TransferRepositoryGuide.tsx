@@ -26,14 +26,6 @@ export function TransferRepositoryGuide({ org }: { org: string }) {
             Если прежняя организация запрещает перенос, обратитесь к её владельцу.
           </li>
           <li>
-            <b>Проверьте имя.</b> Откройте{" "}
-            <a href={`https://github.com/orgs/${org}/repositories`} target="_blank" rel="noreferrer" className={linkClass}>
-              репозитории нашей организации
-            </a>{" "}
-            и убедитесь, что такого имени ещё нет. При совпадении согласуйте другое имя
-            с руководителем центра. Не создавайте пустой репозиторий с этим именем перед переносом.
-          </li>
-          <li>
             <b>Откройте настройки исходного репозитория.</b> Перейдите на его страницу
             в GitHub → <b>Settings</b> → <b>General</b>. Прокрутите страницу до самого
             низа, до раздела <b>Danger Zone</b>. В строке <b>Transfer ownership</b>
@@ -56,19 +48,6 @@ export function TransferRepositoryGuide({ org }: { org: string }) {
             список веток и историю коммитов, а на <b>Pull requests</b> — сохранённые PR.
           </li>
           <li>
-            <b>Проверьте доступ людей и куратора.</b> В перенесённом репозитории
-            откройте <b>Settings → Collaborators and teams</b> (раздел управления
-            доступом). У студентов должно быть право <b>Write</b>, а у руководителя,
-            который приглашает участников, — <b>Admin</b>.
-            Если приложение не видит репозиторий, попросите владельца организации открыть{" "}
-            <a href={`https://github.com/organizations/${org}/settings/installations`} target="_blank" rel="noreferrer" className={linkClass}>
-              настройки GitHub Apps
-            </a>{" "}
-            → <b>AI Chem Curator → Configure</b>. При выборе <b>Only select repositories</b>
-            нужно добавить перенесённый репозиторий и сохранить. При <b>All repositories</b>
-            он уже входит в область доступа.
-          </li>
-          <li>
             <b>Подключите проект к сервису.</b> Вернитесь на эту страницу. В форме
             подключения укажите <b>владелец (owner)</b> — <code>{org}</code>,{" "}
             <b>репозиторий (repo)</b> — только его имя, без ссылки и без <code>.git</code>.
@@ -86,17 +65,6 @@ export function TransferRepositoryGuide({ org }: { org: string }) {
               и используйте его вместо HTTPS-адреса.</p>
           </li>
         </ol>
-        <p className="text-xs text-muted-foreground">
-          Если репозиторий уже подключён к нашему сервису под старым адресом,
-          перед переносом обратитесь к руководителю центра, чтобы сохранить связь
-          с его замечаниями и историей разборов. Повторно подключать такой проект не нужно.
-          При переносе приватного репозитория с платного тарифа на GitHub Free
-          некоторые возможности GitHub, например защита веток, могут стать недоступны.
-          Особые случаи переноса описаны в{" "}
-          <a href="https://docs.github.com/en/repositories/creating-and-managing-repositories/transferring-a-repository" target="_blank" rel="noreferrer" className={linkClass}>
-            официальной инструкции GitHub
-          </a>.
-        </p>
       </div>
     </details>
   );
