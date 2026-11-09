@@ -1,9 +1,12 @@
+import { withPrLock } from "@/lib/curator/pr-lock";
 import { getConfig } from "@/lib/config";
+import { githubRequest } from "@/lib/github/api";
+import { getInstallationToken } from "@/lib/github/auth";
 import { verifySignature } from "@/lib/github/verify";
 import { CHECK_NAME, concludeCheckRun, createCheckRun } from "@/lib/github/checks";
 import { isProjectMember } from "@/lib/github/members";
 import { handlePullRequest } from "@/lib/curator/simulate";
-import { handlePullRequestClosed, startCommitReview } from "@/lib/curator/review";
+import { handlePullRequestClosed, startCommitReview, type ClosedPullRequest } from "@/lib/curator/review";
 import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator/acknowledgements";
 import {
   findProjectForRepository,
@@ -77,177 +80,192 @@ export async function POST(req: Request) {
     return Response.json({ ok: true, ignored: "not connected" });
   }
 
-  // Someone accepted an invitation to the repository (a student) or lost access to it.
-  if (isMember) {
-    const login: string | undefined = payload.member?.login;
-    if (login && payload.action === "added") upsertParticipant(project.id, login);
-    if (login && payload.action === "removed") removeParticipant(project.id, login);
-    return Response.json({ ok: true });
-  }
-
-  if (isPullRequest && payload.action === "closed") {
-    // Состояние PR нужно панели (слит / закрыт без слияния); разбора здесь нет. Второй
-    // шаг закрытия замечаний: исправление окончательно только после слияния в основную ветку.
-    // A merged PR keeps its queued review — the findings still matter.
-    if (payload.installation?.id === undefined) {
-      return Response.json({ ok: true, ignored: "no installation" });
+  const prNumber = payload.pull_request?.number ?? payload.issue?.number ?? payload.check_run?.pull_requests?.[0]?.number ?? 0;
+  return withPrLock({ owner: project.owner, repo: project.repo, prNumber }, async () => {
+    // Someone accepted an invitation to the repository (a student) or lost access to it.
+    if (isMember) {
+      const login: string | undefined = payload.member?.login;
+      if (login && payload.action === "added") upsertParticipant(project.id, login);
+      if (login && payload.action === "removed") removeParticipant(project.id, login);
+      return Response.json({ ok: true });
     }
-    try {
-      await handlePullRequestClosed(project, payload.pull_request.number, payload.installation.id, {
-        ...payload.pull_request,
-        state: "closed",
-      });
-    } catch (error) {
-      return failed("failed to handle a closed pull request", error);
-    }
-    return Response.json({ ok: true, closed: true });
-  }
 
-  const isReviewEvent = isPullRequest && REVIEW_ACTIONS.has(payload.action);
-  if (isReviewEvent) {
-    // opened / synchronize / reopened / ready_for_review all mean the PR is open — record
-    // it in both reviewer modes so a reopened PR does not stay "closed" in memory.
-    upsertPullRequest(project.id, payload.pull_request.number, {
-      author: payload.pull_request.user?.login ?? null,
-      title: payload.pull_request.title ?? null,
-      state: "open",
-      headSha: payload.pull_request.head?.sha ?? null,
-      baseRef: payload.pull_request.base?.ref ?? null,
-      headRef: payload.pull_request.head?.ref ?? null,
-      mergedIntoDefault: false,
-    });
-  }
-
-  // Only PRs and comments of project members count (lib/github/members.ts).
-  const memberOf = async (login: string | undefined, association: string | undefined) =>
-    payload.installation?.id !== undefined &&
-    (await isProjectMember({
-      owner: project.owner,
-      repo: project.repo,
-      login,
-      association,
-      installationId: payload.installation.id,
-    }));
-  let authorIsMember = true;
-  if (isReviewEvent && project.status !== "paused") {
-    try {
-      authorIsMember = await memberOf(
-        payload.pull_request.user?.login,
-        payload.pull_request.author_association,
-      );
-    } catch (error) {
-      return failed("failed to check the PR author", error);
-    }
-  }
-
-  // Cases where the informational check is concluded at once, without a review:
-  // a paused project, a PR from outside the project, a draft.
-  const skipReason =
-    project.status === "paused"
-      ? "Проект на паузе — разбор не выполняется."
-      : isReviewEvent && !authorIsMember
-        ? "Автор pull request не участник проекта — разбор не выполняется."
-        : isReviewEvent && payload.pull_request.draft
-          ? "Черновик — разбор после перевода в «готов к ревью»."
-          : null;
-  if (skipReason) {
-    if (isReviewEvent && payload.installation?.id !== undefined) {
+    if (isPullRequest && payload.action === "closed") {
+      // Состояние PR нужно панели (слит / закрыт без слияния); разбора здесь нет. Второй
+      // шаг закрытия замечаний: исправление окончательно только после слияния в основную ветку.
+      // A merged PR keeps its queued review — the findings still matter.
+      if (payload.installation?.id === undefined) {
+        return Response.json({ ok: true, ignored: "no installation" });
+      }
       try {
-        const args = {
-          owner: project.owner,
-          repo: project.repo,
-          installationId: payload.installation.id as number,
-        };
-        const checkRunId = await createCheckRun({ ...args, headSha: payload.pull_request.head.sha });
-        await concludeCheckRun({
-          ...args,
-          checkRunId,
-          conclusion: "neutral",
-          output: { title: "Не разобрано", summary: skipReason },
-        });
+        await handlePullRequestClosed(project, payload.pull_request.number, payload.installation.id);
       } catch (error) {
-        return failed("failed to conclude skipped check", error);
+        return failed("failed to handle a closed pull request", error);
       }
+      return Response.json({ ok: true, closed: true });
     }
-    return Response.json({ ok: true, ignored: skipReason });
-  }
 
-  if (isReviewEvent) {
-    try {
-      await handlePullRequest(payload);
-      if (config.reviewer === "llm") {
-        await acknowledgePullRequest({
-          owner: project.owner, repo: project.repo,
-          prNumber: payload.pull_request.number, installationId: payload.installation.id,
-        });
+    const isReviewEvent = isPullRequest && REVIEW_ACTIONS.has(payload.action);
+    if (isReviewEvent) {
+      if (config.reviewer === "llm" && payload.installation?.id !== undefined) {
+        try {
+          const live = await githubRequest<ClosedPullRequest>(
+            `/repos/${project.owner}/${project.repo}/pulls/${payload.pull_request.number}`,
+            { token: await getInstallationToken(payload.installation.id) },
+          );
+          if (live.state !== "open") {
+            await handlePullRequestClosed(project, live.number, payload.installation.id);
+            return Response.json({ ok: true, ignored: "PR already closed" });
+          }
+          payload.pull_request = live;
+        } catch (error) {
+          return failed("failed to refresh the pull request", error);
+        }
       }
-    } catch (error) {
-      return failed("failed to handle pull_request", error);
+      // opened / synchronize / reopened / ready_for_review all mean the PR is open — record
+      // it in both reviewer modes so a reopened PR does not stay "closed" in memory.
+      upsertPullRequest(project.id, payload.pull_request.number, {
+        author: payload.pull_request.user?.login ?? null,
+        title: payload.pull_request.title ?? null,
+        state: "open",
+        headSha: payload.pull_request.head?.sha ?? null,
+        baseRef: payload.pull_request.base?.ref ?? null,
+        headRef: payload.pull_request.head?.ref ?? null,
+        mergedIntoDefault: false,
+      });
     }
-  } else if (
-    isComment &&
-    config.reviewer === "llm" &&
-    payload.action === "created" &&
-    payload.issue?.pull_request &&
-    payload.sender?.type !== "Bot" &&
-    payload.installation?.id !== undefined
-  ) {
-    let commenterIsMember: boolean;
-    try {
-      commenterIsMember = await memberOf(
-        payload.comment?.user?.login,
-        payload.comment?.author_association,
-      );
-    } catch (error) {
-      return failed("failed to check the comment author", error);
-    }
-    if (!commenterIsMember) {
-      return Response.json({ ok: true, ignored: "comment author is not a project member" });
-    }
-    // Ответ студента без нового коммита: сохраняем сразу (повтор задачи его не потеряет),
-    // сверку по объяснению выполнит очередь (без check-run).
-    saveReplyAndEnqueue({
-      prId: upsertPullRequest(project.id, payload.issue.number),
-      commentId: payload.comment.id,
-      login: payload.comment.user?.login ?? null,
-      body: payload.comment.body ?? "",
-      payload: {
+
+    // Only PRs and comments of project members count (lib/github/members.ts).
+    const memberOf = async (login: string | undefined, association: string | undefined) =>
+      payload.installation?.id !== undefined &&
+      (await isProjectMember({
         owner: project.owner,
         repo: project.repo,
-        prNumber: payload.issue.number,
+        login,
+        association,
         installationId: payload.installation.id,
-        commentId: payload.comment.id,
-      },
-    });
-    try {
-      await acknowledgeStudentComment({
-        owner: project.owner, repo: project.repo,
-        prNumber: payload.issue.number, installationId: payload.installation.id,
-        commentId: payload.comment.id,
-      });
-    } catch (error) {
-      return failed("failed to acknowledge a student comment", error);
-    }
-  } else if (isRerun && config.reviewer === "llm" && payload.installation?.id !== undefined) {
-    // «Re-run» у проверки в GitHub — разобрать этот коммит заново.
-    const prNumber: number | undefined = payload.check_run.pull_requests?.[0]?.number;
-    if (prNumber !== undefined) {
+      }));
+    let authorIsMember = true;
+    if (isReviewEvent && project.status !== "paused") {
       try {
-        await startCommitReview(
-          {
-            owner: project.owner,
-            repo: project.repo,
-            prNumber,
-            headSha: payload.check_run.head_sha,
-            installationId: payload.installation.id,
-          },
-          "rerun",
+        authorIsMember = await memberOf(
+          payload.pull_request.user?.login,
+          payload.pull_request.author_association,
         );
       } catch (error) {
-        return failed("failed to rerun review", error);
+        return failed("failed to check the PR author", error);
       }
     }
-  }
 
-  return Response.json({ ok: true });
+    // Cases where the informational check is concluded at once, without a review:
+    // a paused project, a PR from outside the project, a draft.
+    const skipReason =
+      project.status === "paused"
+        ? "Проект на паузе — разбор не выполняется."
+        : isReviewEvent && !authorIsMember
+          ? "Автор pull request не участник проекта — разбор не выполняется."
+          : isReviewEvent && payload.pull_request.draft
+            ? "Черновик — разбор после перевода в «готов к ревью»."
+            : null;
+    if (skipReason) {
+      if (isReviewEvent && payload.installation?.id !== undefined) {
+        try {
+          const args = {
+            owner: project.owner,
+            repo: project.repo,
+            installationId: payload.installation.id as number,
+          };
+          const checkRunId = await createCheckRun({ ...args, headSha: payload.pull_request.head.sha });
+          await concludeCheckRun({
+            ...args,
+            checkRunId,
+            conclusion: "neutral",
+            output: { title: "Не разобрано", summary: skipReason },
+          });
+        } catch (error) {
+          return failed("failed to conclude skipped check", error);
+        }
+      }
+      return Response.json({ ok: true, ignored: skipReason });
+    }
+
+    if (isReviewEvent) {
+      try {
+        await handlePullRequest(payload);
+        if (config.reviewer === "llm") {
+          await acknowledgePullRequest({
+            owner: project.owner, repo: project.repo,
+            prNumber: payload.pull_request.number, installationId: payload.installation.id,
+          });
+        }
+      } catch (error) {
+        return failed("failed to handle pull_request", error);
+      }
+    } else if (
+      isComment &&
+      config.reviewer === "llm" &&
+      payload.action === "created" &&
+      payload.issue?.pull_request &&
+      payload.sender?.type !== "Bot" &&
+      payload.installation?.id !== undefined
+    ) {
+      let commenterIsMember: boolean;
+      try {
+        commenterIsMember = await memberOf(
+          payload.comment?.user?.login,
+          payload.comment?.author_association,
+        );
+      } catch (error) {
+        return failed("failed to check the comment author", error);
+      }
+      if (!commenterIsMember) {
+        return Response.json({ ok: true, ignored: "comment author is not a project member" });
+      }
+      // Ответ студента без нового коммита: сохраняем сразу (повтор задачи его не потеряет),
+      // сверку по объяснению выполнит очередь (без check-run).
+      saveReplyAndEnqueue({
+        prId: upsertPullRequest(project.id, payload.issue.number),
+        commentId: payload.comment.id,
+        login: payload.comment.user?.login ?? null,
+        body: payload.comment.body ?? "",
+        payload: {
+          owner: project.owner,
+          repo: project.repo,
+          prNumber: payload.issue.number,
+          installationId: payload.installation.id,
+          commentId: payload.comment.id,
+        },
+      });
+      try {
+        await acknowledgeStudentComment({
+          owner: project.owner, repo: project.repo,
+          prNumber: payload.issue.number, installationId: payload.installation.id,
+          commentId: payload.comment.id,
+        });
+      } catch (error) {
+        return failed("failed to acknowledge a student comment", error);
+      }
+    } else if (isRerun && config.reviewer === "llm" && payload.installation?.id !== undefined) {
+      // «Re-run» у проверки в GitHub — разобрать этот коммит заново.
+      const prNumber: number | undefined = payload.check_run.pull_requests?.[0]?.number;
+      if (prNumber !== undefined) {
+        try {
+          await startCommitReview(
+            {
+              owner: project.owner,
+              repo: project.repo,
+              prNumber,
+              headSha: payload.check_run.head_sha,
+              installationId: payload.installation.id,
+            },
+            "rerun",
+          );
+        } catch (error) {
+          return failed("failed to rerun review", error);
+        }
+      }
+    }
+
+    return Response.json({ ok: true });
+  });
 }

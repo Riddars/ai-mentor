@@ -1,3 +1,4 @@
+import { getConfig } from "@/lib/config";
 import { getInstallationToken } from "@/lib/github/auth";
 import { githubRequest } from "@/lib/github/api";
 
@@ -29,11 +30,13 @@ export async function findIssueComment(params: {
   const marker = `<!-- ai-curator-once:${params.key} -->`;
   const token = await getInstallationToken(params.installationId);
   for (let page = 1; ; page++) {
-    const comments = await githubRequest<Array<{ body: string | null; user: { type: string } | null }>>(
+    const comments = await githubRequest<Array<{ body: string | null; user: { type: string } | null; performed_via_github_app?: { id: number } | null }>>(
       `/repos/${params.owner}/${params.repo}/issues/${params.issueNumber}/comments?per_page=100&page=${page}`,
       { token },
     );
-    const match = comments.find((comment) => comment.user?.type === "Bot" && comment.body?.includes(marker));
+    const match = comments.find((comment) => comment.user?.type === "Bot" &&
+      String(comment.performed_via_github_app?.id) === getConfig().appId && (comment.body?.includes(marker) ||
+        (/^ai-curator-review-\d+-\d+$/.test(params.key) && comment.body?.includes(`<!-- ${params.key} -->`))));
     if (match) return match.body;
     if (comments.length < 100) return null;
   }

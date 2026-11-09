@@ -384,6 +384,14 @@ function migrate(db: DatabaseSync): void {
     db.exec("UPDATE projects SET merged_sync_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE merged_sync_at IS NULL");
     db.exec("PRAGMA user_version = 17");
   }
+  if (version < 19) {
+    // Version 18 existed in an unpublished local branch with different migrations
+    // 16/17. Repair its missing columns as well as upgrading deployed version 17.
+    addColumns(db, "projects", { merged_sync_at: "TEXT" });
+    addColumns(db, "pull_requests", { acknowledged: "INTEGER NOT NULL DEFAULT 0" });
+    addColumns(db, "review_jobs", { publication_key: "TEXT", publication_body: "TEXT" });
+    db.exec("PRAGMA user_version = 19");
+  }
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

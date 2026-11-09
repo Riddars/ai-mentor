@@ -1,3 +1,4 @@
+import { withPrLock } from "@/lib/curator/pr-lock";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { concludeCheckRun, createCheckRun } from "@/lib/github/checks";
@@ -35,11 +36,14 @@ import {
   getProjectByRepo,
   hasSuccessfulCommitAnalysis,
   loadOpenFindings,
-  latestCommitAnalysis,
+  pendingPrFixes,
   latestCommitAnalysisOutcome,
+  latestCommitAnalysis,
   recordAnalysis,
   recordPullRequestClosed,
-  setAnalysisComment,
+  saveReviewResult,
+  stageJobPublication,
+  stagedJobPublication,
   setJobPublishedAnalysis,
   supersedeCommitJobs,
   upsertParticipant,
@@ -365,6 +369,8 @@ async function runReview(
   trigger: "commit" | "comment",
   context: {
     isCurrent?: () => boolean;
+    validateCurrent?: () => Promise<boolean>;
+    stage?: (result: ReviewOutcome) => void;
     fixesFinal?: () => boolean;
     attempt?: number;
   } = {},
@@ -449,61 +455,83 @@ async function runReview(
   }
   const { answer, parsed } = result;
 
-  if (context.isCurrent && !context.isCurrent()) {
-    // Пока модель думала, пришёл новый коммит или PR закрыли без слияния: результат не
-    // применяем, но обращение к модели учитываем (дневной лимит, панель).
+  let current = !context.isCurrent || context.isCurrent();
+  let fixesFinal = false;
+  let finalFixIds: Set<number> | undefined;
+  try {
+    if (current && context.validateCurrent) current = await context.validateCurrent();
+    fixesFinal = context.fixesFinal?.() ?? false;
+    if (current && fixesFinal && parsed) finalFixIds = await confirmMergedFixes(
+      params, loadOpenFindings(prId).filter((f) => parsed.findings.some((candidate) =>
+        candidate.priorId === f.id && candidate.status === "closed")), params.headSha,
+    );
+  } catch (error) {
+    // The model already spent tokens even when subsequent GitHub validation failed.
+    record("error", answer, parsed?.summary || null);
+    throw error;
+  }
+  if (!current || (context.isCurrent && !context.isCurrent())) {
     record("stale", answer, parsed?.summary || null);
     throw new StaleReviewError();
   }
-
-  if (!parsed) {
-    // Память не портим; сырой ответ сохранён в разборе и виден руководителю в панели,
-    // в публичный PR он не попадает.
-    const analysisId = record("parse_error", answer);
-    return {
-      analysisId,
-      comment:
-        `${COMMENT_MARKER}\n\nРазбор не удался: ответ модели не удалось разобрать. ` +
-        "Подробности — у руководителя в панели.",
-      outcome: "parse_error",
-      summary: "",
-      statusChanges: [],
-      kept: [],
-    };
-  }
-
-  const analysisId = record("ok", answer, parsed.summary || null);
-  const fixesFinal = context.fixesFinal?.() ?? false;
-  const { statusChanges, kept } = applyReconciliation(prId, analysisId, parsed, {
-    allowedPriorIds: priorIds,
-    reopenableIds,
-    allowNew: trigger === "commit",
-    fixesFinal,
-    changed,
-    branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
-  });
-  // Reviewed after the merge into the main branch: a requested overview starts now.
-  if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId, false);
-  // Findings of other PRs the model only left open go to the list of the rest of the project,
-  // not among this PR's findings; so the student sees the whole project without repeats.
-  const open = loadOpenFindings(prId).filter((f) => f.status !== "pending");
-  const otherPr = new Set(open.filter((f) => f.prNumber !== params.prNumber).map((f) => f.id));
-  const untouched = (f: ReconciledFinding) => f.priorId !== null && otherPr.has(f.priorId) && f.status === "open";
-  const shown = { ...parsed, findings: parsed.findings.filter((f) => !untouched(f)) };
-  const mentioned = new Set([
-    ...statusChanges.map((c) => c.findingId),
-    ...kept.filter((k) => !otherPr.has(k.findingId) || k.fixNotCounted).map((k) => k.findingId),
-  ]);
-  const others = selectPriorFindings(open.filter((f) => !mentioned.has(f.id)), params.prNumber);
-
-  return {
-    analysisId,
-    comment: renderComment(shown, statusChanges, materials, { kept, viewed, others }),
-    outcome: "ok",
-    summary: parsed.summary,
-    statusChanges,
-    kept,
+  const complete = (outcome: ReviewOutcome): ReviewOutcome => {
+    context.stage?.(outcome);
+    return outcome;
   };
+  return saveReviewResult(() => {
+    if (!parsed) {
+      // Память не портим; сырой ответ сохранён в разборе и виден руководителю в панели,
+      // в публичный PR он не попадает.
+      const analysisId = record("parse_error", answer);
+      return complete({
+        analysisId,
+        comment:
+          `${COMMENT_MARKER}\n\nРазбор не удался: ответ модели не удалось разобрать. ` +
+          "Подробности — у руководителя в панели.",
+        outcome: "parse_error",
+        summary: "",
+        statusChanges: [],
+        kept: [],
+      });
+    }
+
+    const analysisId = record("ok", answer, parsed.summary || null);
+    const { statusChanges, kept } = applyReconciliation(prId, analysisId, parsed, {
+      allowedPriorIds: priorIds,
+      reopenableIds,
+      allowNew: trigger === "commit",
+      fixesFinal,
+      finalFixIds,
+      changed,
+      branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
+    });
+    // Reviewed after the merge into the main branch: a requested overview starts now.
+    if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId, false);
+    if (fixesFinal && kept.some((f) => f.fixNotCounted)) {
+      const project = getProjectByRepo(params.owner, params.repo);
+      if (project) startOverview(project.id, "merge");
+    }
+    // Findings of other PRs the model only left open go to the list of the rest of the project,
+    // not among this PR's findings; so the student sees the whole project without repeats.
+    const open = loadOpenFindings(prId).filter((f) => f.status !== "pending");
+    const otherPr = new Set(open.filter((f) => f.prNumber !== params.prNumber).map((f) => f.id));
+    const untouched = (f: ReconciledFinding) => f.priorId !== null && otherPr.has(f.priorId) && f.status === "open";
+    const shown = { ...parsed, findings: parsed.findings.filter((f) => !untouched(f)) };
+    const mentioned = new Set([
+      ...statusChanges.map((c) => c.findingId),
+      ...kept.filter((k) => !otherPr.has(k.findingId) || k.fixNotCounted).map((k) => k.findingId),
+    ]);
+    const others = selectPriorFindings(open.filter((f) => !mentioned.has(f.id)), params.prNumber);
+
+    return complete({
+      analysisId,
+      comment: renderComment(shown, statusChanges, materials, { kept, viewed, others }),
+      outcome: "ok",
+      summary: parsed.summary,
+      statusChanges,
+      kept,
+    });
+  });
 }
 
 /**
@@ -658,7 +686,11 @@ async function fetchLivePullRequest(
  * Вне вебхука последний коммит берётся из GitHub: запрос по устаревшему коммиту
  * пропускается и не откатывает head в памяти.
  */
-export async function startCommitReview(
+export function startCommitReview(params: ReviewParams, source: ReviewSource): Promise<"queued" | "skipped"> {
+  return withPrLock(params, () => startCommitReviewLocked(params, source));
+}
+
+async function startCommitReviewLocked(
   params: ReviewParams,
   source: ReviewSource,
 ): Promise<"queued" | "skipped"> {
@@ -787,17 +819,21 @@ function overviewAfterMerge(prId: number, firstWork: boolean): void {
  * project memory moves on to the merge commit. Without `pr` the PR is fetched from GitHub (a close event
  * that was missed).
  */
-export async function handlePullRequestClosed(
+export function handlePullRequestClosed(
+  project: { id: number; owner: string; repo: string }, number: number, installationId: number,
+): Promise<void> {
+  return withPrLock({ ...project, prNumber: number }, () => handlePullRequestClosedLocked(project, number, installationId));
+}
+
+async function handlePullRequestClosedLocked(
   project: { id: number; owner: string; repo: string },
   number: number,
   installationId: number,
-  pr?: ClosedPullRequest,
 ): Promise<void> {
   const data =
-    pr ??
-    (await githubRequest<ClosedPullRequest>(`/repos/${project.owner}/${project.repo}/pulls/${number}`, {
+    await githubRequest<ClosedPullRequest>(`/repos/${project.owner}/${project.repo}/pulls/${number}`, {
       token: await getInstallationToken(installationId),
-    }));
+    });
   if (data.state === "open") return;
   const mergedIntoDefault = data.merged && data.base.ref === data.base.repo.default_branch;
   const prId = upsertPullRequest(project.id, number, {
@@ -810,7 +846,13 @@ export async function handlePullRequestClosed(
     headRef: data.head.ref,
     mergedIntoDefault,
   });
-  recordPullRequestClosed(prId, !data.merged ? "closed" : mergedIntoDefault ? "merged-default" : "merged-other");
+  const pending = pendingPrFixes(prId);
+  const confirmed = mergedIntoDefault && data.head.sha
+    ? await confirmMergedFixes({ owner: project.owner, repo: project.repo, prNumber: number, installationId },
+      pending.filter((f) => f.headSha === data.head.sha), data.head.sha, data)
+    : new Set<number>();
+  recordPullRequestClosed(prId, !data.merged ? "closed" : mergedIntoDefault ? "merged-default" : "merged-other", confirmed);
+  if (mergedIntoDefault && pending.some((f) => !confirmed.has(f.id))) startOverview(project.id, "merge");
   if (mergedIntoDefault) {
     // Checked before the memory moves on to the merge commit.
     const firstWork = await bringsFirstWork(project, number, installationId).catch((error) => {
@@ -862,10 +904,78 @@ export class CheckUpdateError extends Error {
   }
 }
 
+/** Equal Git blobs are conservative evidence that the reviewed fix survived merging.
+ * Unavailable or changed evidence needs a main-branch overview instead of closing a finding. */
+async function confirmMergedFixes(
+  params: Pick<ReviewParams, "owner" | "repo" | "prNumber" | "installationId">,
+  findings: PriorFinding[], headSha: string, live?: ClosedPullRequest,
+): Promise<Set<number>> {
+  const confirmed = new Set<number>();
+  if (findings.length === 0) return confirmed;
+  const pr = live ?? await fetchLivePullRequest({ ...params, headSha });
+  if (!pr.merged || pr.head.sha !== headSha || pr.base.ref !== pr.base.repo.default_branch || !pr.merge_commit_sha) return confirmed;
+  const token = await getInstallationToken(params.installationId);
+  const branchPath = `/repos/${params.owner}/${params.repo}/branches/${encodeURIComponent(pr.base.repo.default_branch)}`;
+  let observedMain: string;
+  try {
+    observedMain = (await githubRequest<{ commit: { sha: string } }>(branchPath, { token })).commit.sha;
+  } catch {
+    return confirmed;
+  }
+  const cache = new Map<string, Promise<string | null>>();
+  const blob = (path: string, ref: string) => {
+    const key = `${ref}:${path}`;
+    if (!cache.has(key)) cache.set(key, githubRequest<{ type?: string; sha?: string }>(
+      `/repos/${params.owner}/${params.repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`,
+      { token },
+    ).then((file) => file.type === "file" && file.sha ? file.sha : null).catch(() => null));
+    return cache.get(key)!;
+  };
+  for (const finding of findings) {
+    if (finding.locations.length === 0 || finding.locations.some((l) => l.kind !== "file")) continue;
+    let same = true;
+    for (const path of new Set(finding.locations.map((l) => l.target))) {
+      const [before, after, current] = await Promise.all([
+        blob(path, headSha), blob(path, pr.merge_commit_sha), blob(path, observedMain),
+      ]);
+      if (!before || before !== after || before !== current) { same = false; break; }
+    }
+    if (same) confirmed.add(finding.id);
+  }
+  try {
+    const latest = await githubRequest<{ commit: { sha: string } }>(branchPath, { token });
+    if (latest.commit.sha !== observedMain) confirmed.clear();
+  } catch {
+    confirmed.clear();
+  }
+  return confirmed;
+}
+
+async function validateReviewHead(params: ReviewParams, prId: number): Promise<boolean> {
+  return withPrLock(params, async () => {
+    const pr = await fetchLivePullRequest(params);
+    const current = getPullRequest(prId);
+    if (!current || current.headSha !== params.headSha) return false;
+    if (pr.head.sha !== params.headSha || (pr.state !== "open" && !pr.merged)) return false;
+    persistPrContext({ ...params, state: pr.merged ? "merged" : "open",
+      mergedIntoDefault: pr.merged && pr.base.ref === pr.base.repo.default_branch });
+    return true;
+  });
+}
+
+async function publishStagedResult(params: Pick<ReviewParams, "owner" | "repo" | "prNumber" | "installationId">, jobId: number) {
+  const publication = stagedJobPublication(jobId);
+  if (!publication) throw new Error(`Job ${jobId} has no saved publication`);
+  await postIssueCommentOnce({ ...params, issueNumber: params.prNumber,
+    key: publication.key, body: publication.body });
+  setJobPublishedAnalysis(jobId, publication.analysisId, publication.body);
+  return publication;
+}
+
 /**
  * Выполнить разбор коммита из очереди: разбор, комментарий, завершение проверки. Если head
  * PR сменился или PR закрыт без слияния, результат не применяется — StaleReviewError. Если
- * PR уже слит в основную ветку, исправления закрываются сразу (второго шага уже не будет).
+ * Для слитого PR закрытие исправлений требует подтверждения файлов в результате слияния.
  */
 export async function executeCommitJob(
   params: ReviewParams,
@@ -877,43 +987,30 @@ export async function executeCommitJob(
     const pr = getPullRequest(prId);
     return pr !== null && pr.headSha === params.headSha && pr.state !== "closed";
   };
-  if (!isCurrent()) throw new StaleReviewError();
-  const published = await findIssueComment({
-    owner: params.owner, repo: params.repo, issueNumber: params.prNumber,
-    installationId: params.installationId, key: `review-${jobId}`,
-  });
-  if (published !== null) {
-    // The GitHub POST succeeded but its response was lost before the job was marked
-    // published. The analysis was recorded before that POST; do not call the model again.
-    const analysis = latestCommitAnalysis(prId, params.headSha);
-    if (!analysis) throw new Error(`Published review of job ${jobId} has no analysis`);
-    setJobPublishedAnalysis(jobId, analysis.id, published);
-    const checkRunId = getJobCheckRun(jobId);
-    if (checkRunId !== null) {
-      const conclude = analysis.outcome === "ok" ? concludeCheck : concludeUnreviewedCheck;
-      try {
-        await conclude(params, checkRunId, "Разбор изменений завершён.");
-      } catch (error) {
-        throw new CheckUpdateError(error);
-      }
+  if (!stagedJobPublication(jobId)) {
+    // Deployed version 17 did not save a publication before POST. Recover its
+    // ambiguous successful POSTs before considering a new analysis or stale head.
+    const legacy = await findIssueComment({ ...params, issueNumber: params.prNumber, key: `review-${jobId}` });
+    if (legacy !== null) {
+      const analysis = latestCommitAnalysis(prId, params.headSha);
+      if (!analysis) throw new Error(`Published review of job ${jobId} has no analysis`);
+      stageJobPublication(jobId, analysis.id, `review-${jobId}`, legacy);
     }
-    return;
   }
-  const { analysisId, comment, outcome } = await runReview(params, prId, "commit", {
-    isCurrent,
-    fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
-    attempt,
-  });
-  await postIssueCommentOnce({
-    owner: params.owner,
-    repo: params.repo,
-    issueNumber: params.prNumber,
-    body: comment,
-    installationId: params.installationId,
-    key: `review-${jobId}`,
-  });
-  setJobPublishedAnalysis(jobId, analysisId, comment);
-  // Reviewed after a merge into another PR's branch: what it found passes to that PR.
+  if (!stagedJobPublication(jobId) && !isCurrent()) throw new StaleReviewError();
+  const stage = (result: ReviewOutcome) => stageJobPublication(
+    jobId, result.analysisId, `review-${jobId}`, result.comment,
+  );
+  if (!stagedJobPublication(jobId)) {
+    await runReview(params, prId, "commit", {
+      isCurrent,
+      validateCurrent: () => validateReviewHead(params, prId),
+      fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
+      stage,
+      attempt,
+    });
+  }
+  const { outcome } = await publishStagedResult(params, jobId);
   const reviewed = getPullRequest(prId);
   if (reviewed?.state === "merged" && !reviewed.mergedIntoDefault) recordPullRequestClosed(prId, "merged-other");
   // The comment is out: a failed check update retries without another model call or comment.
@@ -973,7 +1070,11 @@ export interface CommentReviewParams {
  * check-run НЕ создаём: он относится к коммиту, а не к ответу студента.
  * Сверяем статусы на текущем head PR и отвечаем студенту.
  */
-export async function executeCommentJob(params: CommentReviewParams): Promise<void> {
+export async function executeCommentJob(params: CommentReviewParams, jobId: number): Promise<void> {
+  if (stagedJobPublication(jobId)) {
+    await publishStagedResult(params, jobId);
+    return;
+  }
   if (await issueCommentExists({
     owner: params.owner, repo: params.repo, issueNumber: params.prNumber,
     installationId: params.installationId, key: `answer-${params.commentId}`,
@@ -982,27 +1083,30 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
     owner: params.owner, repo: params.repo, issueNumber: params.prNumber,
     installationId: params.installationId, key: `answer-${params.commentId}`, body,
   });
-  const token = await getInstallationToken(params.installationId);
-  const pr = await githubRequest<ClosedPullRequest & { head: { sha: string; ref: string }; user: { login: string } }>(
-    `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`,
-    { token },
-  );
+  const { pr, reviewParams, prId } = await withPrLock(params, async () => {
+    const token = await getInstallationToken(params.installationId);
+    const pr = await githubRequest<ClosedPullRequest & { head: { sha: string; ref: string }; user: { login: string } }>(
+      `/repos/${params.owner}/${params.repo}/pulls/${params.prNumber}`,
+      { token },
+    );
 
-  const reviewParams: ReviewParams = {
-    owner: params.owner,
-    repo: params.repo,
-    prNumber: params.prNumber,
-    headSha: pr.head.sha,
-    installationId: params.installationId,
-    author: pr.user.login,
-    title: pr.title,
-    // Comments arrive for merged/closed PRs too — keep the real state in memory.
-    state: pr.state === "open" ? "open" : pr.merged ? "merged" : "closed",
-    baseRef: pr.base.ref,
-    headRef: pr.head.ref,
-    mergedIntoDefault: pr.merged && pr.base.ref === pr.base.repo.default_branch,
-  };
-  const prId = persistPrContext(reviewParams);
+    const reviewParams: ReviewParams = {
+      owner: params.owner,
+      repo: params.repo,
+      prNumber: params.prNumber,
+      headSha: pr.head.sha,
+      installationId: params.installationId,
+      author: pr.user.login,
+      title: pr.title,
+      // Comments arrive for merged/closed PRs too — keep the real state in memory.
+      state: pr.state === "open" ? "open" : pr.merged ? "merged" : "closed",
+      baseRef: pr.base.ref,
+      headRef: pr.head.ref,
+      mergedIntoDefault: pr.merged && pr.base.ref === pr.base.repo.default_branch,
+    };
+    const prId = persistPrContext(reviewParams);
+    return { pr, reviewParams, prId };
+  });
   try {
     // Closed without merge: its fixes never land and its branch findings no longer count,
     // so a reply there is kept but not reconciled — the model is not called.
@@ -1015,19 +1119,28 @@ export async function executeCommentJob(params: CommentReviewParams): Promise<vo
       return; // сверять нечего — модель не вызываем
     }
 
-    const outcome = await runReview(reviewParams, prId, "comment", {
-      fixesFinal: () => reviewParams.mergedIntoDefault ?? false,
+    await runReview(reviewParams, prId, "comment", {
+      isCurrent: () => {
+        const current = getPullRequest(prId);
+        return current?.headSha === reviewParams.headSha && current.state !== "closed";
+      },
+      validateCurrent: () => validateReviewHead(reviewParams, prId),
+      fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
+      stage: (outcome) => {
+        const reply = outcome.outcome !== "ok"
+          ? `${COMMENT_MARKER}\n\nНе удалось проверить комментарий: ответ модели не удалось разобрать. Статусы замечаний не изменены.`
+          : renderReplyComment(outcome.statusChanges, outcome.kept) ||
+            `${COMMENT_MARKER}\n\nКомментарий проверен. Статус замечаний не изменился.`;
+        stageJobPublication(jobId, outcome.analysisId, `answer-${params.commentId}`, reply);
+      },
     });
-    const body = renderReplyComment(outcome.statusChanges, outcome.kept);
-    const reply = body || `${COMMENT_MARKER}\n\nКомментарий проверен. Статус замечаний не изменился.`;
-    await postReply(reply);
-    setAnalysisComment(outcome.analysisId, reply);
+    await publishStagedResult(params, jobId);
   } finally {
     // A reply on a closed PR: settle its findings as its close does — the close event may
     // have been missed, and a fix accepted after a merge into another branch moves on.
     if (pr.state !== "open") {
       const project = getProjectByRepo(params.owner, params.repo);
-      if (project) await handlePullRequestClosed(project, params.prNumber, params.installationId, { ...pr, number: params.prNumber });
+      if (project) await handlePullRequestClosed(project, params.prNumber, params.installationId);
     }
   }
 }

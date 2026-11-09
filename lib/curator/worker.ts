@@ -35,11 +35,13 @@ import {
   markJobRunning,
   publishedCommitAnalysisOutcome,
   queueProblems,
+  queueFailedCheckConclusion,
   recentAnalysesOfProject,
   recentTokens,
   requeueRunningJobs,
   requeueStrayRunningJobs,
   rescheduleJob,
+  stagedJobPublication,
   type ReviewJob,
 } from "@/lib/curator/store";
 
@@ -70,7 +72,7 @@ const realDeps: WorkerDeps = {
   runComment: async (job) => {
     const params = job.payload as CommentReviewParams;
     await acknowledgeStudentComment(params);
-    await executeCommentJob(params);
+    await executeCommentJob(params, job.id);
   },
   runOverview: (job) => executeOverviewJob(job),
   concludeUnreviewed: (job, summary) =>
@@ -154,6 +156,31 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     return;
   }
 
+  if (job.kind === "commit" && job.note === "check-retry") {
+    if (await concludeIfOpen(job, NOT_REVIEWED_FAILED, deps)) {
+      markCheckConcluded(job.id, "deadline");
+      finishJob(job.id, "failed", "review failed; check updated");
+    } else {
+      rescheduleJob(job.id, { delayMs: 60_000 }, "check update failed");
+      queueFailedCheckConclusion(job.id);
+    }
+    return;
+  }
+
+  // A saved answer needs only GitHub, regardless of model budgets or a later pause.
+  if (stagedJobPublication(job.id)) {
+    if (!markJobRunning(job.id)) return;
+    try {
+      if (job.kind === "commit") await deps.runCommit(job);
+      else await deps.runComment(job);
+      finishJob(job.id, "done");
+    } catch (error) {
+      console.warn(`[queue] publication of job ${job.id} failed, retrying:`, error);
+      rescheduleJob(job.id, { delayMs: 60_000 }, "publication pending");
+    }
+    return;
+  }
+
   if (getProject(job.projectId)?.status !== "active") {
     await concludeIfOpen(job, "Проект на паузе — разбор не выполняется.", deps);
     finishJob(job.id, "superseded", "project paused");
@@ -195,6 +222,16 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
       return;
     }
     if (error instanceof StaleReviewError) {
+      if (job.kind === "comment") {
+        rescheduleJob(job.id, { delayMs: 0 }, "PR changed; retry reply on current head");
+        return;
+      }
+      try {
+        await startCommitReview(job.payload as ReviewParams, "restart");
+      } catch {
+        rescheduleJob(job.id, { delayMs: 60_000 }, "failed to refresh changed PR");
+        return;
+      }
       await concludeIfOpen(job, "Заменён новым коммитом — разбирается последний.", deps);
       finishJob(job.id, "superseded");
       return;
@@ -203,9 +240,12 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     const age = Date.now() - (parseDbDate(job.createdAt)?.getTime() ?? Date.now());
     if (age >= settings.retryWindowMs || (job.kind === "overview" && job.attempts + 1 >= OVERVIEW_ATTEMPTS)) {
       console.error(`[queue] job ${job.id} failed for good:`, error);
-      finishJob(job.id, "failed", message);
-      if (await concludeIfOpen(job, NOT_REVIEWED_FAILED, deps)) {
-        markCheckConcluded(job.id, "deadline");
+      const checkUpdated = await concludeIfOpen(job, NOT_REVIEWED_FAILED, deps);
+      if (checkUpdated) markCheckConcluded(job.id, "deadline");
+      if (job.kind === "commit" && job.checkRunId !== null && !job.checkConcluded && !checkUpdated) {
+        queueFailedCheckConclusion(job.id);
+      } else {
+        finishJob(job.id, "failed", message);
       }
       await deps.reportFailure(job).catch((reportError) => {
         console.error(`[queue] failed to report failure of job ${job.id}:`, reportError);

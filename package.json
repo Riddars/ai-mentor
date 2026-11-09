@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:private-pr": "tsx scripts/private-pr-selftest.mts"
+    "test:private-pr": "tsx scripts/private-pr-selftest.mts",
+    "test:reviews": "tsx scripts/private-pr-selftest.mts",
+    "test:review-migration": "tsx scripts/review-migration-selftest.mts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.0.4",

@@ -844,6 +844,38 @@ export function setJobPublishedAnalysis(jobId: number, analysisId: number, comme
   }
 }
 
+/** Keep reconciliation and the exact pending publication in the same transaction. */
+export function saveReviewResult<T>(save: () => T): T {
+  const db = getDb();
+  db.exec("SAVEPOINT review_result");
+  try {
+    const result = save();
+    db.exec("RELEASE review_result");
+    return result;
+  } catch (error) {
+    db.exec("ROLLBACK TO review_result; RELEASE review_result");
+    throw error;
+  }
+}
+
+export function stageJobPublication(jobId: number, analysisId: number, key: string, body: string): void {
+  getDb().prepare(
+    `UPDATE review_jobs SET published_analysis_id = @analysisId,
+       publication_key = @key, publication_body = @body, updated_at = datetime('now')
+     WHERE id = @jobId`,
+  ).run({ jobId, analysisId, key, body });
+}
+
+export function stagedJobPublication(jobId: number): {
+  analysisId: number; key: string; body: string; outcome: AnalysisOutcome
+} | null {
+  return getDb().prepare(
+    `SELECT a.id AS analysisId, j.publication_key AS key, j.publication_body AS body, a.outcome
+     FROM review_jobs j JOIN analyses a ON a.id = j.published_analysis_id
+     WHERE j.id = @jobId AND j.publication_key IS NOT NULL`,
+  ).get({ jobId }) as { analysisId: number; key: string; body: string; outcome: AnalysisOutcome } | undefined ?? null;
+}
+
 export function recordAnalysis(params: {
   prId: number;
   headSha: string;
@@ -1349,6 +1381,8 @@ export interface ReconcileOptions {
    * for a merge, and new findings belong to the project.
    */
   fixesFinal?: boolean;
+  /** PR fixes whose cited files were confirmed in the actual merge result. */
+  finalFixIds?: ReadonlySet<number>;
   /** Changed files of the PR with their added lines. */
   changed: ChangedLines;
   /** Head branch of the PR, kept with new findings for display. */
@@ -1428,7 +1462,7 @@ export function applyReconciliation(
      VALUES (@findingId, @oldStatus, @newStatus, @reason, @analysisId)`,
   );
 
-  db.exec("BEGIN");
+  db.exec("SAVEPOINT reconciliation");
   try {
     for (const f of result.findings) {
       const text = {
@@ -1502,6 +1536,11 @@ export function applyReconciliation(
         });
         continue;
       }
+      if (f.status === "closed" && options.fixesFinal && options.finalFixIds && !options.finalFixIds.has(findingId)) {
+        kept.push({ findingId, title: prior.title, status: prior.status,
+          reason: "исправление не подтверждено в результате слияния; нужна проверка основной ветки", fixNotCounted: true });
+        continue;
+      }
       const status: FindingStatus =
         f.status === "closed" ? (options.fixesFinal ? "closed" : "pending") : f.status;
       updateFinding.run({ id: findingId, prId, analysisId, status, ...text });
@@ -1524,9 +1563,9 @@ export function applyReconciliation(
         kept.push({ findingId, title: prior.title, status, reason: f.reason ?? null });
       }
     }
-    db.exec("COMMIT");
+    db.exec("RELEASE reconciliation");
   } catch (error) {
-    db.exec("ROLLBACK");
+    db.exec("ROLLBACK TO reconciliation; RELEASE reconciliation");
     throw error;
   }
 
@@ -1535,13 +1574,23 @@ export function applyReconciliation(
 
 export type CloseOutcome = "merged-default" | "merged-other" | "closed";
 
+export function pendingPrFixes(prId: number): Array<PriorFinding & { headSha: string }> {
+  const rows = getDb().prepare(
+    `SELECT f.id, f.title, f.locations, a.head_sha AS headSha FROM findings f
+     JOIN analyses a ON a.id = f.last_analysis_id
+     WHERE f.resolved_by_pr_id = @prId AND f.status = 'pending' AND a.outcome = 'ok'`,
+  ).all({ prId }) as Array<{ id: number; title: string; locations: string | null; headSha: string }>;
+  return rows.map((r) => ({ ...r, locations: parseJson<FindingLocation[]>(r.locations) ?? [],
+    status: "pending", prNumber: 0, area: null, severity: null, verify: null }));
+}
+
 /**
- * A PR was closed. Merged into the main branch: its `pending` fixes become `closed` and its
- * findings belong to the project from now on. Closed without merge: its `pending` fixes go
+ * A PR was closed. Only fixes confirmed for the final head and merge result become
+ * `closed`; unconfirmed fixes reopen. Its findings now belong to the project. Closed without merge: its `pending` fixes go
  * back to `open`. Merged into another branch: its findings and fixes pass to the open PR of
  * that branch (see adoptMergedBranchFindings); they wait for one if there is none yet.
  */
-export function recordPullRequestClosed(prId: number, outcome: CloseOutcome): void {
+export function recordPullRequestClosed(prId: number, outcome: CloseOutcome, verifiedFixIds: ReadonlySet<number> = new Set()): void {
   const db = getDb();
   if (outcome === "merged-other") {
     const pr = db
@@ -1561,16 +1610,12 @@ export function recordPullRequestClosed(prId: number, outcome: CloseOutcome): vo
   // PRs merged into this one's branch may have left findings it never took over (no review
   // since): they reach the main branch with it.
   if (outcome === "merged-default") adoptMergedBranchFindings(prId);
-  const newStatus: FindingStatus = outcome === "merged-default" ? "closed" : "open";
-  const reason =
-    outcome === "merged-default"
-      ? "Исправление слито в основную ветку."
-      : "Pull request с исправлением закрыт без слияния.";
-  const ids = (
-    db
-      .prepare("SELECT id FROM findings WHERE status = 'pending' AND resolved_by_pr_id = @prId")
-      .all({ prId }) as Array<{ id: number }>
-  ).map((r) => r.id);
+  const candidates = db.prepare(
+    `SELECT f.id, a.head_sha AS analysisHead, a.outcome, pr.head_sha AS head
+     FROM findings f LEFT JOIN analyses a ON a.id = f.last_analysis_id
+     JOIN pull_requests pr ON pr.id = @prId
+     WHERE f.status = 'pending' AND f.resolved_by_pr_id = @prId`,
+  ).all({ prId }) as Array<{ id: number; analysisHead: string | null; outcome: string | null; head: string | null }>;
 
   const update = db.prepare(
     `UPDATE findings SET status = @newStatus,
@@ -1584,7 +1629,14 @@ export function recordPullRequestClosed(prId: number, outcome: CloseOutcome): vo
   );
   db.exec("BEGIN");
   try {
-    for (const id of ids) {
+    for (const candidate of candidates) {
+      const { id } = candidate;
+      const confirmed = outcome === "merged-default" && candidate.outcome === "ok" &&
+        candidate.analysisHead === candidate.head && verifiedFixIds.has(id);
+      const newStatus = confirmed ? "closed" : "open";
+      const reason = confirmed ? "Исправление слито в основную ветку." : outcome === "closed"
+        ? "Pull request с исправлением закрыт без слияния."
+        : "Исправление не подтверждено в итоговом коде; нужна перепроверка.";
       update.run({ id, newStatus });
       history.run({ id, newStatus, reason });
     }
@@ -1713,6 +1765,7 @@ export interface ReviewJob {
   status: JobStatus;
   attempts: number;
   checkConcluded: boolean;
+  note: string | null;
   createdAt: string;
 }
 
@@ -1724,7 +1777,7 @@ type RawJob = Omit<ReviewJob, "payload" | "checkConcluded"> & {
 const JOB_SELECT = `
   SELECT j.id, j.pull_request_id AS prId, pr.project_id AS projectId, j.kind,
          j.head_sha AS headSha, j.check_run_id AS checkRunId, j.payload, j.status,
-         j.attempts, j.check_concluded AS checkConcluded, j.created_at AS createdAt
+         j.attempts, j.check_concluded AS checkConcluded, j.note, j.created_at AS createdAt
   FROM review_jobs j
   JOIN pull_requests pr ON pr.id = j.pull_request_id`;
 
@@ -1765,7 +1818,7 @@ export function enqueueCommitJob(params: {
       .prepare(
         `SELECT check_run_id AS checkRunId, check_concluded AS concluded FROM review_jobs
          WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'
-           AND head_sha != @headSha`,
+           AND head_sha != @headSha AND publication_key IS NULL AND COALESCE(note, '') != 'check-retry'`,
       )
       .all({ prId: params.prId, headSha: params.headSha }) as Array<{
       checkRunId: number | null;
@@ -1774,7 +1827,7 @@ export function enqueueCommitJob(params: {
     db.prepare(
       `UPDATE review_jobs SET status = 'superseded', updated_at = datetime('now')
        WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'
-         AND head_sha != @headSha`,
+         AND head_sha != @headSha AND publication_key IS NULL AND COALESCE(note, '') != 'check-retry'`,
     ).run({ prId: params.prId, headSha: params.headSha });
     const row = db
       .prepare(
@@ -1832,13 +1885,13 @@ export function supersedeCommitJobs(prId: number): number[] {
       .prepare(
         `SELECT check_run_id AS id FROM review_jobs WHERE pull_request_id = @prId
            AND kind = 'commit' AND status = 'queued' AND check_concluded = 0
-           AND check_run_id IS NOT NULL`,
+           AND check_run_id IS NOT NULL AND publication_key IS NULL AND COALESCE(note, '') != 'check-retry'`,
       )
       .all({ prId }) as Array<{ id: number }>
   ).map((r) => r.id);
   db.prepare(
     `UPDATE review_jobs SET status = 'superseded', updated_at = datetime('now')
-     WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued'`,
+     WHERE pull_request_id = @prId AND kind = 'commit' AND status = 'queued' AND publication_key IS NULL AND COALESCE(note, '') != 'check-retry'`,
   ).run({ prId });
   return ids;
 }
@@ -1959,10 +2012,17 @@ export function listOverdueJobs(): ReviewJob[] {
         `${JOB_SELECT}
          WHERE j.kind = 'commit' AND j.status IN ${ACTIVE_JOB} AND j.check_concluded = 0
            AND j.check_run_id IS NOT NULL AND j.deadline_at <= datetime('now')
-           AND j.published_analysis_id IS NULL`,
+           AND j.published_analysis_id IS NULL AND COALESCE(j.note, '') != 'check-retry'`,
       )
       .all() as unknown as RawJob[]
   ).map(toJob);
+}
+
+export function queueFailedCheckConclusion(id: number): void {
+  getDb().prepare(
+    `UPDATE review_jobs SET status = 'queued', note = 'check-retry',
+       run_after = datetime('now', '+60 seconds'), updated_at = datetime('now') WHERE id = @id`,
+  ).run({ id });
 }
 
 /** Claim a queued job; false if it is no longer queued (replaced meanwhile). */
