@@ -56,19 +56,17 @@ export default async function AdminPage() {
                     ) : (
                       "Создайте репозиторий из шаблона"
                     )}{" "}
-                    в GitHub, выберите видимость и нажмите Create repository. Куратор работает одинаково с публичными и приватными репозиториями.
+                    В поле <b>Owner</b> выберите <b>{home?.org ?? "свою организацию"}</b>, укажите название и видимость.
                   </li>
-                  <li>Подключите его здесь, затем на странице проекта настройте защиту основной ветки по инструкции «Подготовка репозитория».
-                    Если приложение куратора не видит репозиторий, добавьте его в доступ приложения GitHub.</li>
+                  <li>Подключите репозиторий в форме ниже.</li>
                 </ol>
                 {home && <TransferRepositoryGuide org={home.org} />}
                 <AddProjectForm defaultOwner={home?.org} />
                 {home && <p className="text-xs text-muted-foreground">
-                  Если куратор не видит новый репозиторий, откройте{" "}
+                  AI Куратор не видит репозиторий? Попросите владельца организации проверить доступ в{" "}
                   <a href={`https://github.com/organizations/${home.org}/settings/installations`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
-                    GitHub Apps организации
-                  </a>{" "}
-                  и добавьте репозиторий в доступ приложения AI Chem Curator.
+                    настройках приложения
+                  </a>.
                 </p>}
               </section>
               {projects.length > 0 && (
@@ -121,17 +119,11 @@ export default async function AdminPage() {
                 <h3 className="font-semibold">Подключение руководителя проекта</h3>
                 <ol className="flex list-decimal flex-col gap-2 pl-5">
                   <li>
-                    Владелец организации в GitHub приглашает коллегу через{" "}
-                    {home ? (
-                      <a href={`https://github.com/orgs/${home.org}/people`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
-                        People организации {home.org}
-                      </a>
-                    ) : "People организации"}
-                    : <b>Invite member</b> → логин GitHub → роль <b>Member</b> → <b>Send invitation</b>.
-                    Коллега должен принять приглашение.
+                    {home ? <a href={`https://github.com/orgs/${home.org}/people`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">Откройте участников организации</a> : "Откройте участников организации"} и нажмите <b>Invite member</b>.
                   </li>
-                  <li>Создайте ему учётную запись в форме ниже и передайте данные для входа. Учётная запись сервиса и членство в GitHub оформляются отдельно.</li>
-                  <li>Коллега входит в сервис, создаёт репозиторий из шаблона через блок «Новый проект» и подключает его. Затем в настройках проекта приглашает студентов в репозиторий с ролью <b>Write</b>. Добавлять студентов в организацию не требуется.</li>
+                  <li>Найдите коллегу по GitHub-логину, выберите <b>Member</b> и нажмите <b>Send invitation</b>.</li>
+                  <li>Попросите принять приглашение.</li>
+                  <li>Создайте учётную запись в форме ниже и передайте коллеге данные для входа в сервис.</li>
                 </ol>
               </section>
               <CreateSupervisorForm />

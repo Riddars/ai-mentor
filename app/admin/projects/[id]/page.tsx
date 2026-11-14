@@ -148,56 +148,37 @@ export default async function AdminProjectPage({
             </CardHeader>
             <CardBody className="flex flex-col gap-5 pt-0 text-sm">
               <aside className="rounded-lg border border-amber/40 bg-amber-soft p-3">
-                <p className="font-medium">Передайте студентам: новая ветка → PR → слияние</p>
-                <p className="mt-1">В приватных репозиториях организации на GitHub Free запрет прямого push недоступен — студенты должны сами соблюдать этот порядок и не загружать изменения сразу в main.</p>
-                <p className="mt-1">В публичных репозиториях установите ruleset по инструкции ниже.</p>
-                <p className="mt-1 font-medium">В обоих случаях ждать проверки куратора не нужно — PR можно слить сразу.</p>
+                <p className="font-medium">Подготовьте своих студентов!</p>
+                <p className="mt-1">AI Куратор публикует ревью кода в PR. В публичном репозитории настройте ruleset по инструкции ниже: он запретит загружать изменения напрямую в main.</p>
+                <p className="mt-1">В приватном репозитории организации на GitHub Free такая защита недоступна. Чтобы получать ревью, студенты должны сами создавать ветки и открывать PR. Передайте им эту инструкцию:</p>
+                <blockquote className="mt-2 border-l-2 border-amber/40 pl-3">Не загружайте изменения прямо в main. Для каждой задачи создайте отдельную ветку, загрузите в неё изменения и откройте Pull request в main. Ревью AI Куратора появится в этом PR.</blockquote>
               </aside>
-              {setup === null && <p className="text-amber">Не удалось связаться с GitHub — попробуйте обновить позже.</p>}
+              {setup === null && <p className="text-amber">GitHub недоступен. Попробуйте обновить страницу позже.</p>}
               {setup?.installed === false && (
-                <p className="text-red">Куратор не видит репозиторий. Откройте <a href={`https://github.com/organizations/${project.owner}/settings/installations`} target="_blank" rel="noreferrer" className="underline">настройки GitHub Apps организации</a> и проверьте доступ приложения к этому репозиторию.</p>
+                <p className="text-red">AI Куратор не видит репозиторий. Попросите владельца организации проверить доступ в <a href={`https://github.com/organizations/${project.owner}/settings/installations`} target="_blank" rel="noreferrer" className="underline">настройках приложения</a>.</p>
               )}
               {setup?.installed && (
-                <p className="text-green">Приложение куратора видит репозиторий. При открытии PR оно сообщит о начале разбора; результат появится в этом PR, даже после слияния.</p>
+                <p className="text-green">AI Куратор подключён.</p>
               )}
 
-              {setup?.isPublic && setup.checkRequired && (
-                <p className="text-amber">Старое правило GitHub всё ещё требует завершения проверки AI Curator перед слиянием. Чтобы разрешить слияние во время разбора, откройте <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="underline">настройки rulesets</a> и уберите из действующего правила требование <b>Require status checks to pass before merging</b> для AI Curator. Остальные правила можно оставить.</p>
-              )}
-
-              {setup?.installed && <SetupStep
+              {setup?.installed && setup.isPublic && <SetupStep
                 n={1}
-                title="Защитите основную ветку от прямого push"
-                done={setup.isPublic ? setup.pullRequestsOnly : null}
-                doneText="GitHub требует PR для изменений основной ветки."
+                title="Защита основной ветки"
+                done={setup.pullRequestsOnly}
+                doneText="Защита включена: изменения основной ветки требуют PR."
                 keepInstructions
               >
-                <p>Правило требует pull request вместо прямой загрузки в основную ветку.
-                  Слить PR можно сразу: одобрение руководителя и завершение AI Curator этим файлом не требуются.</p>
-                {!setup.isPublic && <p className="text-amber">
-                  Инструкция импорта для приватного репозитория применима на GitHub Team или Enterprise
-                  (для личного репозитория — Pro).
-                  Защиту приватного репозитория панель автоматически не проверяет.
-                </p>}
                 <ol className="flex list-decimal flex-col gap-1 pl-5">
                   <li><a href="/api/ruleset" download className="font-medium text-primary hover:underline">Скачайте файл правила</a>.</li>
-                  <li>Откройте <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">Settings → Rules → Rulesets репозитория</a>.
-                    Нужны права Admin. Нажмите <b>New ruleset → Import a ruleset</b> и выберите скачанный файл.</li>
-                  <li>Проверьте: <b>Enforcement status — Active</b>, цель — <b>Default branch</b>, список <b>Bypass</b> пуст.
-                    Включено <b>Require a pull request before merging</b>, число одобрений — <b>0</b>.
-                    <b>Require status checks to pass</b> не включайте ради AI Curator. Нажмите <b>Create</b>.</li>
-                  <li>Вернитесь сюда и нажмите <b>Обновить</b>. Для публичного репозитория панель проверит наличие требования PR.</li>
+                  <li><a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">Откройте настройки правил</a>. Нажмите <b>New ruleset</b>, затем <b>Import a ruleset</b> и выберите файл.</li>
+                  <li>Убедитесь, что <b>Enforcement status</b> установлен в <b>Active</b>, и нажмите <b>Create</b>.</li>
+                  <li>Вернитесь сюда и нажмите <b>Обновить</b>.</li>
                 </ol>
-                <p className="text-xs text-muted-foreground">Если main-protection уже есть, измените его вместо повторного импорта:
-                  сохраните требование PR, уберите AI Curator из обязательных проверок.
-                  Другие правила GitHub могут отдельно ограничивать слияние или разрешать обход защиты.
-                  Новый файл также запрещает удаление основной ветки и force push.</p>
               </SetupStep>}
 
               <SetupStep
-                n={2}
-                title="Пригласите студентов"
-                note="Для работы над проектом студенту нужен доступ на запись."
+                n={setup?.installed && setup.isPublic ? 2 : 1}
+                title="Приглашение студентов"
                 done={setup?.students?.length ? true : setup ? false : null}
                 doneText={`В репозитории: ${setup?.students?.join(", ") ?? ""}.`}
                 keepInstructions
@@ -208,15 +189,15 @@ export default async function AdminProjectPage({
                     <a href={`${repoUrl}/settings/access`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">
                       список участников репозитория
                     </a>{" "}
-                    (Collaborators) и нажмите зелёную кнопку <b>Add people</b>.
+                    и нажмите <b>Add people</b>.
                   </li>
-                  <li>Введите логин студента на GitHub или его почту и выберите его в списке.</li>
+                  <li>Найдите студента по GitHub-логину или почте.</li>
                   <li>
                     Выберите роль <b>Write</b> и нажмите <b>Add to repository</b>.
                   </li>
                 </ol>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Студенту придёт приглашение на почту; здесь он появится, когда его примет.
+                  Попросите студента принять приглашение. Учётная запись в сервисе ему не нужна.
                 </p>
               </SetupStep>
             </CardBody>
@@ -230,7 +211,7 @@ export default async function AdminProjectPage({
               <p className="text-muted-foreground">
                 {project.status === "active"
                   ? "Проект в работе: pull requests разбираются."
-                  : "Проект на паузе: pull requests не разбираются, проверка завершается с пометкой о паузе. Накопленные замечания сохраняются."}
+                  : "Проект на паузе: разборы приостановлены, замечания сохранены."}
               </p>
               <form action={setProjectStatusAction}>
                 <input type="hidden" name="projectId" value={id} />
