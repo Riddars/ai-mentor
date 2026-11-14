@@ -18,7 +18,7 @@ const store = await import("@/lib/curator/store");
 const { getDb } = await import("@/lib/db");
 const { recoverMergedPullRequests, runJob } = await import("@/lib/curator/worker");
 const { executeCommentJob, startCommitReview } = await import("@/lib/curator/review");
-const { checkRepositorySetup } = await import("@/lib/github/setup");
+const { checkRepositorySetup, rulesetJson } = await import("@/lib/github/setup");
 
 const repo = { name: "private", private: true, default_branch: "main", owner: { login: "org" } };
 const project = { owner: "org", repo: "private", id: store.createProjectManual("org", "private") };
@@ -142,6 +142,17 @@ async function runNext() {
 }
 try {
   const setup = await checkRepositorySetup("org", "private", "1");
+  const ruleset = JSON.parse(rulesetJson());
+  assert.equal(ruleset.enforcement, "active");
+  assert.deepEqual(ruleset.conditions.ref_name.include, ["~DEFAULT_BRANCH"]);
+  assert.deepEqual(ruleset.bypass_actors, []);
+  assert.deepEqual(ruleset.rules.map((r: { type: string }) => r.type), ["deletion", "non_fast_forward", "pull_request"]);
+  assert.equal(ruleset.rules[2].parameters.required_approving_review_count, 0);
+  assert.equal(ruleset.rules[2].parameters.required_review_thread_resolution, false);
+  assert.equal(setup.pullRequestsOnly, null);
+  assert.equal((await checkRepositorySetup("org", "public", "1")).pullRequestsOnly, true);
+  assert.equal((await checkRepositorySetup("org", "no-rules", "1")).pullRequestsOnly, false);
+  console.log("ok branch protection requires PR without approvals, bypass or mandatory AI checks");
   assert.equal(setup.installed && setup.isPublic === false, true);
   assert.equal((await checkRepositorySetup("org", "hidden", "1")).installed, false);
   assert.equal((await checkRepositorySetup("org", "public", "1")).checkRequired, true);

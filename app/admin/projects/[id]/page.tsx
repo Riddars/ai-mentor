@@ -148,7 +148,7 @@ export default async function AdminProjectPage({
             </CardHeader>
             <CardBody className="flex flex-col gap-5 pt-0 text-sm">
               <p className="text-muted-foreground">
-                Проверьте доступ к репозиторию и приглашения участников.
+                Настройте изменения через PR и приглашения участников.
               </p>
               {setup === null && <p className="text-amber">Не удалось связаться с GitHub — попробуйте обновить позже.</p>}
               {setup?.installed === false && (
@@ -162,8 +162,39 @@ export default async function AdminProjectPage({
                 <p className="text-amber">Старое правило GitHub всё ещё требует завершения проверки AI Curator перед слиянием. Чтобы разрешить слияние во время разбора, откройте <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="underline">настройки rulesets</a> и уберите из действующего правила требование <b>Require status checks to pass before merging</b> для AI Curator. Остальные правила можно оставить.</p>
               )}
 
-              <SetupStep
+              {setup?.installed && <SetupStep
                 n={1}
+                title="Защитите основную ветку от прямого push"
+                done={setup.isPublic ? setup.pullRequestsOnly : null}
+                doneText="GitHub требует PR для изменений основной ветки."
+                keepInstructions
+              >
+                <p>Правило требует pull request вместо прямой загрузки в основную ветку.
+                  Слить PR можно сразу: одобрение руководителя и завершение AI Curator этим файлом не требуются.</p>
+                {!setup.isPublic && <p className="text-amber">
+                  Для приватного репозитория организации на GitHub Free это правило не применяется.
+                  Нужен GitHub Team или Enterprise; для личного приватного репозитория — Pro.
+                  На Free договоритесь со студентами вносить изменения только через PR:
+                  технически запретить прямой push этим правилом не получится. Куратор при этом работает.
+                  Защиту приватного репозитория панель автоматически не проверяет.
+                </p>}
+                <ol className="flex list-decimal flex-col gap-1 pl-5">
+                  <li><a href="/api/ruleset" download className="font-medium text-primary hover:underline">Скачайте файл правила</a>.</li>
+                  <li>Откройте <a href={`${repoUrl}/settings/rules`} target="_blank" rel="noreferrer" className="font-medium text-primary hover:underline">Settings → Rules → Rulesets репозитория</a>.
+                    Нужны права Admin. Нажмите <b>New ruleset → Import a ruleset</b> и выберите скачанный файл.</li>
+                  <li>Проверьте: <b>Enforcement status — Active</b>, цель — <b>Default branch</b>, список <b>Bypass</b> пуст.
+                    Включено <b>Require a pull request before merging</b>, число одобрений — <b>0</b>.
+                    <b>Require status checks to pass</b> не включайте ради AI Curator. Нажмите <b>Create</b>.</li>
+                  <li>Вернитесь сюда и нажмите <b>Обновить</b>. Для публичного репозитория панель проверит наличие требования PR.</li>
+                </ol>
+                <p className="text-xs text-muted-foreground">Если main-protection уже есть, измените его вместо повторного импорта:
+                  сохраните требование PR, уберите AI Curator из обязательных проверок.
+                  Другие правила GitHub могут отдельно ограничивать слияние или разрешать обход защиты.
+                  Новый файл также запрещает удаление основной ветки и force push.</p>
+              </SetupStep>}
+
+              <SetupStep
+                n={2}
                 title="Пригласите студентов"
                 note="Для работы над проектом студенту нужен доступ на запись."
                 done={setup?.students?.length ? true : setup ? false : null}
