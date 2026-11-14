@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { getViewer, listUsers } from "@/lib/users";
 import {
   getProject,
+  projectActivity,
   isSupervisorOf,
   listProjectSupervisors,
   projectHasPullRequests,
@@ -47,6 +48,7 @@ export default async function AdminProjectPage({
     (u) => u.role === "supervisor" && !u.disabled && !assignedIds.has(u.id),
   );
   const hasPrs = projectHasPullRequests(id);
+  const activity = projectActivity(id);
   const fullName = `${project.owner}/${project.repo}`;
   const repoUrl = `https://github.com/${fullName}`;
   let setup: RepositorySetup | null = null;
@@ -213,6 +215,8 @@ export default async function AdminProjectPage({
                   ? "Проект в работе: pull requests разбираются."
                   : "Проект на паузе: разборы приостановлены, замечания сохранены."}
               </p>
+              {activity?.reason === "inactivity" && <p>Автоматическая пауза: больше двух месяцев без активности.</p>}
+              {activity && <p className="text-xs text-muted-foreground">Последняя активность: {new Date(activity.at.includes("T") ? activity.at : activity.at.replace(" ", "T") + "Z").toLocaleDateString("ru-RU", {timeZone: "Europe/Moscow"})}.</p>}
               <form action={setProjectStatusAction}>
                 <input type="hidden" name="projectId" value={id} />
                 <input type="hidden" name="status" value={project.status === "active" ? "paused" : "active"} />

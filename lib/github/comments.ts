@@ -18,7 +18,7 @@ export async function postIssueComment(params: {
 
 // GitHub is the source of truth after an ambiguous POST (the response can be lost).
 // The marker is stable across webhook redelivery and process restarts.
-const pending = new Map<string, Promise<void>>();
+const pending = new Map<string, Promise<boolean>>();
 
 export async function findIssueComment(params: {
   owner: string;
@@ -53,18 +53,21 @@ export async function postIssueCommentOnce(params: {
   installationId: number;
   key: string;
   body: string;
-}): Promise<void> {
+  shouldPost?: () => boolean;
+}): Promise<boolean> {
   const marker = `<!-- ai-curator-once:${params.key} -->`;
   const lock = `${params.owner}/${params.repo}#${params.issueNumber}:${params.key}`;
   const existing = pending.get(lock);
   if (existing) return existing;
   const task = (async () => {
-    if (await issueCommentExists(params)) return;
+    if (await issueCommentExists(params)) return true;
+    if (params.shouldPost && !params.shouldPost()) return false;
     await postIssueComment({ ...params, body: `${params.body}\n\n${marker}` });
+    return true;
   })();
   pending.set(lock, task);
   try {
-    await task;
+    return await task;
   } finally {
     if (pending.get(lock) === task) pending.delete(lock);
   }

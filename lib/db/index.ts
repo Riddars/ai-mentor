@@ -392,6 +392,19 @@ function migrate(db: DatabaseSync): void {
     addColumns(db, "review_jobs", { publication_key: "TEXT", publication_body: "TEXT" });
     db.exec("PRAGMA user_version = 19");
   }
+  if (version < 20) {
+    addColumns(db, "projects", {
+      activity_at: "TEXT", activity_checked_at: "TEXT",
+      activity_revision: "INTEGER NOT NULL DEFAULT 0", pause_reason: "TEXT", paused_at: "TEXT",
+    });
+    db.exec(`CREATE TABLE IF NOT EXISTS pause_notifications (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      pr_number INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0,
+      retry_after TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY(project_id, pr_number)
+    ); PRAGMA user_version = 20;`);
+  }
+
 }
 
 function parseJsonOr<T>(raw: string | null, fallback: T): T {

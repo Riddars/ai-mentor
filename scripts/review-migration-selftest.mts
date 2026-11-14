@@ -11,19 +11,19 @@ if (process.argv[2] === "child") {
   const { getDb } = await import("@/lib/db");
   const db = getDb();
   for (const [table, column] of [
-    ["projects", "merged_sync_at"], ["pull_requests", "acknowledged"],
+    ["projects", "merged_sync_at"], ["projects", "activity_revision"], ["projects", "pause_reason"], ["pull_requests", "acknowledged"],
     ["review_jobs", "publication_body"], ["review_jobs", "publication_key"],
   ]) {
     assert.ok((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === column));
   }
-  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 19);
+  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 20);
   assert.equal(db.prepare("SELECT comment FROM analyses WHERE id = 1").get()?.comment, "existing review");
   assert.equal(db.prepare("SELECT status FROM review_jobs WHERE id = 1").get()?.status, "queued");
   db.close();
 } else {
   const dir = mkdtempSync(join(tmpdir(), "curator-review-migration-"));
   try {
-    for (const version of [17, 18]) {
+    for (const version of [17, 18, 19]) {
       const path = join(dir, `v${version}.db`);
       const old = new DatabaseSync(path);
       old.exec(`
@@ -36,11 +36,11 @@ if (process.argv[2] === "child") {
         INSERT INTO review_jobs VALUES (1, 'queued', '2026-11-01', 1);
         PRAGMA user_version = ${version};
       `);
-      if (version === 17) old.exec(`
+      if (version === 17 || version === 19) old.exec(`
         ALTER TABLE projects ADD COLUMN merged_sync_at TEXT;
         ALTER TABLE pull_requests ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;
       `);
-      else old.exec(`
+      if (version === 18 || version === 19) old.exec(`
         ALTER TABLE review_jobs ADD COLUMN publication_key TEXT;
         ALTER TABLE review_jobs ADD COLUMN publication_body TEXT;
       `);
@@ -49,7 +49,7 @@ if (process.argv[2] === "child") {
         env: { ...process.env, DATABASE_PATH: path }, encoding: "utf8",
       });
       assert.equal(child.status, 0, child.stdout + child.stderr);
-      console.log(`ok version ${version} upgraded to 19, existing rows preserved`);
+      console.log(`ok version ${version} upgraded to 20, existing rows preserved`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 });

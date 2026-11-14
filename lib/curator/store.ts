@@ -592,7 +592,11 @@ export function deleteProjectCascade(id: number): void {
 export function setProjectStatus(id: number, status: ProjectStatus): void {
   getDb()
     .prepare(
-      "UPDATE projects SET status = @status, updated_at = datetime('now') WHERE id = @id",
+      `UPDATE projects SET status = @status, updated_at = datetime('now'),
+       pause_reason = CASE WHEN @status = 'paused' THEN 'manual' ELSE NULL END,
+       paused_at = CASE WHEN @status = 'paused' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE NULL END,
+       activity_at = CASE WHEN @status = 'active' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE activity_at END,
+       activity_revision = activity_revision + 1, activity_checked_at = NULL WHERE id = @id`,
     )
     .run({ id, status });
 }
@@ -2192,4 +2196,51 @@ export function getPullRequest(prId: number): {
   if (!row) return null;
   const { merged, ...rest } = row;
   return { ...rest, mergedIntoDefault: merged === 1 };
+}
+
+
+// Human activity is separate from review/PR bookkeeping timestamps.
+export function projectActivity(id: number) {
+  return getDb().prepare(`SELECT COALESCE(activity_at, created_at) AS at,
+    activity_checked_at AS checkedAt, activity_revision AS revision,
+    pause_reason AS reason, paused_at AS pausedAt FROM projects WHERE id = ?`).get(id) as
+    { at: string; checkedAt: string | null; revision: number; reason: string | null; pausedAt: string | null } | undefined;
+}
+
+export function recordProjectActivity(id: number, at: string): void {
+  if (!Number.isFinite(Date.parse(at))) return;
+  const iso = new Date(at).toISOString();
+  getDb().prepare(`UPDATE projects SET activity_at = CASE
+    WHEN julianday(COALESCE(activity_at,created_at)) < julianday(@iso) THEN @iso
+    ELSE COALESCE(activity_at,created_at) END,
+    activity_revision = activity_revision + 1 WHERE id = @id`).run({ id, iso });
+}
+
+export function completeActivityCheck(id: number, revision: number, at: string, cutoff: string, now: string): boolean {
+  return getDb().prepare(`UPDATE projects SET activity_at = @at, activity_checked_at = @now,
+    status = CASE WHEN julianday(@at) < julianday(@cutoff) THEN 'paused' ELSE status END,
+    pause_reason = CASE WHEN julianday(@at) < julianday(@cutoff) THEN 'inactivity' ELSE pause_reason END,
+    paused_at = CASE WHEN julianday(@at) < julianday(@cutoff) THEN @now ELSE paused_at END
+    WHERE id = @id AND status = 'active' AND activity_revision = @revision
+    AND NOT EXISTS (SELECT 1 FROM review_jobs j JOIN pull_requests pr ON pr.id=j.pull_request_id WHERE pr.project_id = @id AND j.status = 'running')`).run({ id, revision, at, cutoff, now }).changes > 0;
+}
+
+export function queuePauseNotice(projectId: number, number: number): void {
+  getDb().prepare('INSERT OR IGNORE INTO pause_notifications(project_id,pr_number) VALUES (?,?)').run(projectId, number);
+}
+export function pauseNoticeSent(projectId: number, number: number): boolean {
+  return !!getDb().prepare('SELECT 1 FROM pause_notifications WHERE project_id=? AND pr_number=? AND sent=1').get(projectId, number);
+}
+export function finishPauseNotice(projectId: number, number: number): void {
+  getDb().prepare('UPDATE pause_notifications SET sent=1 WHERE project_id=? AND pr_number=?').run(projectId, number);
+}
+export function pendingPauseNotices() {
+  return getDb().prepare("SELECT project_id AS projectId, pr_number AS number FROM pause_notifications WHERE sent=0 AND retry_after <= datetime('now') ORDER BY retry_after, project_id, pr_number LIMIT 10").all() as Array<{projectId: number; number: number}>;
+}
+
+export function cancelPauseNotice(projectId: number, number: number): void {
+  getDb().prepare('DELETE FROM pause_notifications WHERE project_id=? AND pr_number=? AND sent=0').run(projectId, number);
+}
+export function delayPauseNotice(projectId: number, number: number): void {
+  getDb().prepare("UPDATE pause_notifications SET retry_after=datetime('now','+1 minute') WHERE project_id=? AND pr_number=? AND sent=0").run(projectId, number);
 }

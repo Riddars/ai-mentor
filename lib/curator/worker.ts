@@ -1,3 +1,4 @@
+import { checkInactiveProjects, notifyPausedPullRequest, retryPauseNotifications } from "@/lib/curator/inactivity";
 import { removeStaleAgentDirs } from "@/lib/agent/run";
 import { backupDatabase } from "@/lib/db";
 import { parseDbDate } from "@/lib/format";
@@ -309,24 +310,24 @@ export async function recoverMergedPullRequests(project: { id: number; owner: st
 
 async function syncOpenPullRequests(): Promise<void> {
   for (const project of listAllProjects()) {
-    if (project.status !== "active") continue;
     markProgress();
     try {
       const installationId = await getRepoInstallationId(project.owner, project.repo);
       const token = await getInstallationToken(installationId);
-      const pulls = await githubRequest<
-        Array<{
-          number: number;
-          draft: boolean;
-          author_association: string;
-          title: string;
-          user: { login: string } | null;
-          head: { sha: string; ref: string };
-          base: { ref: string };
-        }>
-      >(`/repos/${project.owner}/${project.repo}/pulls?state=open&per_page=100`, { token });
-      // A page shorter than 100 lists every open PR; a full one may continue on the next page.
-      if (pulls.length < 100) {
+      const pulls: Array<{ number: number; draft: boolean; author_association: string; title: string; user: {login: string} | null; head: {sha: string; ref: string}; base: {ref: string} }> = [];
+      for (let page = 1; ; page++) {
+        const batch = await githubRequest<typeof pulls>(
+          `/repos/${project.owner}/${project.repo}/pulls?state=open&per_page=100&page=${page}`, { token });
+        pulls.push(...batch);
+        markProgress();
+        if (batch.length < 100) break;
+      }
+      if (project.status === "paused") {
+        for (const pr of pulls) await notifyPausedPullRequest({projectId: project.id, number: pr.number, installationId});
+        continue;
+      }
+      // All pages were received: absent PRs can safely be reconciled as closed.
+      {
         const open = new Set(pulls.map((pr) => pr.number));
         for (const number of listOpenPullRequestNumbers(project.id)) {
           if (!open.has(number)) await handlePullRequestClosed(project, number, installationId);
@@ -394,6 +395,7 @@ async function sendHeartbeat(url: string): Promise<void> {
 }
 
 const inFlight = new Set<number>();
+let lastActivitySweep = 0;
 let lastSweep = 0;
 let lastHeartbeat = 0;
 
@@ -402,6 +404,11 @@ async function tick(): Promise<void> {
   const stray = requeueStrayRunningJobs(inFlight);
   if (stray > 0) console.warn(`[queue] ${stray} stray running job(s) back in the queue`);
   await concludeOverdue();
+  await retryPauseNotifications();
+  if (Date.now() - lastActivitySweep >= 86_400_000) {
+    lastActivitySweep = Date.now();
+    await checkInactiveProjects(new Date(), markProgress);
+  }
 
   const settings = queueSettings();
   const free = settings.concurrency - inFlight.size;

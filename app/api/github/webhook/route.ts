@@ -1,3 +1,4 @@
+import { notifyPausedPullRequest } from "@/lib/curator/inactivity";
 import { withPrLock } from "@/lib/curator/pr-lock";
 import { getConfig } from "@/lib/config";
 import { githubRequest } from "@/lib/github/api";
@@ -10,6 +11,7 @@ import { handlePullRequestClosed, startCommitReview, type ClosedPullRequest } fr
 import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator/acknowledgements";
 import {
   findProjectForRepository,
+  recordProjectActivity,
   forgetEvent,
   recordEventOnce,
   removeParticipant,
@@ -78,6 +80,11 @@ export async function POST(req: Request) {
   const project = owner && repo ? findProjectForRepository(repoId, owner, repo) : null;
   if (!project) {
     return Response.json({ ok: true, ignored: "not connected" });
+  }
+
+  if (payload.sender?.type !== "Bot" && (isPullRequest || isComment)) {
+    const at = payload.comment?.updated_at ?? payload.pull_request?.updated_at ?? new Date().toISOString();
+    recordProjectActivity(project.id, at);
   }
 
   const prNumber = payload.pull_request?.number ?? payload.issue?.number ?? payload.check_run?.pull_requests?.[0]?.number ?? 0;
@@ -170,6 +177,10 @@ export async function POST(req: Request) {
     if (skipReason) {
       if (isReviewEvent && payload.installation?.id !== undefined) {
         try {
+          if (project.status === "paused") {
+            await notifyPausedPullRequest({ projectId: project.id, number: payload.pull_request.number,
+              installationId: payload.installation.id });
+          }
           const args = {
             owner: project.owner,
             repo: project.repo,
