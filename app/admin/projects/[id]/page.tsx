@@ -147,9 +147,12 @@ export default async function AdminProjectPage({
               </Link>
             </CardHeader>
             <CardBody className="flex flex-col gap-5 pt-0 text-sm">
-              <p className="text-muted-foreground">
-                Настройте изменения через PR и приглашения участников.
-              </p>
+              <aside className="rounded-lg border border-amber/40 bg-amber-soft p-3">
+                <p className="font-medium">Передайте студентам: новая ветка → PR → слияние</p>
+                <p className="mt-1">В приватных репозиториях организации на GitHub Free запрет прямого push недоступен — студенты должны сами соблюдать этот порядок и не загружать изменения сразу в main.</p>
+                <p className="mt-1">В публичных репозиториях установите ruleset по инструкции ниже.</p>
+                <p className="mt-1 font-medium">В обоих случаях ждать проверки куратора не нужно — PR можно слить сразу.</p>
+              </aside>
               {setup === null && <p className="text-amber">Не удалось связаться с GitHub — попробуйте обновить позже.</p>}
               {setup?.installed === false && (
                 <p className="text-red">Куратор не видит репозиторий. Откройте <a href={`https://github.com/organizations/${project.owner}/settings/installations`} target="_blank" rel="noreferrer" className="underline">настройки GitHub Apps организации</a> и проверьте доступ приложения к этому репозиторию.</p>
@@ -172,10 +175,8 @@ export default async function AdminProjectPage({
                 <p>Правило требует pull request вместо прямой загрузки в основную ветку.
                   Слить PR можно сразу: одобрение руководителя и завершение AI Curator этим файлом не требуются.</p>
                 {!setup.isPublic && <p className="text-amber">
-                  Для приватного репозитория организации на GitHub Free это правило не применяется.
-                  Нужен GitHub Team или Enterprise; для личного приватного репозитория — Pro.
-                  На Free договоритесь со студентами вносить изменения только через PR:
-                  технически запретить прямой push этим правилом не получится. Куратор при этом работает.
+                  Инструкция импорта для приватного репозитория применима на GitHub Team или Enterprise
+                  (для личного репозитория — Pro).
                   Защиту приватного репозитория панель автоматически не проверяет.
                 </p>}
                 <ol className="flex list-decimal flex-col gap-1 pl-5">
