@@ -91,7 +91,7 @@ export async function addProjectAction(
 ): Promise<ActionState> {
   const viewer = await requireViewer();
   const owner = str(form, "owner");
-  const repo = str(form, "repo");
+  const repo = str(form, "repo").replace(/\.git$/i, "");
   const name = str(form, "name");
   if (!owner || !repo) return { error: "Укажите owner и repo." };
   if (!validRepoName(owner) || !validRepoName(repo)) {
@@ -130,7 +130,7 @@ export async function updateProjectAction(
   let owner = project.owner;
   let repo = project.repo;
   const newOwner = str(form, "owner");
-  const newRepo = str(form, "repo");
+  const newRepo = str(form, "repo").replace(/\.git$/i, "");
   const renaming =
     (newOwner && newOwner !== project.owner) || (newRepo && newRepo !== project.repo);
   if (renaming) {
