@@ -64,7 +64,7 @@ export default async function ProjectPage({
   const notes = getProjectNotes(projectId);
   const overviewRequests = pendingOverviewRequests(projectId);
   const overviewJob = getLatestOverviewJob(projectId);
-  const lastOverview = analyses.find((a) => a.trigger === "overview" && a.outcome === "ok") ?? null;
+  const lastOverview = analyses.find((a) => a.trigger === "overview") ?? null;
   const overviewIssue = getOverviewIssue(projectId);
   const supervisors = isHead
     ? (() => {
@@ -229,8 +229,11 @@ function notesSource(notes: Notes | null): string {
 function overviewState(status: JobStatus | null, last: AnalysisRow | null): string {
   if (status === "queued") return "в очереди";
   if (status === "running") return "идёт";
+  if (status === "failed") return "не удался";
+  if (last?.outcome === "partial") return "частичный — подробности в истории";
+  if (last && last.outcome !== "ok") return "не удался — подробности в истории";
   const done = last ? relativeDate(last.createdAt) : "не проводился";
-  return status === "failed" ? `последний не удался (успешный — ${done})` : done;
+  return done;
 }
 
 function unreviewedReason(status: string, note: string | null): string {

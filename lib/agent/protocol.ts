@@ -17,12 +17,14 @@ export interface AgentRequest {
   type: "run";
   /** Downloaded GitHub tarball to unpack into `root`. */
   tarPath: string;
+  partialCopy?: string;
   root: string;
   systemPrompt: string;
   /** The review prompt; the repository map is appended by the agent process. */
   userPrompt: string;
   /** Paths changed by the PR: their imports are suggested to the agent. */
   changed: string[];
+  overview?: boolean;
   model: AgentModelSpec;
   limits: AgentLimitsSpec;
 }
@@ -34,6 +36,7 @@ export interface AgentCancel {
 /** Tokens spent so far, sent after every agent step. */
 export interface AgentProgress {
   type: "progress";
+  evidence?: string;
   tokensIn: number;
   tokensOut: number;
 }
@@ -50,6 +53,7 @@ export interface AgentReply {
   /** Entries of the archive that were not unpacked, and why. */
   skipped: Array<{ path: string; reason: string }>;
   partialCopy: string | null;
+  partialReview?: boolean;
   /** The run step by step as Markdown (lib/agent/transcript.mts), for the supervisor. */
   transcript: string;
 }

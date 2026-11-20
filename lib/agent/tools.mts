@@ -31,6 +31,9 @@ const TABLE_MAX_COLUMNS = 100;
 /** What the agent looked at: shown in the review and used to check its claims. */
 export interface ToolLog {
   calls: Array<{ tool: string; args: unknown; error?: string }>;
+  notes?: string;
+  evidence?: Map<string, string>;
+  outputExhausted?: boolean;
   viewed: Set<string>;
 }
 
@@ -191,15 +194,23 @@ const htmlSectionParams = Type.Object({
   index: Type.Optional(Type.Integer({ minimum: 0, description: "Zero-based matching heading; default 0" })),
 });
 
-export function createTools(root: string, log: ToolLog): AgentTool[] {
+export function createTools(root: string, log: ToolLog, overview = false): AgentTool[] {
   let outputChars = 0;
+  if (overview) log.evidence = new Map();
   const emit = (value: string, evidence = false, viewedPath?: string): AgentToolResult<undefined> => {
-    const remaining = OUTPUT_BUDGET_CHARS - outputChars - (evidence ? 0 : RESERVED_EVIDENCE_CHARS);
+    const remaining = (overview ? 300_000 : OUTPUT_BUDGET_CHARS) - outputChars - (evidence ? 0 : RESERVED_EVIDENCE_CHARS);
+    if (remaining <= 0) log.outputExhausted = true;
     if (remaining <= 0) return text("Лимит текста инструментов достигнут. Запроси короткий точный диапазон read_file для проверки основания находки или заверши разбор.");
     const bounded = value.length > remaining ? `${value.slice(0, Math.max(0, remaining - 90))}\n… (общий лимит выдачи достигнут)` : value;
     const result = text(bounded);
     outputChars += result.content.reduce((n, c) => n + (c.type === "text" ? c.text.length : 0), 0);
-    if (viewedPath) log.viewed.add(viewedPath);
+    if (viewedPath) {
+      log.viewed.add(viewedPath);
+      const excerpt = result.content[0];
+      if (excerpt?.type === "text" && log.evidence && (evidence || !log.evidence.has(viewedPath))) {
+        log.evidence.set(viewedPath, excerpt.text.slice(0, 900));
+      }
+    }
     return result;
   };
   const record = <T,>(tool: string, args: unknown, run: () => Promise<T>): Promise<T> =>
@@ -272,7 +283,7 @@ export function createTools(root: string, log: ToolLog): AgentTool[] {
         }
         const start = data ? 1 : (from ?? 1);
         const last = start + (data ? DATA_PREVIEW_LINES : logFile ? 40 : MAX_LINES) - 1;
-        const end = data ? last : Math.min(to ?? last, last);
+        const end = data ? last : Math.min(to ?? (overview ? start + 79 : last), last);
         let lines: string[];
         let total: number;
         if (!isNotebook(rel) && (await stat(full)).size > MAX_GREP_FILE_BYTES) {
@@ -479,5 +490,14 @@ export function createTools(root: string, log: ToolLog): AgentTool[] {
     }),
   };
 
-  return [listFiles, readFileTool, grep, tableInfo, jsonInfoTool, jsonGetTool, xmlInfoTool, xmlGetTool, htmlInfoTool, htmlSectionTool] as AgentTool[];
+  const noteParams = Type.Object({ notes: Type.String({ minLength: 1, maxLength: 4000 }) });
+  const saveNotes: AgentTool<typeof noteParams> = {
+    name: "save_review_notes", label: "Save working notes", parameters: noteParams,
+    description: "Replace your working notes: facts with paths and line numbers, open questions, remaining checks. No publication.",
+    execute: async (_id, { notes }) => {
+      log.notes = notes;
+      return text("Рабочие заметки сохранены.");
+    },
+  };
+  return [...(overview ? [saveNotes] : []), listFiles, readFileTool, grep, tableInfo, jsonInfoTool, jsonGetTool, xmlInfoTool, xmlGetTool, htmlInfoTool, htmlSectionTool] as AgentTool[];
 }

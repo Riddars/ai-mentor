@@ -146,7 +146,7 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   const published = job.kind === "commit"
     ? publishedCommitAnalysisOutcome(job.id)
     : null;
-  if (published !== null) {
+  if (published !== null && published !== "partial") {
     try {
       await deps.concludePublished(job, published);
       finishJob(job.id, "done");
@@ -173,11 +173,13 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
     if (!markJobRunning(job.id)) return;
     try {
       if (job.kind === "commit") await deps.runCommit(job);
+      else if (job.kind === "overview") await deps.runOverview(job);
       else await deps.runComment(job);
       finishJob(job.id, "done");
     } catch (error) {
       console.warn(`[queue] publication of job ${job.id} failed, retrying:`, error);
-      rescheduleJob(job.id, { delayMs: 60_000 }, "publication pending");
+      if (job.kind === "overview" && job.attempts >= 3) finishJob(job.id, "failed", "Обзор сохранён, публикация не удалась");
+      else rescheduleJob(job.id, { delayMs: 60_000 }, "publication pending");
     }
     return;
   }
@@ -238,6 +240,10 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
+    if (job.kind === "overview" && stagedJobPublication(job.id)) {
+      rescheduleJob(job.id, { delayMs: 60_000 }, "publication pending");
+      return;
+    }
     const age = Date.now() - (parseDbDate(job.createdAt)?.getTime() ?? Date.now());
     if (age >= settings.retryWindowMs || (job.kind === "overview" && job.attempts + 1 >= OVERVIEW_ATTEMPTS)) {
       console.error(`[queue] job ${job.id} failed for good:`, error);

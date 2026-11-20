@@ -132,6 +132,8 @@ export function outcomeLabel(outcome: string | null, trigger: string | null): st
       return "разборов не было";
     case "ok":
       return "выполнен";
+    case "partial":
+      return "частичный обзор";
     case "parse_error":
       return "ответ модели не разобран";
     case "stale":

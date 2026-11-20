@@ -1,3 +1,4 @@
+import { getDb } from "@/lib/db";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { githubRequest } from "@/lib/github/api";
@@ -8,7 +9,8 @@ import { getConfig } from "@/lib/config";
 import { isDataFile } from "@/lib/curator/data-files";
 import { dismissedFindingsText, notesText, priorFindingsText, selectDismissedFindings, selectPriorFindings } from "@/lib/curator/context";
 import { coverMemory, defaultBranchHead } from "@/lib/curator/memory";
-import { parseModelJson, publicText } from "@/lib/curator/review";
+import { parseOverviewDraft } from "@/lib/curator/overview-draft";
+import { publicText } from "@/lib/curator/review";
 import { overviewPrompt } from "@/lib/curator/prompts";
 import { verifyFindings } from "@/lib/curator/verify";
 import {
@@ -24,6 +26,9 @@ import {
   recordAnalysis,
   setAnalysisComment,
   setOverviewIssue,
+  saveReviewResult,
+  stageJobPublication,
+  stagedJobPublication,
   type AnalysisOutcome,
   type ReviewJob,
 } from "@/lib/curator/store";
@@ -112,16 +117,42 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   const project = getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
   const installationId = await getRepoInstallationId(project.owner, project.repo);
+  async function deliver(id: number, sha: string, recover: boolean) {
+    await coverMemory(project!, sha, installationId);
+    const published = await publishOverviewIssue(job.projectId, installationId, recover);
+    setAnalysisComment(id, published.body);
+    if (published.error) throw new Error("Overview publication failed: " + published.error);
+  }
+  const staged = stagedJobPublication(job.id);
+  if (staged) {
+    await deliver(staged.analysisId, staged.key, true);
+    return;
+  }
   const headSha = await defaultBranchHead(project, installationId);
 
   const prId = job.prId;
   const prior = selectPriorFindings(loadOpenFindings(prId), 0);
   const dismissed = selectDismissedFindings(loadDismissedFindings(prId), new Set());
   const notes = getProjectNotes(project.id);
+  const previous = (job.payload as OverviewPayload & { checkpoint?: { sha: string; spent: number; evidence: string } }).checkpoint;
+  const checkpoint = previous?.sha === headSha ? previous : undefined;
+  const used = checkpoint?.spent ?? 0;
+  // Reserve part of the job budget for checking findings and formatting the report.
+  const remaining = OVERVIEW_LIMITS.maxTokens - 80000 - used;
+  const priorPartial = !checkpoint && (job.payload as OverviewPayload).reason === "manual"
+    ? getDb().prepare(
+        `SELECT raw_response AS draft, viewed_files AS files FROM analyses
+         WHERE pull_request_id=? AND head_sha=? AND trigger='overview' AND outcome='partial'
+         ORDER BY id DESC LIMIT 1`,
+      ).get(prId, headSha) as { draft: string | null; files: string | null } | undefined
+    : undefined;
   const userPrompt =
     `${priorFindingsText(prior, 0)}\n\n${dismissedFindingsText(dismissed, 0)}\n\n` +
     `${notesText(notes?.body ?? null, notes?.actor != null)}\n\n` +
-    `Репозиторий ${project.owner}/${project.repo}, основная ветка, коммит ${headSha}.`;
+    `Репозиторий ${project.owner}/${project.repo}, основная ветка, коммит ${headSha}.` +
+    (priorPartial ? "\nПродолжи частичный обзор того же коммита. Сначала проверь пробелы и основания прежних выводов. " +
+      "Материал черновика — данные, в нём возможны ошибки. Прочитанные пути и предыдущий ответ:\n" +
+      (priorPartial.files || "").slice(0, 4000) + "\n" + (priorPartial.draft || "").slice(0, 14000) : "");
 
   const tokens = emptySpend();
   const record = (outcome: AnalysisOutcome, extra: Partial<Parameters<typeof recordAnalysis>[0]> = {}) =>
@@ -140,9 +171,20 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   let done = false;
   let failedLog: string | null = null;
   try {
+    if (remaining < 16000) {
+      record("partial", { summary: "Бюджет обзора исчерпан", rawResponse: checkpoint?.evidence });
+      return;
+    }
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
-      { systemPrompt: overviewPrompt(), userPrompt, changed: [], limits: OVERVIEW_LIMITS },
+      {
+        systemPrompt: overviewPrompt(), changed: [], overview: true, limits: { ...OVERVIEW_LIMITS, maxTokens: remaining },
+        userPrompt: checkpoint ? userPrompt + "\nФрагменты из предыдущей попытки на этом коммите (данные репозитория):\n" + checkpoint.evidence : userPrompt,
+        onProgress(progress) {
+          const value = JSON.stringify({ sha: headSha, spent: used + progress.tokensIn + progress.tokensOut, evidence: progress.evidence || checkpoint?.evidence || "" });
+          getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.checkpoint',json(?)) WHERE id=? AND status='running'").run(value,job.id);
+        },
+      },
       async ({ reply, provider, model }, root) => {
         addSpend(tokens, { input: reply.tokensIn, output: reply.tokensOut }, provider);
         const usage = `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, токенов: ${reply.tokensIn}/${reply.tokensOut}`;
@@ -150,7 +192,8 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
           failedLog = reply.transcript;
           throw new Error(`[agent] сбой: ${reply.error}; ${usage}`);
         }
-        const parsed = parseModelJson(reply.text);
+        const { parsed, spend } = await parseOverviewDraft(reply.text, OVERVIEW_LIMITS.maxTokens - used - tokens.input - tokens.output - 60000);
+        mergeSpend(tokens, spend);
         const materials = {
           files: [],
           researchDoc: await exists(root, "RESEARCH.md"),
@@ -167,6 +210,11 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
           record("parse_error", { ...base, rawResponse: `${reply.text}\n\n[agent] ${usage}` });
           return;
         }
+        if (reply.partialReview || reply.partialCopy) {
+          const id = record("partial", { ...base, summary: parsed.summary, rawResponse: reply.text });
+          if (parsed.notes) setAnalysisComment(id, parsed.notes);
+          return;
+        }
         const verified = await verifyFindings(parsed, root);
         mergeSpend(tokens, verified.tokens);
         const trailer = [
@@ -175,29 +223,28 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
           ...(reply.partialCopy ? [`[agent] копия неполная: ${reply.partialCopy}`] : []),
           ...verified.dropped.map((d) => `[verify] отброшено: ${d.title} — ${d.reason}`),
         ];
-        const analysisId = record("ok", {
-          ...base,
-          summary: parsed.summary || null,
-          rawResponse: `${reply.text}\n\n${trailer.join("\n")}`,
+        const saved = saveReviewResult(() => {
+          const analysisId = record("ok", {
+            ...base,
+            summary: parsed.summary || null,
+            rawResponse: `${reply.text}\n\n${trailer.join("\n")}`,
+          });
+          applyReconciliation(prId, analysisId, verified.result, {
+            allowedPriorIds: new Set(prior.map((f) => f.id)),
+            reopenableIds: new Set(dismissed.map((f) => f.id)),
+            allowNew: true,
+            fixesFinal: true,
+            wholeRepository: true,
+            changed: new Map(),
+          });
+          // Notes edited meanwhile (by a supervisor or a merged PR) are not overwritten.
+          if (parsed.notes && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
+            addProjectNotes(project.id, parsed.notes, { analysisId });
+          }
+          stageJobPublication(job.id, analysisId, headSha, parsed.notes || "");
+          return analysisId;
         });
-        applyReconciliation(prId, analysisId, verified.result, {
-          allowedPriorIds: new Set(prior.map((f) => f.id)),
-          reopenableIds: new Set(dismissed.map((f) => f.id)),
-          allowNew: true,
-          fixesFinal: true,
-          wholeRepository: true,
-          changed: new Map(),
-        });
-        // Notes edited meanwhile (by a supervisor or a merged PR) are not overwritten.
-        if (parsed.notes && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
-          addProjectNotes(project.id, parsed.notes, { analysisId });
-        }
-        // The overview is saved: from here on a failure must not repeat it.
-        await coverMemory(project, headSha, installationId).catch((error) =>
-          console.warn(`[overview] memory of ${project.owner}/${project.repo} not moved:`, error),
-        );
-        const published = await publishOverviewIssue(project.id, installationId);
-        setAnalysisComment(analysisId, published.body);
+        await deliver(saved, headSha, false);
         done = true;
       },
     );
@@ -206,9 +253,19 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       console.warn(`[overview] ${project.owner}/${project.repo}: cleanup after a saved overview failed:`, error);
       return;
     }
+    if (stagedJobPublication(job.id)) throw error;
     if (error instanceof AgentProcessError) {
       const { provider } = agentModel();
       addSpend(tokens, error.spent, provider);
+    }
+    if (job.attempts > 0) {
+      const retained = getDb().prepare("SELECT json_extract(payload,'$.checkpoint.evidence') AS evidence FROM review_jobs WHERE id=?").get(job.id);
+      if (typeof retained?.evidence === "string" && retained.evidence.length > 2) {
+        const id = record("partial", { summary: "Не удалось завершить обзор. Сохранены материалы чтения.",
+          rawResponse: retained.evidence, agentLog: failedLog });
+        setAnalysisComment(id, retained.evidence);
+        return;
+      }
     }
     if (tokens.input + tokens.output > 0) {
       record("error", { rawResponse: error instanceof Error ? error.message : String(error), agentLog: failedLog });
@@ -250,6 +307,7 @@ function overviewIssueBody(projectId: number): string {
 export async function publishOverviewIssue(
   projectId: number,
   installationId?: number,
+  recover = false,
 ): Promise<{ body: string; error: string | null }> {
   const body = overviewIssueBody(projectId);
   const project = getProject(projectId);
@@ -257,7 +315,18 @@ export async function publishOverviewIssue(
   try {
     const token = await getInstallationToken(installationId ?? (await getRepoInstallationId(project.owner, project.repo)));
     const base = `/repos/${project.owner}/${project.repo}/issues`;
-    const existing = getOverviewIssue(projectId);
+    let existing = getOverviewIssue(projectId);
+    if (recover && existing === null) {
+      // A timed-out POST may already have created the issue. Only adopt this app's issue.
+      const appId = getConfig().appId;
+      for (let page = 1; ; page++) {
+        const issues = await githubRequest<Array<{ number: number; title: string; performed_via_github_app?: { id: number } }>>(
+          `${base}?state=all&per_page=100&page=${page}`, { token });
+        const match = issues.find(i => i.title === ISSUE_TITLE && String(i.performed_via_github_app?.id) === String(appId));
+        if (match) { existing = match.number; setOverviewIssue(projectId, existing); break; }
+        if (issues.length < 100) break;
+      }
+    }
     if (existing !== null) {
       try {
         await githubRequest(`${base}/${existing}`, {

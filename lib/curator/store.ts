@@ -87,7 +87,7 @@ export type ProjectStatus = "active" | "paused";
 export type PullRequestState = "open" | "merged" | "closed";
 
 /** `stale`: the model answered, but the PR had moved on (new commit, closed) — not applied. */
-export type AnalysisOutcome = "ok" | "parse_error" | "error" | "stale";
+export type AnalysisOutcome = "partial" | "ok" | "parse_error" | "error" | "stale";
 
 /** `agent_fallback`: the agent failed and the same job reviewed the diff. */
 export type AnalysisMode = "diff" | "agent" | "agent_fallback";

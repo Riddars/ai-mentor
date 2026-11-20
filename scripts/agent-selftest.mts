@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, wr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import { createModels, getCurrentTools, fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { runAgent } from "@/lib/agent/agent.mjs";
 import { childEnv, removeStaleAgentDirs, runAgentProcess } from "@/lib/agent/run";
 import { createToolLog, createTools } from "@/lib/agent/tools.mjs";
@@ -235,6 +235,27 @@ async function agentChecks(): Promise<void> {
   check("agent: near the token budget tool calls are refused and the answer is kept",
     refused && wrapped.error === null && wrapped.text === FINAL_JSON, `${wrapped.error} ${wrapped.tokensIn}`);
 
+  faux.setResponses([
+    fauxAssistantMessage(fauxText("Checked src/train.py. Pending: src/splits.py. Evidence preserved.")),
+    fauxAssistantMessage(fauxText(FINAL_JSON)),
+  ]);
+  const compacted = await runAgent({root, overview: true, systemPrompt:"overview",
+    userPrompt: "x".repeat(56000), models, model:faux.getModel(),
+    limits:{maxToolCalls:10,maxTokens:200000,timeoutMs:60000}});
+  check("overview: compaction retains working memory and charges its usage",
+    compacted.text === FINAL_JSON && Boolean(compacted.log.notes) && compacted.tokensIn > 0);
+  let finalHadTools = true;
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("read_file", { path: "src/train.py" }), { stopReason: "toolUse" }),
+    context => {
+      finalHadTools = getCurrentTools(context.messages).length > 0;
+      return fauxAssistantMessage(fauxText(FINAL_JSON));
+    },
+  ]);
+  const partial = await runAgent({root, overview: true, systemPrompt: "overview", userPrompt: "go",
+    models, model: faux.getModel(), limits: {maxToolCalls: 1, maxTokens: 100000, timeoutMs: 60000}});
+  check("overview: budget transition removes tools and returns a partial report",
+    partial.partialReview === true && !finalHadTools && partial.text === FINAL_JSON);
   const controller = new AbortController();
   controller.abort();
   faux.setResponses([fauxAssistantMessage(fauxText(FINAL_JSON))]);

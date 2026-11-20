@@ -140,7 +140,9 @@ export function parseModelJson(raw: string): ReconcileResult | null {
 
   let data: unknown;
   try {
-    data = JSON.parse(text);
+    const normalized = text.replace(/"(?:\\[\s\S]|[^"\\])*"/g, (field) =>
+      field.replace(/[\u0000-\u001f]/g, (char) => JSON.stringify(char).slice(1, -1)));
+    data = JSON.parse(normalized);
   } catch {
     return null;
   }

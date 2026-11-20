@@ -13,6 +13,7 @@ const controller = new AbortController();
 async function handle(request: AgentRequest): Promise<AgentReply> {
   await mkdir(request.root, { recursive: true });
   const extracted = await extractTarball(request.tarPath, request.root);
+  if (request.partialCopy) extracted.stoppedOn = request.partialCopy;
   const files = await listRepoFiles(request.root);
   const related = await relatedFiles(request.root, request.changed, files);
   const { models, model } = openAICompatibleModel(request.model);
@@ -22,10 +23,11 @@ async function handle(request: AgentRequest): Promise<AgentReply> {
     userPrompt: `${request.userPrompt}\n\n${repositorySection(repoMap(files, extracted), related)}`,
     models,
     model,
+    overview: request.overview,
     limits: request.limits,
     signal: controller.signal,
-    onUsage: (tokensIn, tokensOut) => {
-      const progress: AgentProgress = { type: "progress", tokensIn, tokensOut };
+    onUsage: (tokensIn, tokensOut, evidence) => {
+      const progress: AgentProgress = { type: "progress", tokensIn, tokensOut, evidence };
       process.send?.(progress);
     },
   });
@@ -39,6 +41,7 @@ async function handle(request: AgentRequest): Promise<AgentReply> {
     toolCalls: result.log.calls.length,
     viewed: [...result.log.viewed].sort(),
     skipped: extracted.skipped,
+    partialReview: result.partialReview,
     partialCopy: extracted.stoppedOn,
     transcript: transcript("Ход работы агента", result.messages),
   };
