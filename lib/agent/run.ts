@@ -241,7 +241,7 @@ export async function runAgentWithFallback(
   const endpoint = provider && openAICompatibleEndpoint(provider);
   const remaining = request.limits.maxTokens - reply.tokensIn - reply.tokensOut;
   const timeLeft = request.limits.timeoutMs - (Date.now() - started);
-  const gatewayFailed = reply.error && /(?:\b(?:401|402|403|408|429|5\d\d)\b|fetch failed|connection error|rate limit|overloaded)/i.test(reply.error);
+  const gatewayFailed = reply.error && /(?:\b(?:401|402|403|408|429|5\d\d)\b|fetch failed|connection error|rate limit|overloaded|^terminated$|ECONNRESET|socket hang up)/i.test(reply.error);
   if (!gatewayFailed || !endpoint || !endpoint.apiKey || !provider || provider === primary.provider ||
       remaining <= 16000 || timeLeft <= 10000 || (isCurrent && !isCurrent())) {
     return { run: { reply, provider: primary.provider, model: request.model.model }, root: request.root };
