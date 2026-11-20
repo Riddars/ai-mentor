@@ -244,6 +244,15 @@ async function agentChecks(): Promise<void> {
     limits:{maxToolCalls:10,maxTokens:200000,timeoutMs:60000}});
   check("overview: compaction retains working memory and charges its usage",
     compacted.text === FINAL_JSON && Boolean(compacted.log.notes) && compacted.tokensIn > 0);
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("read_file", {path:"src/train.py"}),{stopReason:"toolUse"}),
+    fauxAssistantMessage(fauxToolCall("finish_overview", {checked:"Checked the main processing workflow and its dependencies in src/train.py. Compared the implementation with the documented expected results.",unresolved:[]}),{stopReason:"toolUse"}),
+    fauxAssistantMessage(fauxText(FINAL_JSON)),
+  ]);
+  const finished = await runAgent({root,overview:true,systemPrompt:"review",userPrompt:"go",
+    models,model:faux.getModel(),limits:{maxToolCalls:10,maxTokens:100000,timeoutMs:60000}});
+  check("overview: explicit completion after evidence is full, not budget-forced",
+    finished.partialReview === false && finished.text === FINAL_JSON);
   let finalHadTools = true;
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("read_file", { path: "src/train.py" }), { stopReason: "toolUse" }),

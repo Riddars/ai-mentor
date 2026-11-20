@@ -31,6 +31,7 @@ const TABLE_MAX_COLUMNS = 100;
 /** What the agent looked at: shown in the review and used to check its claims. */
 export interface ToolLog {
   calls: Array<{ tool: string; args: unknown; error?: string }>;
+  complete?: boolean;
   notes?: string;
   evidence?: Map<string, string>;
   outputExhausted?: boolean;
@@ -499,5 +500,19 @@ export function createTools(root: string, log: ToolLog, overview = false): Agent
       return text("Рабочие заметки сохранены.");
     },
   };
-  return [...(overview ? [saveNotes] : []), listFiles, readFileTool, grep, tableInfo, jsonInfoTool, jsonGetTool, xmlInfoTool, xmlGetTool, htmlInfoTool, htmlSectionTool] as AgentTool[];
+  const finishParams = Type.Object({
+    checked: Type.String({minLength: 100, maxLength: 4000, description:"Main questions checked, with concrete files and evidence"}),
+    unresolved: Type.Array(Type.String(), {maxItems:20, description:"Questions preventing a full overview; empty only when the review is complete"}),
+  });
+  const finishReview: AgentTool<typeof finishParams> = {
+    name: "finish_overview", label: "Finish overview", parameters: finishParams,
+    description: "Finish once the main project workflows and evidence for findings are checked. Exhaustive reading of every file is unnecessary. List material gaps honestly.",
+    execute: async (_id, {checked, unresolved}) => {
+      log.complete = unresolved.length === 0 && log.viewed.size > 0;
+      log.notes = checked + "\nНерешённые вопросы:\n" + unresolved.join("\n");
+      log.outputExhausted = true;
+      return text("Исследование завершено. Следующим ответом верни итоговый JSON по проверенным материалам.");
+    },
+  };
+  return [...(overview ? [saveNotes, finishReview] : []), listFiles, readFileTool, grep, tableInfo, jsonInfoTool, jsonGetTool, xmlInfoTool, xmlGetTool, htmlInfoTool, htmlSectionTool] as AgentTool[];
 }

@@ -198,11 +198,11 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
       if (options.overview && log.notes) history.push({ role: "user", timestamp: Date.now(),
         content: "Сохранённые рабочие заметки (данные, сверь выводы с кодом):\n" + log.notes });
       if (!options.overview || !(wrapUp || log.outputExhausted || toolCalls >= limits.maxToolCalls)) return history;
-      forcedFinal = true;
+      forcedFinal = !log.complete;
       // Keep the evidence but remove tool declarations from the next model request.
       const finalHistory = history.map((m) => m.role === "system" ? { ...m, toolsAdded: undefined } : m);
       return [...finalHistory, { role: "user", timestamp: Date.now(),
-        content: "Заверши частичный обзор по прочитанным материалам. Укажи пробелы в notes. Верни итоговый JSON." }];
+        content: log.complete ? "Исследование завершено. Верни итоговый JSON полного обзора с notes." : "Заверши частичный обзор по прочитанным материалам. Укажи пробелы в notes. Верни итоговый JSON." }];
     },
     toolExecution: "sequential",
     beforeToolCall: async () => {
