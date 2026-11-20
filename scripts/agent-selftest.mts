@@ -253,6 +253,15 @@ async function agentChecks(): Promise<void> {
     models,model:faux.getModel(),limits:{maxToolCalls:10,maxTokens:100000,timeoutMs:60000}});
   check("overview: explicit completion after evidence is full, not budget-forced",
     finished.partialReview === false && finished.text === FINAL_JSON);
+  faux.setResponses([
+    ...["src/train.py","src/splits.py","src/train.py","src/splits.py","src/train.py"].map(path =>
+      fauxAssistantMessage(fauxToolCall("read_file",{path}),{stopReason:"toolUse"})),
+    fauxAssistantMessage(fauxText(FINAL_JSON)),
+  ]);
+  const rechecked = await runAgent({root,overview:true,systemPrompt:"review",userPrompt:"go",
+    models,model:faux.getModel(),limits:{maxToolCalls:20,maxTokens:200000,timeoutMs:60000}});
+  check("overview: cross-file rechecks do not trigger the stuck-loop guard",
+    rechecked.partialReview === false && rechecked.text === FINAL_JSON);
   let finalHadTools = true;
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("read_file", { path: "src/train.py" }), { stopReason: "toolUse" }),

@@ -142,7 +142,7 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
   let wrapUp = false;
   let forcedFinal = false;
   let repeatedTurns = 0;
-  const requested = new Set<string>();
+  let previousBatch = "";
   let previousCalls = 0;
   let compactedThrough = 0;
   let compactSummary = "";
@@ -240,11 +240,10 @@ export async function runAgent(options: RunAgentOptions): Promise<AgentResult> {
     if (options.overview) {
       const calls = log.calls.slice(previousCalls);
       previousCalls = log.calls.length;
-      const keys = calls.filter(c => !c.error).map(c => JSON.stringify([c.tool, c.args]));
-      if (keys.some(key => !requested.has(key))) repeatedTurns = 0;
-      else repeatedTurns++;
-      for (const key of keys) requested.add(key);
-      if (repeatedTurns >= 2) wrapUp = true;
+      const batch = JSON.stringify(calls.map(c => [c.tool, c.args, c.error]));
+      repeatedTurns = calls.length > 0 && batch === previousBatch ? repeatedTurns + 1 : 0;
+      previousBatch = batch;
+      if (repeatedTurns >= 3) wrapUp = true;
     }
     const before = tokensIn + tokensOut;
     const usage = message.usage;
