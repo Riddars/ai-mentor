@@ -257,7 +257,7 @@ export async function runAgentWithFallback(
   }));
   next.tokensIn += reply.tokensIn;
   next.tokensOut += reply.tokensOut;
-  next.transcript = `Primary provider ${primary.provider}: ${reply.tokensIn}/${reply.tokensOut} tokens. Fallback: ${provider}.\n${next.transcript}`;
+  next.transcript = `Primary provider ${primary.provider}: ${reply.tokensIn}/${reply.tokensOut} tokens. Fallback: ${provider}. Reason: ${reply.error}.\n${next.transcript}`;
   return { run: { reply: next, provider, model }, root };
 }
 

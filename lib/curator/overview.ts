@@ -44,7 +44,7 @@ export interface OverviewPayload {
 }
 
 /** Larger than a PR review: the agent reads the project, not one change. */
-export const OVERVIEW_LIMITS = { maxToolCalls: 60, maxTokens: 600_000, timeoutMs: 20 * 60_000 };
+export const OVERVIEW_LIMITS = { maxToolCalls: 60, maxTokens: 950_000, timeoutMs: 20 * 60_000 };
 
 const ISSUE_TITLE = "Обзор проекта (AI Curator)";
 

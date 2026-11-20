@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { getAnalysis, listDueJobs, listProjectAnalyses, upsertProject, enqueueOverviewJob, getProjectNotes } from "@/lib/curator/store";
+import { getAnalysis, listDueJobs, listProjectAnalyses, upsertProject, getProjectNotes } from "@/lib/curator/store";
+import { startOverview } from "@/lib/curator/overview";
 import { runJob } from "@/lib/curator/worker";
 import { getDb } from "@/lib/db";
 
@@ -31,12 +32,14 @@ globalThis.fetch = async (input, init) => {
 };
 const project = upsertProject(owner,repo);
 const before = listProjectAnalyses(project)[0]?.id ?? 0;
-enqueueOverviewJob(project,{reason:"manual"},true);
+const reason = previousRun ? "manual" : "initial";
+if (startOverview(project, reason) !== "queued") throw new Error("Overview was not queued");
 await runJob(listDueJobs(1)[0]);
 const row = listProjectAnalyses(project)[0];
 const analysis = row && getAnalysis(row.id);
 if (!analysis || analysis.id <= before || !["ok","partial"].includes(analysis.outcome)) throw new Error("Overview did not produce a report");
 if (analysis.outcome === "partial" && getProjectNotes(project)) throw new Error("Partial review replaced project memory");
 writeFileSync(join(dir,"report.md"), analysis.comment || analysis.summary || "", "utf8");
-console.log(JSON.stringify({dir, outcome:analysis.outcome, sha:analysis.headSha,model:analysis.model,
+writeFileSync(join(dir,"analysis.json"),JSON.stringify(analysis,null,2),"utf8");
+console.log(JSON.stringify({dir, provider:analysis.provider, tokens:(analysis.tokensIn ?? 0)+(analysis.tokensOut ?? 0), outcome:analysis.outcome, sha:analysis.headSha,model:analysis.model,
   job:getDb().prepare("select status, json_extract(payload,'$.checkpoint.spent') as spent from review_jobs order by id desc limit 1").get()}));

@@ -4,6 +4,8 @@ const correct = JSON.stringify({summary:"tested", findings:[], notes:"one\ntwo"}
 const malformed = correct.replace(',"notes"', '"notes"');
 const multiline = correct.replace("\\n", "\n");
 assert.equal((await parseOverviewDraft(multiline,0)).parsed?.notes,"one\ntwo");
+const nestedFence = "```json\n" + JSON.stringify({summary:"checked",findings:[],notes:"The source contains ```json fences."}) + "\n```";
+assert.equal((await parseOverviewDraft(nestedFence,0)).parsed?.notes,"The source contains ```json fences.");
 let calls = 0;
 const recovered = await parseOverviewDraft(malformed,100000,async () => ({
   provider:"test",model:"test",content: ++calls === 1 ? correct.replace("tested","invented") : correct,

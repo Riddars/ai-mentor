@@ -127,7 +127,7 @@ function parseLocations(f: Record<string, unknown>): FindingLocation[] {
 /** Достать JSON из ответа модели (в т.ч. из ```json-блока) и привести к ReconcileResult. */
 export function parseModelJson(raw: string): ReconcileResult | null {
   let text = raw.trim();
-  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*)```/i);
   if (fenceMatch) {
     text = fenceMatch[1].trim();
   } else if (!text.startsWith("[")) {
