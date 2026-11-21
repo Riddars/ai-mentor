@@ -862,22 +862,29 @@ export function saveReviewResult<T>(save: () => T): T {
   }
 }
 
-export function stageJobPublication(jobId: number, analysisId: number, key: string, body: string): void {
+export function stageJobPublication(jobId: number, analysisId: number, key: string, body: string,
+  snapshot?: { notesId: number | null }): void {
   getDb().prepare(
     `UPDATE review_jobs SET published_analysis_id = @analysisId,
-       publication_key = @key, publication_body = @body, updated_at = datetime('now')
+       publication_key = @key, publication_body = @body,
+       payload = CASE WHEN @snapshot IS NULL THEN json_remove(payload, '$.publicationSnapshot')
+         ELSE json_set(payload, '$.publicationSnapshot', json(@snapshot)) END,
+       updated_at = datetime('now')
      WHERE id = @jobId`,
-  ).run({ jobId, analysisId, key, body });
+  ).run({ jobId, analysisId, key, body, snapshot: snapshot ? JSON.stringify({ version: 1, ...snapshot }) : null });
 }
 
 export function stagedJobPublication(jobId: number): {
-  analysisId: number; key: string; body: string; outcome: AnalysisOutcome
+  analysisId: number; key: string; body: string; outcome: AnalysisOutcome;
+  snapshot?: { version: number; notesId: number | null } | null;
 } | null {
-  return getDb().prepare(
-    `SELECT a.id AS analysisId, j.publication_key AS key, j.publication_body AS body, a.outcome
+  const row = getDb().prepare(
+    `SELECT a.id AS analysisId, j.publication_key AS key, j.publication_body AS body, a.outcome,
+       json_extract(j.payload, '$.publicationSnapshot') AS snapshot
      FROM review_jobs j JOIN analyses a ON a.id = j.published_analysis_id
      WHERE j.id = @jobId AND j.publication_key IS NOT NULL`,
-  ).get({ jobId }) as { analysisId: number; key: string; body: string; outcome: AnalysisOutcome } | undefined ?? null;
+  ).get({ jobId }) as { analysisId: number; key: string; body: string; outcome: AnalysisOutcome; snapshot: string | null } | undefined;
+  return row ? { ...row, snapshot: parseJson<{ version: number; notesId: number | null }>(row.snapshot) } : null;
 }
 
 export function recordAnalysis(params: {
@@ -1768,6 +1775,8 @@ export interface ReviewJob {
   payload: unknown;
   status: JobStatus;
   attempts: number;
+  /** Delivery retries are independent of model attempts. Missing on legacy caller snapshots. */
+  publicationAttempts?: number;
   checkConcluded: boolean;
   note: string | null;
   createdAt: string;
@@ -1781,7 +1790,8 @@ type RawJob = Omit<ReviewJob, "payload" | "checkConcluded"> & {
 const JOB_SELECT = `
   SELECT j.id, j.pull_request_id AS prId, pr.project_id AS projectId, j.kind,
          j.head_sha AS headSha, j.check_run_id AS checkRunId, j.payload, j.status,
-         j.attempts, j.check_concluded AS checkConcluded, j.note, j.created_at AS createdAt
+         j.attempts, j.publication_attempts AS publicationAttempts,
+         j.check_concluded AS checkConcluded, j.note, j.created_at AS createdAt
   FROM review_jobs j
   JOIN pull_requests pr ON pr.id = j.pull_request_id`;
 
@@ -2030,14 +2040,20 @@ export function queueFailedCheckConclusion(id: number): void {
 }
 
 /** Claim a queued job; false if it is no longer queued (replaced meanwhile). */
-export function markJobRunning(id: number): boolean {
+export function markJobRunning(id: number, phase: "model" | "publication" = "model"): boolean {
   const res = getDb()
     .prepare(
-      `UPDATE review_jobs SET status = 'running', attempts = attempts + 1,
+      `UPDATE review_jobs SET status = 'running', attempts = attempts + @model,
+         publication_attempts = publication_attempts + @publication,
          updated_at = datetime('now') WHERE id = @id AND status = 'queued'`,
     )
-    .run({ id });
+    .run({ id, model: phase === "model" ? 1 : 0, publication: phase === "publication" ? 1 : 0 });
   return res.changes > 0;
+}
+
+export function getJobAttempts(id: number): { model: number; publication: number } {
+  const row = getDb().prepare("SELECT attempts AS model, publication_attempts AS publication FROM review_jobs WHERE id=?").get(id);
+  return row ? { model: row.model as number, publication: row.publication as number } : { model: 0, publication: 0 };
 }
 
 /** Finish an active job; a job already replaced or finished is left as it is. */

@@ -8,6 +8,7 @@ import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
 import { isProjectMember } from "@/lib/github/members";
 import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator/acknowledgements";
 import { memoryGap } from "@/lib/curator/memory";
+import { recordJobEvent } from "@/lib/curator/diagnostics";
 import { executeOverviewJob, OVERVIEW_LIMITS, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
   concludeCheck,
@@ -28,6 +29,7 @@ import {
   completeMergedSync,
   mergedSyncSince,
   getProject,
+  getJobAttempts,
   listAllProjects,
   listDueJobs,
   listOpenPullRequestNumbers,
@@ -55,10 +57,17 @@ const TICK_MS = 15_000;
 const SWEEP_MS = 10 * 60_000;
 const HEARTBEAT_MS = 5 * 60_000;
 
+export interface OverviewJobResult {
+  quality: "complete" | "partial" | "invalid" | "failed";
+  reason?: string;
+  analysisId?: number;
+  publication?: "pending" | "delivered" | "superseded";
+}
+
 export interface WorkerDeps {
   runCommit(job: ReviewJob): Promise<void>;
   runComment(job: ReviewJob): Promise<void>;
-  runOverview(job: ReviewJob): Promise<void>;
+  runOverview(job: ReviewJob): Promise<void | OverviewJobResult>;
   concludeUnreviewed(job: ReviewJob, summary: string): Promise<boolean | void>;
   concludePublished(job: ReviewJob, outcome: "ok" | "parse_error" | "error" | "stale"): Promise<void>;
   reportFailure(job: ReviewJob): Promise<void>;
@@ -140,6 +149,12 @@ async function concludeIfOpen(job: ReviewJob, summary: string, deps: WorkerDeps)
  */
 export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promise<void> {
   const settings = queueSettings();
+  const finishOverview = (result: void | OverviewJobResult) => {
+    if (result) {
+      recordJobEvent(job.id, { type: "job_finished", ...result });
+      finishJob(job.id, result.quality === "failed" || result.quality === "invalid" ? "failed" : "done", result.quality === "complete" ? undefined : result.reason);
+    } else finishJob(job.id, "done");
+  };
 
   // A prior attempt already published its comment. After a restart or failed GitHub PATCH,
   // finish only the check; never spend tokens or post the same comment again.
@@ -170,15 +185,19 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
 
   // A saved answer needs only GitHub, regardless of model budgets or a later pause.
   if (stagedJobPublication(job.id)) {
-    if (!markJobRunning(job.id)) return;
+    if (!markJobRunning(job.id, "publication")) return;
+    job = { ...job, publicationAttempts: getJobAttempts(job.id).publication };
     try {
       if (job.kind === "commit") await deps.runCommit(job);
-      else if (job.kind === "overview") await deps.runOverview(job);
+      else if (job.kind === "overview") {
+        finishOverview(await deps.runOverview(job));
+        return;
+      }
       else await deps.runComment(job);
       finishJob(job.id, "done");
     } catch (error) {
       console.warn(`[queue] publication of job ${job.id} failed, retrying:`, error);
-      if (job.kind === "overview" && job.attempts >= 3) finishJob(job.id, "failed", "Обзор сохранён, публикация не удалась");
+      if (job.kind === "overview" && (job.publicationAttempts ?? 0) >= 3) finishJob(job.id, "failed", "Обзор сохранён, публикация не удалась");
       else rescheduleJob(job.id, { delayMs: 60_000 }, "publication pending");
     }
     return;
@@ -193,7 +212,9 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   const recent = recentAnalysesOfProject(job.projectId);
   // An overview starts only with room for its whole run left in the budgets. One a person asked
   // for (button, resume) is not held back by the project's budget, only by the service's.
-  const reserve = job.kind === "overview" ? OVERVIEW_LIMITS.maxTokens : 0;
+  const checkpoint = (job.payload as { checkpoint?: { spent?: unknown } } | null)?.checkpoint;
+  const spent = typeof checkpoint?.spent === "number" && Number.isFinite(checkpoint.spent) ? Math.max(0, checkpoint.spent) : 0;
+  const reserve = job.kind === "overview" ? Math.max(0, OVERVIEW_LIMITS.maxTokens - spent) : 0;
   const asked = job.kind === "overview" && ["manual", "resume"].includes((job.payload as OverviewPayload).reason);
   const overLimit =
     recent.count >= settings.dailyLimit
@@ -213,9 +234,16 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   }
 
   if (!markJobRunning(job.id)) return; // replaced meanwhile
+  // Overview executors receive the current model attempt, not the stale queued snapshot.
+  // PR executors retain their existing previous-attempt convention.
+  if (job.kind === "overview") job = { ...job, attempts: getJobAttempts(job.id).model };
+  if (job.kind === "overview") recordJobEvent(job.id, { type: "job_started", attempt: job.attempts });
   try {
     if (job.kind === "commit") await deps.runCommit(job);
-    else if (job.kind === "overview") await deps.runOverview(job);
+    else if (job.kind === "overview") {
+      finishOverview(await deps.runOverview(job));
+      return;
+    }
     else await deps.runComment(job);
     finishJob(job.id, "done");
   } catch (error) {
@@ -240,12 +268,14 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
+    if (job.kind === "overview") recordJobEvent(job.id, { type: "job_attempt_failed", attempt: job.attempts,
+      reason: error !== null && typeof error === "object" && "reason" in error ? error.reason : "process_failure", error: message });
     if (job.kind === "overview" && stagedJobPublication(job.id)) {
       rescheduleJob(job.id, { delayMs: 60_000 }, "publication pending");
       return;
     }
     const age = Date.now() - (parseDbDate(job.createdAt)?.getTime() ?? Date.now());
-    if (age >= settings.retryWindowMs || (job.kind === "overview" && job.attempts + 1 >= OVERVIEW_ATTEMPTS)) {
+    if (age >= settings.retryWindowMs || (job.kind === "overview" && job.attempts >= OVERVIEW_ATTEMPTS)) {
       console.error(`[queue] job ${job.id} failed for good:`, error);
       const checkUpdated = await concludeIfOpen(job, NOT_REVIEWED_FAILED, deps);
       if (checkUpdated) markCheckConcluded(job.id, "deadline");
@@ -260,7 +290,7 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
       return;
     }
     // Backoff: 1, 2, 4 … minutes, at most 30.
-    const attempts = job.attempts + 1;
+    const attempts = job.kind === "overview" ? job.attempts : job.attempts + 1;
     const delayMs = Math.min(2 ** (attempts - 1), 30) * 60_000;
     console.warn(
       `[queue] job ${job.id} attempt ${attempts} failed, retry in ${delayMs / 60_000} min:`,

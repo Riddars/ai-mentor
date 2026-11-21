@@ -404,6 +404,19 @@ function migrate(db: DatabaseSync): void {
       PRIMARY KEY(project_id, pr_number)
     ); PRAGMA user_version = 20;`);
   }
+  if (version < 21) {
+    // Optional diagnostics preserve legacy outcomes and survive publication retries.
+    addColumns(db, "analyses", { diagnostics_json: "TEXT" });
+    addColumns(db, "review_jobs", { publication_attempts: "INTEGER NOT NULL DEFAULT 0" });
+    db.exec(`CREATE TABLE IF NOT EXISTS review_diagnostic_events (
+      id INTEGER PRIMARY KEY,
+      job_id INTEGER NOT NULL REFERENCES review_jobs(id) ON DELETE CASCADE,
+      event_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS review_diagnostic_events_job ON review_diagnostic_events(job_id, id);
+    PRAGMA user_version = 21;`);
+  }
 
 }
 

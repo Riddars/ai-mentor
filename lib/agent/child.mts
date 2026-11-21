@@ -9,6 +9,7 @@ import { transcript } from "@/lib/agent/transcript.mjs";
 import { extractTarball, listRepoFiles, relatedFiles, repoMap } from "@/lib/agent/workspace";
 
 const controller = new AbortController();
+const acknowledgements = new Map<string, () => void>();
 
 async function handle(request: AgentRequest): Promise<AgentReply> {
   await mkdir(request.root, { recursive: true });
@@ -24,10 +25,20 @@ async function handle(request: AgentRequest): Promise<AgentReply> {
     models,
     model,
     overview: request.overview,
+    legacyOverview: request.legacyOverview,
+    research: request.research,
     limits: request.limits,
     signal: controller.signal,
-    onUsage: (tokensIn, tokensOut, evidence) => {
-      const progress: AgentProgress = { type: "progress", tokensIn, tokensOut, evidence };
+    onUsage: (tokensIn, tokensOut, evidence, extra) => {
+      const progress: AgentProgress = { type: "progress", tokensIn, tokensOut, evidence, ...extra };
+      if (extra?.event?.type === "model_call_started" && typeof extra.event.callId === "string") {
+        const callId = extra.event.callId;
+        return new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => { acknowledgements.delete(callId); reject(new Error("Diagnostic persistence acknowledgement timed out")); }, 10_000);
+          acknowledgements.set(callId, () => { clearTimeout(timer); resolve(); });
+          process.send?.(progress);
+        });
+      }
       process.send?.(progress);
     },
   });
@@ -42,6 +53,7 @@ async function handle(request: AgentRequest): Promise<AgentReply> {
     viewed: [...result.log.viewed].sort(),
     skipped: extracted.skipped,
     partialReview: result.partialReview,
+    diagnostics: result.diagnostics,
     partialCopy: extracted.stoppedOn,
     transcript: transcript("Ход работы агента", result.messages),
   };
@@ -54,7 +66,12 @@ function reply(message: AgentReply): void {
 // The service went away: nobody will read the result, so stop spending tokens.
 process.on("disconnect", () => process.exit(1));
 
-process.on("message", (message: AgentRequest | { type: "cancel" }) => {
+process.on("message", (message: AgentRequest | { type: "cancel" } | { type: "progress_ack"; callId: string }) => {
+  if (message.type === "progress_ack") {
+    acknowledgements.get(message.callId)?.();
+    acknowledgements.delete(message.callId);
+    return;
+  }
   if (message.type === "cancel") {
     controller.abort();
     return;

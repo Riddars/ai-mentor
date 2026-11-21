@@ -18,7 +18,7 @@ export function transcript(title: string, messages: AgentMessage[], notes: strin
       out.push("## Запрос", fence(text));
     } else if (m.role === "assistant") {
       step += 1;
-      const usage = m.usage ? ` (вход ${m.usage.input + m.usage.cacheRead}, выход ${m.usage.output})` : "";
+      const usage = m.usage ? ` (вход ${m.usage.input + m.usage.cacheRead + m.usage.cacheWrite}, выход ${m.usage.output})` : "";
       out.push(`## Шаг ${step}${usage}`);
       for (const part of m.content) {
         if (part.type === "text" && part.text.trim()) out.push(part.text.trim());

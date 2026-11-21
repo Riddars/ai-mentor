@@ -4,6 +4,7 @@ import { getAnalysis, listDueJobs, listProjectAnalyses, upsertProject, getProjec
 import { startOverview } from "@/lib/curator/overview";
 import { runJob } from "@/lib/curator/worker";
 import { getDb } from "@/lib/db";
+import { getAnalysisDiagnostics, getJobDiagnostics } from "@/lib/curator/diagnostics";
 
 const [owner,repo,previousRun] = process.argv.slice(2);
 if (!owner || !repo) throw new Error("Expected owner and repo");
@@ -37,9 +38,15 @@ if (startOverview(project, reason) !== "queued") throw new Error("Overview was n
 await runJob(listDueJobs(1)[0]);
 const row = listProjectAnalyses(project)[0];
 const analysis = row && getAnalysis(row.id);
-if (!analysis || analysis.id <= before || !["ok","partial"].includes(analysis.outcome)) throw new Error("Overview did not produce a report");
+if (!analysis || analysis.id <= before) throw new Error("Overview did not produce a report");
 if (analysis.outcome === "partial" && getProjectNotes(project)) throw new Error("Partial review replaced project memory");
 writeFileSync(join(dir,"report.md"), analysis.comment || analysis.summary || "", "utf8");
 writeFileSync(join(dir,"analysis.json"),JSON.stringify(analysis,null,2),"utf8");
+const diagnostics = getAnalysisDiagnostics(analysis.id);
+writeFileSync(join(dir,"diagnostics.json"),JSON.stringify(diagnostics,null,2),"utf8");
+const jobId = getDb().prepare("SELECT id FROM review_jobs ORDER BY id DESC LIMIT 1").get()?.id as number;
+writeFileSync(join(dir,"events.json"),JSON.stringify(getJobDiagnostics(jobId),null,2),"utf8");
 console.log(JSON.stringify({dir, provider:analysis.provider, tokens:(analysis.tokensIn ?? 0)+(analysis.tokensOut ?? 0), outcome:analysis.outcome, sha:analysis.headSha,model:analysis.model,
   job:getDb().prepare("select status, json_extract(payload,'$.checkpoint.spent') as spent from review_jobs order by id desc limit 1").get()}));
+
+if (analysis.outcome !== "ok") throw new Error(`Clean overview acceptance failed: ${analysis.outcome}; see ${dir}`);

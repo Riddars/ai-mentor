@@ -1,5 +1,16 @@
 // Messages between the service and the agent process. Kept free of dependencies so the
 // service side does not load the agent libraries.
+import type { ResearchState } from "@/lib/agent/research";
+import type { CompletionReason, ExecutionBudgetSnapshot, LlmCallRecord } from "@/lib/llm/execution";
+
+export interface AgentDiagnostics {
+  version: 1;
+  reason?: CompletionReason;
+  calls: LlmCallRecord[];
+  unknownTokens: number;
+  research?: ResearchState;
+  budget?: ExecutionBudgetSnapshot;
+}
 
 export interface AgentModelSpec {
   baseUrl: string;
@@ -8,6 +19,8 @@ export interface AgentModelSpec {
 }
 
 export interface AgentLimitsSpec {
+  deadlineAt?: number;
+  maxOutputChars?: number;
   maxToolCalls: number;
   maxTokens: number;
   timeoutMs: number;
@@ -25,6 +38,8 @@ export interface AgentRequest {
   /** Paths changed by the PR: their imports are suggested to the agent. */
   changed: string[];
   overview?: boolean;
+  legacyOverview?: boolean;
+  research?: ResearchState;
   model: AgentModelSpec;
   limits: AgentLimitsSpec;
 }
@@ -37,6 +52,10 @@ export interface AgentCancel {
 export interface AgentProgress {
   type: "progress";
   evidence?: string;
+  research?: ResearchState;
+  event?: Record<string, unknown>;
+  diagnostics?: AgentDiagnostics;
+  toolCalls?: number;
   tokensIn: number;
   tokensOut: number;
 }
@@ -54,6 +73,7 @@ export interface AgentReply {
   skipped: Array<{ path: string; reason: string }>;
   partialCopy: string | null;
   partialReview?: boolean;
+  diagnostics?: AgentDiagnostics;
   /** The run step by step as Markdown (lib/agent/transcript.mts), for the supervisor. */
   transcript: string;
 }

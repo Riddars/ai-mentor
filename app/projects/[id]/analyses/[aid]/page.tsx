@@ -8,7 +8,8 @@ import {
   listAnalysisChanges,
   type AnalysisMode,
 } from "@/lib/curator/store";
-import { findingStatusLabel, fullDate, outcomeLabel, prLabel, triggerLabel } from "@/lib/format";
+import { diagnosticPhaseLabel, diagnosticReasonLabel, deliveryLabel, findingStatusLabel, formatDuration, fullDate, outcomeLabel, prLabel, triggerLabel } from "@/lib/format";
+import { diagnosticObject, diagnosticRows, getAnalysisDiagnostics } from "@/lib/curator/diagnostics";
 import { AppHeader, PageShell } from "@/components/AppHeader";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
 import { Markdown } from "@/components/Markdown";
@@ -48,6 +49,25 @@ export default async function AnalysisPage({
   const omitted = materials?.omitted ?? [];
   const sent = (materials?.files ?? []).filter((f) => !omitted.includes(f));
   const model = [analysis.provider, analysis.model].filter(Boolean).join(" / ");
+  const diagnostics = getAnalysisDiagnostics(analysis.id);
+  const calls = diagnosticRows(diagnostics?.calls);
+  const research = diagnosticObject(diagnostics?.research);
+  const delivery = diagnosticObject(diagnostics?.delivery);
+  const limits = diagnosticObject(diagnostics?.limits);
+  const budget = diagnosticObject(diagnostics?.budget);
+  const questions = diagnosticRows(research?.questions);
+  const requestDuration = calls.reduce((total, call) => total + (typeof call.durationMs === "number" ? call.durationMs :
+    typeof call.startedAt === "number" && typeof call.endedAt === "number" ? Math.max(0,call.endedAt-call.startedAt) : 0),0);
+  const duration = typeof diagnostics?.durationMs === "number" ? diagnostics.durationMs : requestDuration || null;
+  const reason = typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
+  const deliveryState = typeof diagnostics?.delivery === "string" ? diagnostics.delivery :
+    typeof delivery?.state === "string" ? delivery.state : typeof delivery?.status === "string" ? delivery.status : null;
+  const unresolved = questions.filter(question => ["pending", "blocked", "unresolved"].includes(String(question.status)));
+  const verification = diagnosticObject(diagnostics?.verification);
+  const toolCalls = research?.toolCalls ?? budget?.toolCalls;
+  const reads = diagnosticRows(research?.reads);
+  const gaps = Array.isArray(research?.gaps) ? research.gaps.filter((gap): gap is string => typeof gap === "string") : [];
+  const numberText = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("ru-RU") : "—";
 
   return (
     <>
@@ -92,10 +112,55 @@ export default async function AnalysisPage({
 
         <div className="grid gap-5 lg:grid-cols-3">
           <div className="flex flex-col gap-5 lg:col-span-2">
+            {diagnostics && (
+              <Card className="shadow-card">
+                <CardHeader><CardTitle>Результат проверки</CardTitle></CardHeader>
+                <CardBody className="flex flex-col gap-4 pt-0 text-sm">
+                  <dl className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-2">
+                    {reason && <><dt className="text-muted-foreground">Причина завершения</dt><dd>{diagnosticReasonLabel(reason)}</dd></>}
+                    {duration !== null && <><dt className="text-muted-foreground">{typeof diagnostics.durationMs === "number" ? "Длительность" : "Время запросов"}</dt><dd>{formatDuration(duration)}</dd></>}
+                    {typeof (diagnostics.attempt ?? diagnostics.attempts) === "number" && <><dt className="text-muted-foreground">Модельная попытка</dt><dd>{numberText(diagnostics.attempt ?? diagnostics.attempts)}</dd></>}
+                    {typeof toolCalls === "number" && <><dt className="text-muted-foreground">Вызовы инструментов</dt><dd>{numberText(toolCalls)}{typeof limits?.maxToolCalls === "number" ? ` / ${numberText(limits.maxToolCalls)}` : ""}</dd></>}
+                    {reads.length > 0 && <><dt className="text-muted-foreground">Сохранённые фрагменты</dt><dd>{reads.length}</dd></>}
+                    {typeof budget?.unknownTokens === "number" && budget.unknownTokens > 0 && <><dt className="text-muted-foreground">Резерв запросов с неизвестным расходом</dt><dd>{numberText(budget.unknownTokens)}</dd></>}
+                    {typeof limits?.maxTokens === "number" && <><dt className="text-muted-foreground">Бюджет токенов</dt><dd>{numberText(limits.maxTokens)}</dd></>}
+                    {typeof limits?.timeoutMs === "number" && <><dt className="text-muted-foreground">Лимит времени</dt><dd>{formatDuration(limits.timeoutMs)}</dd></>}
+                    {deliveryState && <><dt className="text-muted-foreground">Публикация</dt><dd>{deliveryLabel(deliveryState)}</dd></>}
+                    {typeof verification?.checked === "boolean" && <><dt className="text-muted-foreground">Перепроверка находок</dt><dd>{verification.checked ? "Завершена" : "Не завершена"}</dd></>}
+                  </dl>
+                  {calls.length > 0 && (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs">
+                        <caption className="pb-2 text-left font-medium">Расход задачи по запросам</caption>
+                        <thead><tr className="border-b border-border text-muted-foreground"><th className="py-2 pr-3 font-normal">Этап / провайдер / модель</th><th className="py-2 px-2 text-right font-normal">Вход / выход</th><th className="py-2 pl-2 text-right font-normal">Время</th></tr></thead>
+                        <tbody>{calls.map((call, index) => {
+                          const usage = diagnosticObject(call.usage);
+                          const input = usage?.input ?? call.inputTokens ?? call.tokensIn;
+                          const output = usage?.output ?? call.outputTokens ?? call.tokensOut;
+                          const source = call.usageSource ?? usage?.source;
+                          const cacheRead = usage?.cacheRead ?? call.cacheReadTokens;
+                          const cacheWrite = usage?.cacheWrite ?? call.cacheWriteTokens;
+                          const callDuration = typeof call.durationMs === "number" ? call.durationMs : typeof call.endedAt === "number" && typeof call.startedAt === "number" ? call.endedAt-call.startedAt : null;
+                          return <tr key={String(call.id ?? call.callId ?? index)} className="border-b border-border last:border-0">
+                            <td className="py-2 pr-3"><span>{diagnosticPhaseLabel(String(call.phase ?? ""))}</span><span className="block text-muted-foreground">{[call.provider, call.model].filter(value => typeof value === "string").join(" / ") || "—"}</span>{typeof call.error === "string" && <span className="mt-1 block max-w-lg break-words text-amber">{call.error}</span>}</td>
+                            <td className="py-2 px-2 text-right tabular-nums whitespace-nowrap">{source === "unknown" ? "Неизвестно" : `${numberText(input)} / ${numberText(output)}`}{source === "estimated" || source === "estimate" ? <span className="block text-muted-foreground">оценка</span> : null}{typeof cacheRead === "number" && cacheRead > 0 ? <span className="block text-muted-foreground">из кэша: {numberText(cacheRead)}</span> : null}{typeof cacheWrite === "number" && cacheWrite > 0 ? <span className="block text-muted-foreground">в кэш: {numberText(cacheWrite)}</span> : null}{call.payloadOmitted ? <span className="block text-amber">материалы не сохранены полностью</span> : null}</td>
+                            <td className="py-2 pl-2 text-right whitespace-nowrap">{callDuration !== null ? formatDuration(callDuration) : "—"}</td>
+                          </tr>;
+                        })}</tbody>
+                      </table>
+                    </div>
+                  )}
+                  {unresolved.length > 0 && <div><p className="mb-1 font-medium">Осталось проверить</p><ul className="list-disc pl-5">{unresolved.map((question, index) => <li key={index}>{String(question.question ?? question.title ?? question.text ?? "Существенный вопрос")}{typeof question.reason === "string" ? ` — ${question.reason}` : ""}</li>)}</ul></div>}
+                  {gaps.length > 0 && <div><p className="mb-1 font-medium">Пробелы проверки</p><ul className="list-disc pl-5">{gaps.map((gap,index)=><li key={index}>{gap}</li>)}</ul></div>}
+                  {typeof delivery?.error === "string" && <p className="text-amber">{delivery.error}</p>}
+                  {diagnostics.payloadOmitted ? <p className="text-amber">Подробные материалы не сохранены: достигнут лимит хранения диагностики.</p> : null}
+                </CardBody>
+              </Card>
+            )}
             {analysis.comment && (
               <Card className="shadow-card">
                 <CardHeader>
-                  <CardTitle>{analysis.trigger === "overview" ? "Обзор в issue" : "Комментарий в pull request"}</CardTitle>
+                  <CardTitle>{analysis.trigger === "overview" ? analysis.outcome === "partial" ? "Черновик частичного обзора" : "Текст обзора" : "Комментарий в pull request"}</CardTitle>
                 </CardHeader>
                 <CardBody className="pt-0">
                   <Markdown>{analysis.comment}</Markdown>
@@ -223,7 +288,7 @@ export default async function AnalysisPage({
                   )}
                   {analysis.tokensIn !== null && (
                     <>
-                      <dt className="text-muted-foreground">Токены, вход / выход</dt>
+                      <dt className="text-muted-foreground">{diagnostics ? "Токены этой попытки, вход / выход" : "Токены, вход / выход"}</dt>
                       <dd className="tabular-nums">
                         {analysis.tokensIn.toLocaleString("ru-RU")} / {(analysis.tokensOut ?? 0).toLocaleString("ru-RU")}
                       </dd>

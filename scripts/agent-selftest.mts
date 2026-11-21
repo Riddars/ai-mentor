@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, wr
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
-import { createModels, getCurrentTools, fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
+import { createModels, getCurrentSystemPrompt, getCurrentTools, fauxAssistantMessage, fauxProvider, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { runAgent } from "@/lib/agent/agent.mjs";
 import { childEnv, removeStaleAgentDirs, runAgentProcess } from "@/lib/agent/run";
 import { createToolLog, createTools } from "@/lib/agent/tools.mjs";
@@ -236,32 +236,47 @@ async function agentChecks(): Promise<void> {
     refused && wrapped.error === null && wrapped.text === FINAL_JSON, `${wrapped.error} ${wrapped.tokensIn}`);
 
   faux.setResponses([
-    fauxAssistantMessage(fauxText("Checked src/train.py. Pending: src/splits.py. Evidence preserved.")),
+    fauxAssistantMessage(fauxText(FINAL_JSON)),
     fauxAssistantMessage(fauxText(FINAL_JSON)),
   ]);
   const compacted = await runAgent({root, overview: true, systemPrompt:"overview",
     userPrompt: "x".repeat(56000), models, model:faux.getModel(),
     limits:{maxToolCalls:10,maxTokens:200000,timeoutMs:60000}});
-  check("overview: compaction retains working memory and charges its usage",
-    compacted.text === FINAL_JSON && Boolean(compacted.log.notes) && compacted.tokensIn > 0);
+  check("overview: a large prompt needs no hidden summary-model call and cannot finish without checks",
+    compacted.text === FINAL_JSON && compacted.partialReview === true && compacted.tokensIn > 0);
+  const scientificCore = "Scientific review: preserve counterevidence; unfinished work is not a defect; findings require inspected evidence.";
+  let synthesisPreservedCore = false;
+  let synthesisHadTools = true;
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("read_file", {path:"src/train.py"}),{stopReason:"toolUse"}),
+    fauxAssistantMessage(fauxToolCall("read_file", {path:"src/splits.py"}),{stopReason:"toolUse"}),
+    fauxAssistantMessage(fauxToolCall("save_review_notes", {notes:"Checked the training workflow and independent data split implementation.",questions:[
+      {question:"How are the model training inputs prepared?",status:"checked",evidence:["r1"],rationale:"The training source establishes the actual input preparation and training steps."},
+      {question:"How is the evaluation split isolated?",status:"checked",evidence:["r2"],rationale:"The split implementation separately establishes how evaluation examples are selected."},
+    ]}),{stopReason:"toolUse"}),
     fauxAssistantMessage(fauxToolCall("finish_overview", {checked:"Checked the main processing workflow and its dependencies in src/train.py. Compared the implementation with the documented expected results.",unresolved:[]}),{stopReason:"toolUse"}),
-    fauxAssistantMessage(fauxText(FINAL_JSON)),
+    context => {
+      synthesisPreservedCore = getCurrentSystemPrompt(context.messages).includes(scientificCore);
+      synthesisHadTools = getCurrentTools(context.messages).length > 0;
+      return fauxAssistantMessage(fauxText(FINAL_JSON));
+    },
   ]);
-  const finished = await runAgent({root,overview:true,systemPrompt:"review",userPrompt:"go",
+  const finished = await runAgent({root,overview:true,systemPrompt:scientificCore,userPrompt:"go",
     models,model:faux.getModel(),limits:{maxToolCalls:10,maxTokens:100000,timeoutMs:60000}});
   check("overview: explicit completion after evidence is full, not budget-forced",
     finished.partialReview === false && finished.text === FINAL_JSON);
+  check("overview: synthesis preserves the actual scientific system rules and removes tools",
+    synthesisPreservedCore && !synthesisHadTools);
   faux.setResponses([
     ...["src/train.py","src/splits.py","src/train.py","src/splits.py","src/train.py"].map(path =>
       fauxAssistantMessage(fauxToolCall("read_file",{path}),{stopReason:"toolUse"})),
     fauxAssistantMessage(fauxText(FINAL_JSON)),
+    fauxAssistantMessage(fauxText(FINAL_JSON)),
   ]);
   const rechecked = await runAgent({root,overview:true,systemPrompt:"review",userPrompt:"go",
     models,model:faux.getModel(),limits:{maxToolCalls:20,maxTokens:200000,timeoutMs:60000}});
-  check("overview: cross-file rechecks do not trigger the stuck-loop guard",
-    rechecked.partialReview === false && rechecked.text === FINAL_JSON);
+  check("overview: cross-file rechecks do not trigger the stuck-loop guard or manufacture completion",
+    rechecked.partialReview === true && rechecked.text === FINAL_JSON && rechecked.error === null);
   let finalHadTools = true;
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("read_file", { path: "src/train.py" }), { stopReason: "toolUse" }),

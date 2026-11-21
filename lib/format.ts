@@ -56,6 +56,41 @@ export function formatTokens(tokens: number): string {
   return `${ONE_DECIMAL.format(tokens / 1_000_000)} млн`;
 }
 
+export function formatDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  return seconds < 60 ? `${seconds} с` : `${Math.floor(seconds / 60)} мин ${seconds % 60} с`;
+}
+
+const DIAGNOSTIC_REASON_LABEL: Record<string, string> = {
+  completed: "Проверка завершена", token_limit: "Исчерпан бюджет токенов",
+  tool_limit: "Исчерпан лимит инструментов", output_limit: "Исчерпан лимит материалов",
+  deadline: "Истекло время проверки", timeout: "Истекло время проверки",
+  provider_timeout: "Провайдер не ответил вовремя", provider_network: "Ошибка соединения с провайдером",
+  provider_http: "Провайдер вернул ошибку", provider_error: "Ошибка провайдера",
+  invalid_format: "Ответ не соответствует формату", parse_error: "Ответ не удалось разобрать",
+  no_progress: "Повторные действия не продвинули проверку", incomplete_snapshot: "Копия репозитория неполная",
+  incomplete_research: "Остались существенные вопросы", incomplete: "Проверка не завершена",
+  cancelled: "Проверка отменена", superseded: "Проверка заменена новой",
+  process_failure: "Процесс проверки завершился со сбоем", interrupted: "Проверка была прервана",
+  verification_failed: "Перепроверка находок не завершена", publication_failed: "Не удалось опубликовать результат",
+  format_error: "Ответ не соответствует формату", stall: "Повторные действия не продвинули проверку",
+};
+
+export function diagnosticReasonLabel(reason: string): string {
+  return DIAGNOSTIC_REASON_LABEL[reason] ?? "Иная причина завершения";
+}
+
+export function diagnosticPhaseLabel(phase: string): string {
+  return ({ research: "Исследование", compact: "Сжатие памяти", compaction: "Сжатие памяти",
+    synthesis: "Итоговый ответ", json_repair: "Исправление формата", repair: "Исправление формата",
+    verify: "Перепроверка", verification: "Перепроверка" } as Record<string, string>)[phase] ?? "Запрос модели";
+}
+
+export function deliveryLabel(state: string): string {
+  return ({ none: "Не опубликован", not_applicable: "Не требуется", pending: "Ожидает публикации", delivered: "Опубликован",
+    published: "Опубликован", failed: "Ошибка публикации", superseded: "Заменён новой версией" } as Record<string, string>)[state] ?? "Состояние публикации неизвестно";
+}
+
 export function fullDate(iso: string | null): string {
   const date = parseDbDate(iso);
   if (!date) return "—";

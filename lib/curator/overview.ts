@@ -3,7 +3,11 @@ import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken, getRepoInstallationId } from "@/lib/github/auth";
-import { addSpend, emptySpend, mergeSpend } from "@/lib/llm/spend";
+import { emptySpend } from "@/lib/llm/spend";
+import { ExecutionBudget, ExecutionBudgetError, type ExecutionBudgetSnapshot } from "@/lib/llm/execution";
+import type { AgentDiagnostics } from "@/lib/agent/protocol";
+import type { ResearchState } from "@/lib/agent/research";
+import type { OverviewJobResult } from "@/lib/curator/worker";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
 import { getConfig } from "@/lib/config";
 import { isDataFile } from "@/lib/curator/data-files";
@@ -13,6 +17,7 @@ import { parseOverviewDraft } from "@/lib/curator/overview-draft";
 import { publicText } from "@/lib/curator/review";
 import { overviewPrompt } from "@/lib/curator/prompts";
 import { verifyFindings } from "@/lib/curator/verify";
+import { getAnalysisDiagnostics, recordJobEvent, saveAnalysisDiagnostics } from "@/lib/curator/diagnostics";
 import {
   addProjectNotes,
   applyReconciliation,
@@ -113,20 +118,19 @@ async function exists(root: string, name: string): Promise<boolean> {
  * notes, the memory moved to the reviewed commit and the issue updated. A failed run is
  * recorded with what it spent and thrown for the queue to retry.
  */
-export async function executeOverviewJob(job: ReviewJob): Promise<void> {
+export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobResult> {
   const project = getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
   const installationId = await getRepoInstallationId(project.owner, project.repo);
   async function deliver(id: number, sha: string, recover: boolean) {
-    await coverMemory(project!, sha, installationId);
-    const published = await publishOverviewIssue(job.projectId, installationId, recover);
-    setAnalysisComment(id, published.body);
-    if (published.error) throw new Error("Overview publication failed: " + published.error);
+    const publication = stagedJobPublication(job.id);
+    if (publication?.analysisId !== id || publication.key !== sha) throw new Error("Overview publication changed before delivery");
+    return deliverStagedOverview(job.id, installationId, recover);
   }
   const staged = stagedJobPublication(job.id);
   if (staged) {
-    await deliver(staged.analysisId, staged.key, true);
-    return;
+    const publication = await deliver(staged.analysisId, staged.key, true);
+    return { quality: "complete", analysisId: staged.analysisId, publication };
   }
   const headSha = await defaultBranchHead(project, installationId);
 
@@ -134,11 +138,27 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
   const prior = selectPriorFindings(loadOpenFindings(prId), 0);
   const dismissed = selectDismissedFindings(loadDismissedFindings(prId), new Set());
   const notes = getProjectNotes(project.id);
-  const previous = (job.payload as OverviewPayload & { checkpoint?: { sha: string; spent: number; evidence: string } }).checkpoint;
-  const checkpoint = previous?.sha === headSha ? previous : undefined;
+  type Checkpoint = { version?: 1; sha: string; spent: number; evidence: string; research?: ResearchState; budget?: ExecutionBudgetSnapshot };
+  const previous = (job.payload as OverviewPayload & { checkpoint?: Checkpoint }).checkpoint;
+  if (previous && previous.sha !== headSha) {
+    recordJobEvent(job.id, { type: "job_finished", reason: "superseded", oldSha: previous.sha, headSha });
+    return { quality: "failed", reason: "superseded" };
+  }
+  const checkpoint = previous;
   const used = checkpoint?.spent ?? 0;
-  // Reserve part of the job budget for checking findings and formatting the report.
-  const remaining = OVERVIEW_LIMITS.maxTokens - 80000 - used;
+  const priorBudget = checkpoint?.budget;
+  const interruptedCalls = priorBudget?.calls.filter(call => call.status === "started") ?? [];
+  const budget = new ExecutionBudget({ maxTokens: OVERVIEW_LIMITS.maxTokens,
+    deadlineAt: priorBudget?.deadlineAt ?? Date.now() + OVERVIEW_LIMITS.timeoutMs,
+    maxToolCalls: OVERVIEW_LIMITS.maxToolCalls, maxOutputChars: 300_000,
+    spent: priorBudget?.spent ?? { input: used, output: 0 },
+    toolCalls: priorBudget?.toolCalls, outputChars: priorBudget?.outputChars,
+    unknownTokens: (priorBudget?.unknownTokens ?? 0) + interruptedCalls.reduce((sum, call) => sum + (call.reservedTokens ?? 0), 0),
+    calls: priorBudget?.calls.map(call => call.status === "started" ? { ...call, status: "unknown", usageSource: "unknown", completionReason: "interrupted" } : call),
+    onCall(call) { recordJobEvent(job.id, { type: "llm_call_accounting", ...call }); },
+  });
+  // Research, reserve provider, verification and JSON repair share this one allowance.
+  const remaining = budget.remainingTokens - 40_000;
   const priorPartial = !checkpoint && (job.payload as OverviewPayload).reason === "manual"
     ? getDb().prepare(
         `SELECT raw_response AS draft, viewed_files AS files FROM analyses
@@ -155,45 +175,73 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
       (priorPartial.files || "").slice(0, 4000) + "\n" + (priorPartial.draft || "").slice(0, 14000) : "");
 
   const tokens = emptySpend();
-  const record = (outcome: AnalysisOutcome, extra: Partial<Parameters<typeof recordAnalysis>[0]> = {}) =>
-    recordAnalysis({
-      prId,
-      headSha,
-      trigger: "overview",
-      outcome,
-      provider: tokens.provider,
-      mode: "agent",
-      tokensIn: tokens.input,
-      tokensOut: tokens.output,
-      ...extra,
+  let diagnostics: AgentDiagnostics | undefined;
+  let verification: { checked: boolean; dropped: unknown[] } | undefined;
+  let result: OverviewJobResult = { quality: "failed", reason: "process_failure" };
+  const syncSpend = () => {
+    // Checkpoints can outlive the process before an analysis row was committed. Deduct only
+    // durable analysis charges, not all previously observed progress, so recovery loses no spend.
+    const accounted = getDb().prepare(`SELECT COALESCE(SUM(tokens_in),0) AS input,
+      COALESCE(SUM(tokens_out),0) AS output FROM analyses
+      WHERE json_extract(diagnostics_json,'$.jobId')=? OR
+      (diagnostics_json IS NULL AND pull_request_id=? AND head_sha=? AND trigger='overview' AND created_at>=?)`)
+      .get(job.id, prId, headSha, job.createdAt) as { input: number; output: number };
+    tokens.input = Math.max(0, budget.spent.input - accounted.input);
+    tokens.output = Math.max(0, budget.spent.output - accounted.output);
+    tokens.provider = [...new Set(budget.calls.filter(call => call.inputTokens + call.outputTokens > 0).map(call => call.provider))].join("+") || tokens.provider;
+  };
+  const persistCheckpoint = (research = diagnostics?.research, evidence = research?.notes ?? checkpoint?.evidence ?? "") => {
+    const snapshot = budget.snapshot();
+    const value = JSON.stringify({ version: 1, sha: headSha, spent: snapshot.spent.input + snapshot.spent.output,
+      evidence, research, budget: snapshot });
+    getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.checkpoint',json(?)) WHERE id=? AND status='running'").run(value, job.id);
+  };
+  const record = (outcome: AnalysisOutcome, extra: Partial<Parameters<typeof recordAnalysis>[0]> = {}) => {
+    syncSpend();
+    return saveReviewResult(() => {
+    const id = recordAnalysis({ prId, headSha, trigger: "overview", outcome, provider: tokens.provider,
+      mode: "agent", tokensIn: tokens.input, tokensOut: tokens.output, ...extra });
+    saveAnalysisDiagnostics(id, { ...diagnostics, version: 1, jobId: job.id, attempts: job.attempts,
+      reason: result.reason ?? diagnostics?.reason, limits: OVERVIEW_LIMITS, budget: budget.snapshot(),
+      calls: budget.calls, verification, delivery: outcome === "ok" ? "pending" : "not_applicable" });
+    return id;
     });
+  };
+  persistCheckpoint(checkpoint?.research);
 
   let done = false;
   let failedLog: string | null = null;
   try {
     if (remaining < 16000) {
-      record("partial", { summary: "Бюджет обзора исчерпан", rawResponse: checkpoint?.evidence });
-      return;
+      result = { quality: "partial", reason: "token_limit" };
+      result.analysisId = record("partial", { summary: "Бюджет обзора исчерпан", rawResponse: checkpoint?.evidence });
+      return result;
     }
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
       {
-        systemPrompt: overviewPrompt(), changed: [], overview: true, limits: { ...OVERVIEW_LIMITS, maxTokens: remaining },
+        systemPrompt: overviewPrompt(), changed: [], overview: true, limits: OVERVIEW_LIMITS,
+        budget, reserveTokens: 40_000, legacyOverview: process.env.OVERVIEW_RUNTIME === "legacy", research: checkpoint?.research,
         userPrompt: checkpoint ? userPrompt + "\nФрагменты из предыдущей попытки на этом коммите (данные репозитория):\n" + checkpoint.evidence : userPrompt,
         onProgress(progress) {
-          const value = JSON.stringify({ sha: headSha, spent: used + progress.tokensIn + progress.tokensOut, evidence: progress.evidence || checkpoint?.evidence || "" });
-          getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.checkpoint',json(?)) WHERE id=? AND status='running'").run(value,job.id);
+          diagnostics = progress.diagnostics ?? diagnostics;
+          if (progress.event) recordJobEvent(job.id, progress.event);
+          persistCheckpoint(progress.research, progress.evidence || checkpoint?.evidence || "");
         },
       },
       async ({ reply, provider, model }, root) => {
-        addSpend(tokens, { input: reply.tokensIn, output: reply.tokensOut }, provider);
+        diagnostics = reply.diagnostics ?? diagnostics;
+        tokens.provider = provider;
+        persistCheckpoint();
+        syncSpend();
         const usage = `шагов: ${reply.steps}, вызовов инструментов: ${reply.toolCalls}, токенов: ${reply.tokensIn}/${reply.tokensOut}`;
         if (reply.error) {
           failedLog = reply.transcript;
           throw new Error(`[agent] сбой: ${reply.error}; ${usage}`);
         }
-        const { parsed, spend } = await parseOverviewDraft(reply.text, OVERVIEW_LIMITS.maxTokens - used - tokens.input - tokens.output - 60000);
-        mergeSpend(tokens, spend);
+        const onEvent = (event: Record<string, unknown>) => { recordJobEvent(job.id, event); persistCheckpoint(); };
+        const { parsed } = await parseOverviewDraft(reply.text, budget, undefined, { onEvent });
+        persistCheckpoint();
         const materials = {
           files: [],
           researchDoc: await exists(root, "RESEARCH.md"),
@@ -205,18 +253,27 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
           studentResponses: 0,
         };
         const base = { model: `${model} (agent)`, materials, viewedFiles: reply.viewed, agentLog: reply.transcript };
-        if (!parsed) {
+        const invalidReconciliation = parsed?.findings.some(finding => finding.priorId !== null &&
+          ((!prior.some(known => known.id === finding.priorId) && !dismissed.some(known => known.id === finding.priorId)) ||
+           (finding.status === "closed" && !prior.some(known => known.id === finding.priorId)) ||
+           (finding.status === "reopened" && !dismissed.some(known => known.id === finding.priorId))));
+        if (!parsed || invalidReconciliation) {
           // Kept for the supervisor; not retried, a new run would cost as much again.
-          record("parse_error", { ...base, rawResponse: `${reply.text}\n\n[agent] ${usage}` });
+          result = { quality: "invalid", reason: "invalid_format" };
+          result.analysisId = record("parse_error", { ...base, rawResponse: `${reply.text}\n\n[agent] ${usage}` });
           return;
         }
         if (reply.partialReview || reply.partialCopy) {
+          result = { quality: "partial", reason: reply.partialCopy ? "incomplete_snapshot" : diagnostics?.reason ?? "incomplete_snapshot" };
           const id = record("partial", { ...base, summary: parsed.summary, rawResponse: reply.text });
+          result.analysisId = id;
           if (parsed.notes) setAnalysisComment(id, parsed.notes);
           return;
         }
-        const verified = await verifyFindings(parsed, root);
-        mergeSpend(tokens, verified.tokens);
+        const verified = await verifyFindings(parsed, root, undefined, { budget, onEvent });
+        verification = { checked: verified.checked, dropped: verified.dropped };
+        persistCheckpoint();
+        result = { quality: "complete", reason: "completed" };
         const trailer = [
           `[agent] ${usage}`,
           `[agent] прочитано: ${reply.viewed.join(", ") || "—"}`,
@@ -238,49 +295,57 @@ export async function executeOverviewJob(job: ReviewJob): Promise<void> {
             changed: new Map(),
           });
           // Notes edited meanwhile (by a supervisor or a merged PR) are not overwritten.
+          let publicationNotesId = notes?.id ?? null;
           if (parsed.notes && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
             addProjectNotes(project.id, parsed.notes, { analysisId });
+            publicationNotesId = getProjectNotes(project.id)?.id ?? null;
           }
-          stageJobPublication(job.id, analysisId, headSha, parsed.notes || "");
+          stageJobPublication(job.id, analysisId, headSha,
+            overviewIssueBody(project.id, { sha: headSha, body: parsed.notes || "" }),
+            { notesId: publicationNotesId });
           return analysisId;
         });
-        await deliver(saved, headSha, false);
+        result.analysisId = saved;
+        result.publication = await deliver(saved, headSha, false);
+        saveAnalysisDiagnostics(saved, { ...diagnostics, version: 1, jobId: job.id, attempts: job.attempts, reason: "completed",
+          limits: OVERVIEW_LIMITS, budget: budget.snapshot(), calls: budget.calls, verification, delivery: result.publication });
         done = true;
       },
     );
   } catch (error) {
     if (done) {
       console.warn(`[overview] ${project.owner}/${project.repo}: cleanup after a saved overview failed:`, error);
-      return;
+      return result;
     }
+    persistCheckpoint();
     if (stagedJobPublication(job.id)) throw error;
-    if (error instanceof AgentProcessError) {
-      const { provider } = agentModel();
-      addSpend(tokens, error.spent, provider);
-    }
-    if (job.attempts > 0) {
+    result = { quality: "failed", reason: error instanceof ExecutionBudgetError || error instanceof AgentProcessError
+      ? error.reason : diagnostics?.reason ?? "process_failure" };
+    if (job.attempts >= 2) {
       const retained = getDb().prepare("SELECT json_extract(payload,'$.checkpoint.evidence') AS evidence FROM review_jobs WHERE id=?").get(job.id);
       if (typeof retained?.evidence === "string" && retained.evidence.length > 2) {
+        result.quality = "partial";
         const id = record("partial", { summary: "Не удалось завершить обзор. Сохранены материалы чтения.",
           rawResponse: retained.evidence, agentLog: failedLog });
         setAnalysisComment(id, retained.evidence);
-        return;
+        result.analysisId = id;
+        return result;
       }
     }
-    if (tokens.input + tokens.output > 0) {
-      record("error", { rawResponse: error instanceof Error ? error.message : String(error), agentLog: failedLog });
-    }
+    syncSpend();
+    record("error", { rawResponse: error instanceof Error ? error.message : String(error), agentLog: failedLog });
     throw error;
   }
+  return result;
 }
 
 /**
  * The issue text: how the curator understands the project. Findings stay in the PR comments,
  * so the issue changes only with the notes.
  */
-function overviewIssueBody(projectId: number): string {
-  const notes = getProjectNotes(projectId);
-  const sha = getMemorySha(projectId);
+function overviewIssueBody(projectId: number, snapshot?: { sha: string | null; body: string }): string {
+  const notes = snapshot ? snapshot.body : getProjectNotes(projectId)?.body;
+  const sha = snapshot ? snapshot.sha : getMemorySha(projectId);
   return [
     "🤖 **AI Curator — как куратор понимает проект**",
     "",
@@ -294,10 +359,80 @@ function overviewIssueBody(projectId: number): string {
     "",
     "## Как устроен проект",
     "",
-    notes?.body ? publicText(notes.body) : "_Описания пока нет._",
+    notes ? publicText(notes) : "_Описания пока нет._",
     "",
     `_Обновлено ${new Intl.DateTimeFormat("ru-RU", { dateStyle: "long" }).format(new Date())}_`,
+    `<!-- ai-curator-overview:${projectId} -->`,
   ].join("\n");
+}
+
+/** Deliver the saved body verbatim; newer notes supersede only delivery, never accepted memory. */
+export async function deliverStagedOverview(jobId: number, installationId: number, recover = true): Promise<"delivered" | "superseded"> {
+  const staged = stagedJobPublication(jobId);
+  if (!staged) throw new Error("No staged overview publication");
+  const row = getDb().prepare(
+    "SELECT pr.project_id AS projectId FROM review_jobs j JOIN pull_requests pr ON pr.id=j.pull_request_id WHERE j.id=?",
+  ).get(jobId) as { projectId: number };
+  const project = getProject(row.projectId);
+  if (!project) throw new Error("Overview project not found");
+  // A full analysis is accepted independently of whether its issue body is still current.
+  await coverMemory(project, staged.key, installationId);
+  const body = staged.snapshot?.version === 1 ? staged.body
+    : overviewIssueBody(project.id, { sha: staged.key, body: staged.body });
+  const setDelivery = (state: string, error?: string) => {
+    const delivery = { state, ...(error ? { error } : {}) };
+    saveAnalysisDiagnostics(staged.analysisId, { version: 1, ...getAnalysisDiagnostics(staged.analysisId), delivery });
+    recordJobEvent(jobId, { type: "publication_finished", analysisId: staged.analysisId, ...delivery });
+  };
+  // A manual edit can finish publishing while an older PATCH is in flight. Persist a
+  // separate follow-up snapshot so a failed repair retries without changing analysis history.
+  const repairLatestNotes = async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const notes = getProjectNotes(project.id);
+      const notesId = notes?.id ?? null;
+      const pending = getDb().prepare(
+        "SELECT json_extract(payload,'$.publicationRepair') AS repair FROM review_jobs WHERE id=?",
+      ).get(jobId)?.repair;
+      const previous = typeof pending === "string" ? JSON.parse(pending) as { notesId: number | null; body: string } : null;
+      const repair = previous?.notesId === notesId ? previous : { notesId,
+        body: overviewIssueBody(project.id, { sha: getMemorySha(project.id), body: notes?.body ?? "" }) };
+      getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.publicationRepair',json(?)) WHERE id=?").run(JSON.stringify(repair),jobId);
+      recordJobEvent(jobId, { type: "publication_repair_started", notesId });
+      const repaired = await publishOverviewIssue(project.id, installationId, true, repair.body);
+      if (repaired.error) {
+        setDelivery("failed", repaired.error);
+        throw new Error("Latest notes publication repair failed: " + repaired.error);
+      }
+      if ((getProjectNotes(project.id)?.id ?? null) === notesId) {
+        getDb().prepare("UPDATE review_jobs SET payload=json_remove(payload,'$.publicationRepair') WHERE id=?").run(jobId);
+        recordJobEvent(jobId, { type: "publication_repair_finished", notesId });
+        return;
+      }
+    }
+    throw new Error("Notes kept changing during publication; latest snapshot remains queued");
+  };
+  if (staged.snapshot?.version === 1 && (getProjectNotes(project.id)?.id ?? null) !== staged.snapshot.notesId) {
+    setAnalysisComment(staged.analysisId, body);
+    const pendingRepair = getDb().prepare("SELECT json_type(payload,'$.publicationRepair') AS repair FROM review_jobs WHERE id=?").get(jobId)?.repair;
+    if (pendingRepair === "object") await repairLatestNotes();
+    setDelivery("superseded");
+    return "superseded";
+  }
+  recordJobEvent(jobId, { type: "publication_started", analysisId: staged.analysisId });
+  const published = await publishOverviewIssue(project.id, installationId, recover, body);
+  // Keep the historical snapshot even if the HTTP response is lost.
+  setAnalysisComment(staged.analysisId, body);
+  if (published.error) {
+    setDelivery("failed", published.error);
+    throw new Error("Overview publication failed: " + published.error);
+  }
+  if (staged.snapshot?.version === 1 && (getProjectNotes(project.id)?.id ?? null) !== staged.snapshot.notesId) {
+    await repairLatestNotes();
+    setDelivery("superseded");
+    return "superseded";
+  }
+  setDelivery("delivered");
+  return "delivered";
 }
 
 /**
@@ -308,8 +443,9 @@ export async function publishOverviewIssue(
   projectId: number,
   installationId?: number,
   recover = false,
+  savedBody?: string,
 ): Promise<{ body: string; error: string | null }> {
-  const body = overviewIssueBody(projectId);
+  const body = savedBody ?? overviewIssueBody(projectId);
   const project = getProject(projectId);
   if (!project) return { body, error: "project not found" };
   try {
@@ -320,9 +456,10 @@ export async function publishOverviewIssue(
       // A timed-out POST may already have created the issue. Only adopt this app's issue.
       const appId = getConfig().appId;
       for (let page = 1; ; page++) {
-        const issues = await githubRequest<Array<{ number: number; title: string; performed_via_github_app?: { id: number } }>>(
+        const issues = await githubRequest<Array<{ number: number; title: string; body?: string; performed_via_github_app?: { id: number } }>>(
           `${base}?state=all&per_page=100&page=${page}`, { token });
-        const match = issues.find(i => i.title === ISSUE_TITLE && String(i.performed_via_github_app?.id) === String(appId));
+        const match = issues.find(i => String(i.performed_via_github_app?.id) === String(appId) &&
+          (i.body?.includes(`<!-- ai-curator-overview:${projectId} -->`) || i.title === ISSUE_TITLE));
         if (match) { existing = match.number; setOverviewIssue(projectId, existing); break; }
         if (issues.length < 100) break;
       }

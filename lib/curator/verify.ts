@@ -1,6 +1,7 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
+import { chat, LlmRequestError, type ChatMessage, type ChatOptions, type ChatResult } from "@/lib/llm/chat";
+import { ExecutionBudget } from "@/lib/llm/execution";
 import { addSpend, emptySpend, type Spend } from "@/lib/llm/spend";
 import { notebookCells } from "@/lib/curator/notebook";
 import { lineRange } from "@/lib/curator/scope";
@@ -29,7 +30,7 @@ export interface VerifyOutcome {
   dropped: DroppedFinding[];
   /** False when the model check did not run or its answer could not be read. */
   checked: boolean;
-  /** Tokens and rubles spent by the model check. */
+  /** Tokens spent by every provider attempt, including failed answers. */
   tokens: Spend;
 }
 
@@ -88,7 +89,7 @@ async function readDoc(root: string, name: string): Promise<string> {
   return `${name}:\n${text.length > DOC_CHARS ? `${text.slice(0, DOC_CHARS)}\n…(обрезано)` : text}`;
 }
 
-function parseVerdicts(raw: string): Map<number, { keep: boolean; reason: string }> | null {
+function parseVerdicts(raw: string, expected: number): Map<number, { keep: boolean; reason: string }> | null {
   const first = raw.indexOf("{");
   const last = raw.lastIndexOf("}");
   if (first === -1 || last <= first) return null;
@@ -96,12 +97,14 @@ function parseVerdicts(raw: string): Map<number, { keep: boolean; reason: string
     const data = JSON.parse(raw.slice(first, last + 1)) as { verdicts?: unknown };
     if (!Array.isArray(data.verdicts)) return null;
     const out = new Map<number, { keep: boolean; reason: string }>();
-    for (const v of data.verdicts as Array<Record<string, unknown>>) {
-      if (typeof v.index === "number" && typeof v.keep === "boolean") {
-        out.set(v.index, { keep: v.keep, reason: typeof v.reason === "string" ? v.reason : "" });
-      }
+    for (const item of data.verdicts) {
+      if (!item || typeof item !== "object") return null;
+      const v = item as Record<string, unknown>;
+      if (typeof v.index !== "number" || !Number.isInteger(v.index) || v.index < 0 || v.index >= expected ||
+        out.has(v.index) || typeof v.keep !== "boolean") return null;
+      out.set(v.index, { keep: v.keep, reason: typeof v.reason === "string" ? v.reason : "" });
     }
-    return out;
+    return out.size === expected ? out : null;
   } catch {
     return null;
   }
@@ -111,7 +114,8 @@ function parseVerdicts(raw: string): Map<number, { keep: boolean; reason: string
 export async function verifyFindings(
   result: ReconcileResult,
   root: string,
-  ask: (messages: ChatMessage[]) => Promise<ChatResult> = chat,
+  ask: (messages: ChatMessage[], options?: ChatOptions) => Promise<ChatResult> = chat,
+  options: ChatOptions | ExecutionBudget = {},
 ): Promise<VerifyOutcome> {
   const dropped: DroppedFinding[] = [];
   const drop = new Set<number>();
@@ -155,10 +159,11 @@ export async function verifyFindings(
       },
     ];
     try {
-      const answer = await ask(messages);
+      const settings = options instanceof ExecutionBudget ? { budget: options } : options;
+      const answer = await ask(messages, { ...settings, phase: "verify" });
       tokens = addSpend(tokens, answer.usage, answer.provider);
-      const verdicts = parseVerdicts(answer.content);
-      if (verdicts) {
+      const verdicts = parseVerdicts(answer.content, candidates.length);
+      if (verdicts && findingsText.length <= MAX_FINDINGS_CHARS) {
         checkedByModel = true;
         candidates.forEach(({ index, finding }, n) => {
           const verdict = verdicts.get(n);
@@ -169,6 +174,7 @@ export async function verifyFindings(
         });
       }
     } catch (error) {
+      if (error instanceof LlmRequestError) addSpend(tokens, error.usage, error.calls.at(-1)?.provider ?? "unknown");
       console.warn("[verify] the model check failed, findings are kept:", error);
     }
   }
