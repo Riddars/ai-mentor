@@ -417,6 +417,13 @@ function migrate(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS review_diagnostic_events_job ON review_diagnostic_events(job_id, id);
     PRAGMA user_version = 21;`);
   }
+  if (version < 22) {
+    db.exec(`CREATE TABLE IF NOT EXISTS context_pipeline_parts (
+      scope TEXT NOT NULL, part_id TEXT NOT NULL, request_hash TEXT NOT NULL,
+      response_json TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY(scope, part_id)
+    ); PRAGMA user_version = 22;`);
+  }
 
 }
 

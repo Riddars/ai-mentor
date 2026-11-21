@@ -209,7 +209,7 @@ export interface AgentRun {
  */
 export async function withAgentRun<T>(
   target: AgentTarget,
-  input: { systemPrompt: string; userPrompt: string; changed: string[]; overview?: boolean; snapshot?: boolean; legacyOverview?: boolean; research?: ResearchState; onProgress?: (progress: AgentProgress) => void; limits?: AgentLimitsSpec; budget?: ExecutionBudget; reserveTokens?: number },
+  input: { systemPrompt: string; userPrompt: string; changed: string[]; overview?: boolean; snapshot?: boolean; snapshotParts?: boolean; pipelineScope?: string; legacyOverview?: boolean; research?: ResearchState; onProgress?: (progress: AgentProgress) => void; limits?: AgentLimitsSpec; budget?: ExecutionBudget; reserveTokens?: number },
   consume: (run: AgentRun, root: string) => Promise<T>,
   isCurrent?: () => boolean,
 ): Promise<T> {
@@ -229,9 +229,14 @@ export async function withAgentRun<T>(
       if (partialCopy || extracted.stoppedOn) throw new Error("Incomplete repository snapshot: " + (partialCopy || extracted.stoppedOn));
       const missingText = extracted.skipped.filter(entry => !snapshotExclusion(entry.path));
       if (missingText.length) throw new Error("Snapshot could not include repository entries: " + JSON.stringify(missingText));
-      const completed = await runInitialMap(root, input.userPrompt, input.budget!, event => input.onProgress?.({
+      const progress = (event: Record<string, unknown>) => input.onProgress?.({
         type: "progress", tokensIn: input.budget!.spent.input, tokensOut: input.budget!.spent.output, event,
-      }));
+      });
+      const completed = input.snapshotParts
+        ? await (await import("@/lib/curator/map-pipeline")).runMapPipeline(root, input.userPrompt, input.budget, progress, {
+          revision: target.headSha, scope: input.pipelineScope,
+        })
+        : await runInitialMap(root, input.userPrompt, input.budget, progress);
       return await consume(completed, root);
     }
     const configured = input.limits ?? agentLimits();

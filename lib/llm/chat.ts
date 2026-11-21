@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { measureContext } from "@/lib/curator/context-size";
+import { ContextWindowError } from "@/lib/llm/execution";
 import { ExecutionBudget, ExecutionBudgetError, type CompletionReason, type LlmCallRecord, type LlmPhase, type UsageSource } from "@/lib/llm/execution";
 
 export type ChatRole = "system" | "user" | "assistant";
@@ -122,6 +124,9 @@ export interface ChatResult {
 }
 
 export interface ChatOptions {
+  /** Opt-in admission for the context pipeline; legacy callers retain their current behavior. */
+  contextTokens?: number;
+  fallbackContextTokens?: number;
   budget?: ExecutionBudget;
   phase?: LlmPhase;
   signal?: AbortSignal;
@@ -140,7 +145,7 @@ class LlmObserverError extends Error {
 
 export class LlmRequestError extends Error {
   constructor(message: string, readonly reason: CompletionReason, readonly retryable: boolean,
-    readonly usage: ChatUsage = { input: 0, output: 0 }, readonly calls: LlmCallRecord[] = []) {
+    readonly usage: ChatUsage = { input: 0, output: 0 }, readonly calls: LlmCallRecord[] = [], readonly contextTokens?: number) {
     super(message);
     this.name = "LlmRequestError";
   }
@@ -172,7 +177,11 @@ async function callOpenAICompatible(
 
   if (options.signal?.aborted) throw new ExecutionBudgetError("cancelled");
   const inputChars = JSON.stringify(messages).length;
-  const inputEstimate = estimateTokens(JSON.stringify(messages));
+  const measured = options.contextTokens === undefined ? null : measureContext(messages, {
+    contextTokens: options.contextTokens, outputTokens: options.maxOutputTokens ?? 8000,
+  });
+  if (measured && !measured.fits) throw new ContextWindowError(options.contextTokens!);
+  const inputEstimate = measured ? measured.inputTokens + measured.allowance : estimateTokens(JSON.stringify(messages));
   const admission = options.budget?.admit({ inputTokens: inputEstimate,
     maxOutputTokens: options.maxOutputTokens ?? numberEnv("LLM_MAX_TOKENS", 8000),
     reserveTokens: options.reserveTokens, phase: options.phase });
@@ -224,7 +233,21 @@ async function callOpenAICompatible(
   responseReceived = true;
   call.requestId = safeId(response.headers.get("x-gateway-request-id") ?? response.headers.get("x-request-id"));
   if (!response.ok) {
-    await response.body?.cancel();
+    let detail = "";
+    if (response.status === 400 || response.status === 413) {
+      const reader = response.body?.getReader();
+      if (reader) {
+        try {
+          let bytes = 0;
+          while (bytes < 8192) { const chunk = await reader.read(); if (chunk.done) break;
+            detail += new TextDecoder().decode(chunk.value.subarray(0, 8192 - bytes)); bytes += chunk.value.length; }
+        } finally { await reader.cancel().catch(() => {}); }
+      }
+    } else await response.body?.cancel();
+    if (/context_length_exceeded|context_window_exceeded|max_context_length|prompt_too_long|maximum context length|context window.{0,30}exceed/i.test(detail)) {
+      throw new LlmRequestError(`LLM ${target.provider} rejected context size`, "context_limit", false,
+        { input: 0, output: 0 }, [], options.contextTokens);
+    }
     throw new LlmRequestError(`LLM ${target.provider} HTTP ${response.status}`, "provider_http",
       [401, 402, 403, 408, 409, 429].includes(response.status) || response.status >= 500);
   }
@@ -277,7 +300,8 @@ async function callOpenAICompatible(
       ? (options.budget?.remainingMs === 0 ? "deadline" : "provider_timeout")
       : error instanceof LlmObserverError ? "process_failure"
       : error instanceof LlmRequestError ? error.reason : "provider_network";
-    const unknown = !responseUsageKnown && !(error instanceof LlmRequestError && error.reason === "provider_http");
+    const unknown = !responseUsageKnown && !(error instanceof LlmRequestError &&
+      (error.reason === "provider_http" || (responseReceived && error.reason === "context_limit")));
     if (unknown) options.budget?.reserveUnknown(inputEstimate + maxOutput);
     call.status = unknown ? "unknown" : "failed";
     call.completionReason = reason;
@@ -298,7 +322,8 @@ async function callOpenAICompatible(
     }
     throw new LlmRequestError(call.error!, observerFailed ? "process_failure" : reason,
       !observerFailed && !cancelled && reason !== "deadline" &&
-      (error instanceof LlmRequestError ? error.retryable : !responseReceived || reason === "provider_timeout"), usage, [{ ...call }]);
+      (error instanceof LlmRequestError ? error.retryable : !responseReceived || reason === "provider_timeout"), usage, [{ ...call }],
+      error instanceof LlmRequestError ? error.contextTokens : undefined);
   }
 }
 
@@ -338,14 +363,15 @@ export async function chat(messages: ChatMessage[], options: ChatOptions = {}): 
       error.reason,
     );
     try {
-      const answer = await callTarget(fallback, messages, options);
+      const answer = await callTarget(fallback, messages, { ...options, contextTokens: options.fallbackContextTokens ?? options.contextTokens });
       return { ...answer, usage: { input: error.usage.input + answer.usage.input,
         output: error.usage.output + answer.usage.output }, calls: [...error.calls, ...(answer.calls ?? [])] };
     } catch (next) {
       if (next instanceof LlmRequestError) throw new LlmRequestError(next.message, next.reason, false,
-        { input: error.usage.input + next.usage.input, output: error.usage.output + next.usage.output }, [...error.calls, ...next.calls]);
+        { input: error.usage.input + next.usage.input, output: error.usage.output + next.usage.output }, [...error.calls, ...next.calls], next.contextTokens);
       throw new LlmRequestError(next instanceof Error ? next.message : String(next),
-        next instanceof ExecutionBudgetError ? next.reason : "provider_network", false, error.usage, error.calls);
+        next instanceof ExecutionBudgetError ? next.reason : "provider_network", false, error.usage, error.calls,
+        next instanceof ContextWindowError ? next.contextTokens : undefined);
     }
   }
 }

@@ -138,7 +138,11 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
   const prior = selectPriorFindings(loadOpenFindings(prId), 0);
   const dismissed = selectDismissedFindings(loadDismissedFindings(prId), new Set());
   const notes = getProjectNotes(project.id);
-  const snapshotMode = (job.payload as OverviewPayload).reason === "initial" && !notes && !getMemorySha(project.id) && process.env.INITIAL_OVERVIEW_MODE !== "agent";
+  const payload = job.payload as OverviewPayload & { initialMapMode?: "parts" | "snapshot" | "agent" };
+  const initialMapMode = payload.initialMapMode ?? (payload.reason === "initial" && !notes && !getMemorySha(project.id) && process.env.INITIAL_OVERVIEW_MODE !== "agent"
+    ? process.env.INITIAL_OVERVIEW_MODE === "parts" ? "parts" : "snapshot" : "agent");
+  if (!payload.initialMapMode) getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.initialMapMode',?) WHERE id=?").run(initialMapMode, job.id);
+  const snapshotMode = initialMapMode !== "agent";
   type Checkpoint = { version?: 1; sha: string; spent: number; evidence: string; research?: ResearchState; budget?: ExecutionBudgetSnapshot };
   const previous = (job.payload as OverviewPayload & { checkpoint?: Checkpoint }).checkpoint;
   if (previous && previous.sha !== headSha) {
@@ -213,7 +217,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
   let done = false;
   let failedLog: string | null = null;
   try {
-    if (remaining < 16000) {
+    if (remaining < 16000 && initialMapMode !== "parts") {
       result = { quality: "partial", reason: "token_limit" };
       result.analysisId = record("partial", { summary: "Бюджет обзора исчерпан", rawResponse: checkpoint?.evidence });
       return result;
@@ -221,9 +225,10 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
       {
-        systemPrompt: overviewPrompt(), changed: [], overview: true, snapshot: snapshotMode, limits: OVERVIEW_LIMITS,
+        systemPrompt: overviewPrompt(), changed: [], overview: true, snapshot: snapshotMode, snapshotParts: initialMapMode === "parts", pipelineScope: `overview:${job.id}`, limits: OVERVIEW_LIMITS,
         budget, reserveTokens: 40_000, legacyOverview: process.env.OVERVIEW_RUNTIME === "legacy", research: checkpoint?.research,
-        userPrompt: checkpoint ? userPrompt + "\nФрагменты из предыдущей попытки на этом коммите (данные репозитория):\n" + checkpoint.evidence : userPrompt,
+        userPrompt: snapshotMode ? `Репозиторий ${project.owner}/${project.repo}, коммит ${headSha}. Составь карту по переданным материалам.`
+          : checkpoint ? userPrompt + "\nФрагменты из предыдущей попытки на этом коммите (данные репозитория):\n" + checkpoint.evidence : userPrompt,
         onProgress(progress) {
           diagnostics = progress.diagnostics ?? diagnostics;
           if (progress.event) recordJobEvent(job.id, progress.event);
@@ -297,12 +302,12 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
           });
           // Notes edited meanwhile (by a supervisor or a merged PR) are not overwritten.
           let publicationNotesId = notes?.id ?? null;
-          if (parsed.notes && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
+          if (parsed.notes && (!snapshotMode || notes?.actor == null) && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
             addProjectNotes(project.id, parsed.notes, { analysisId });
             publicationNotesId = getProjectNotes(project.id)?.id ?? null;
           }
           stageJobPublication(job.id, analysisId, headSha,
-            overviewIssueBody(project.id, { sha: headSha, body: parsed.notes || "" }),
+            overviewIssueBody(project.id, { sha: headSha, body: snapshotMode && notes?.actor != null ? notes.body : parsed.notes || "" }),
             { notesId: publicationNotesId });
           return analysisId;
         });

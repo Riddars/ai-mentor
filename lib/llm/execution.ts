@@ -3,7 +3,7 @@ export type CompletionReason =
   | "completed" | "token_limit" | "tool_limit" | "output_limit" | "deadline"
   | "provider_timeout" | "provider_network" | "provider_http" | "invalid_format"
   | "no_progress" | "incomplete_snapshot" | "cancelled" | "superseded"
-  | "process_failure" | "interrupted" | "format_error" | "stall";
+  | "process_failure" | "interrupted" | "format_error" | "stall" | "context_limit";
 export type LlmPhase = "research" | "compact" | "synthesis" | "json_repair" | "verify";
 export type UsageSource = "reported" | "estimated" | "unknown";
 
@@ -76,6 +76,9 @@ export class ExecutionBudgetError extends Error {
     super(`Execution stopped: ${reason}`);
     this.name = "ExecutionBudgetError";
   }
+}
+export class ContextWindowError extends ExecutionBudgetError {
+  constructor(readonly contextTokens: number) { super("context_limit"); }
 }
 
 export class ExecutionBudget {
