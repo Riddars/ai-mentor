@@ -209,7 +209,7 @@ export interface AgentRun {
  */
 export async function withAgentRun<T>(
   target: AgentTarget,
-  input: { systemPrompt: string; userPrompt: string; changed: string[]; overview?: boolean; legacyOverview?: boolean; research?: ResearchState; onProgress?: (progress: AgentProgress) => void; limits?: AgentLimitsSpec; budget?: ExecutionBudget; reserveTokens?: number },
+  input: { systemPrompt: string; userPrompt: string; changed: string[]; overview?: boolean; snapshot?: boolean; legacyOverview?: boolean; research?: ResearchState; onProgress?: (progress: AgentProgress) => void; limits?: AgentLimitsSpec; budget?: ExecutionBudget; reserveTokens?: number },
   consume: (run: AgentRun, root: string) => Promise<T>,
   isCurrent?: () => boolean,
 ): Promise<T> {
@@ -219,6 +219,21 @@ export async function withAgentRun<T>(
     const tarPath = join(dir, "repo.tar.gz");
     const root = join(dir, "repo");
     const partialCopy = await prepareRepositoryArchive(target, tarPath, input.overview, input.budget);
+    if (input.snapshot) {
+      if (!input.overview || !input.budget) throw new Error("Initial snapshot requires overview mode and a shared budget");
+      const { extractTarball } = await import("@/lib/agent/workspace");
+      const { mkdir } = await import("node:fs/promises");
+      const { runInitialMap, snapshotExclusion } = await import("@/lib/curator/initial-map");
+      await mkdir(root, { recursive: true });
+      const extracted = await extractTarball(tarPath, root);
+      if (partialCopy || extracted.stoppedOn) throw new Error("Incomplete repository snapshot: " + (partialCopy || extracted.stoppedOn));
+      const missingText = extracted.skipped.filter(entry => !snapshotExclusion(entry.path));
+      if (missingText.length) throw new Error("Snapshot could not include repository entries: " + JSON.stringify(missingText));
+      const completed = await runInitialMap(root, input.userPrompt, input.budget!, event => input.onProgress?.({
+        type: "progress", tokensIn: input.budget!.spent.input, tokensOut: input.budget!.spent.output, event,
+      }));
+      return await consume(completed, root);
+    }
     const configured = input.limits ?? agentLimits();
     const limits = input.budget ? { ...configured,
       maxTokens: Math.min(configured.maxTokens, Math.max(0, input.budget.remainingTokens - (input.reserveTokens ?? 0))),

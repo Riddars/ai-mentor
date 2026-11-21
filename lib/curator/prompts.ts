@@ -35,3 +35,6 @@ export function agentRules(): string {
 export function verifyPrompt(): string {
   return render("verify");
 }
+
+/** First connection: one complete selected snapshot, no research tools or findings. */
+export function initialMapPrompt(): string { return render("initial-map"); }

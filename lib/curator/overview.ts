@@ -138,6 +138,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
   const prior = selectPriorFindings(loadOpenFindings(prId), 0);
   const dismissed = selectDismissedFindings(loadDismissedFindings(prId), new Set());
   const notes = getProjectNotes(project.id);
+  const snapshotMode = (job.payload as OverviewPayload).reason === "initial" && !notes && !getMemorySha(project.id) && process.env.INITIAL_OVERVIEW_MODE !== "agent";
   type Checkpoint = { version?: 1; sha: string; spent: number; evidence: string; research?: ResearchState; budget?: ExecutionBudgetSnapshot };
   const previous = (job.payload as OverviewPayload & { checkpoint?: Checkpoint }).checkpoint;
   if (previous && previous.sha !== headSha) {
@@ -220,7 +221,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
       {
-        systemPrompt: overviewPrompt(), changed: [], overview: true, limits: OVERVIEW_LIMITS,
+        systemPrompt: overviewPrompt(), changed: [], overview: true, snapshot: snapshotMode, limits: OVERVIEW_LIMITS,
         budget, reserveTokens: 40_000, legacyOverview: process.env.OVERVIEW_RUNTIME === "legacy", research: checkpoint?.research,
         userPrompt: checkpoint ? userPrompt + "\nФрагменты из предыдущей попытки на этом коммите (данные репозитория):\n" + checkpoint.evidence : userPrompt,
         onProgress(progress) {
@@ -252,12 +253,12 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
           notes: notes !== null,
           studentResponses: 0,
         };
-        const base = { model: `${model} (agent)`, materials, viewedFiles: reply.viewed, agentLog: reply.transcript };
+        const base = { model: `${model} (${snapshotMode ? "snapshot" : "agent"})`, materials, viewedFiles: reply.viewed, agentLog: reply.transcript };
         const invalidReconciliation = parsed?.findings.some(finding => finding.priorId !== null &&
           ((!prior.some(known => known.id === finding.priorId) && !dismissed.some(known => known.id === finding.priorId)) ||
            (finding.status === "closed" && !prior.some(known => known.id === finding.priorId)) ||
            (finding.status === "reopened" && !dismissed.some(known => known.id === finding.priorId))));
-        if (!parsed || invalidReconciliation) {
+        if (!parsed || invalidReconciliation || (snapshotMode && parsed.findings.length !== 0)) {
           // Kept for the supervisor; not retried, a new run would cost as much again.
           result = { quality: "invalid", reason: "invalid_format" };
           result.analysisId = record("parse_error", { ...base, rawResponse: `${reply.text}\n\n[agent] ${usage}` });

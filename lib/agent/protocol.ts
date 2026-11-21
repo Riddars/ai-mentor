@@ -4,6 +4,7 @@ import type { ResearchState } from "@/lib/agent/research";
 import type { CompletionReason, ExecutionBudgetSnapshot, LlmCallRecord } from "@/lib/llm/execution";
 
 export interface AgentDiagnostics {
+  snapshot?: Record<string, unknown>;
   version: 1;
   reason?: CompletionReason;
   calls: LlmCallRecord[];
