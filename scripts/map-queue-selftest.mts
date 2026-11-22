@@ -15,7 +15,7 @@ Object.assign(process.env, { LLM_PROVIDER: "selectel", LLM_MODEL: "fixture", SEL
 delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
 delete process.env.LLM_FALLBACK_PROVIDER;
 const { getDb } = await import("@/lib/db");
-const { addProjectNotes, enqueueOverviewJob, getProjectNotes, listDueJobs, markJobRunning, upsertProject } = await import("@/lib/curator/store");
+const { addProjectNotes, enqueueOverviewJob, finishJob, getMemorySha, getProjectNotes, listDueJobs, markJobRunning, upsertProject } = await import("@/lib/curator/store");
 const { executeOverviewJob } = await import("@/lib/curator/overview");
 const blocks: Buffer[] = [];
 for (let i = 0; i < 8; i++) {
@@ -64,5 +64,19 @@ try {
   assert.equal(outcome.quality, "complete");
   assert.equal(replayed, false, "production retry reuses saved leaf despite checkpoint and new manual notes");
   assert.equal(getProjectNotes(project)?.body, "human notes must survive");
-  console.log("ok real overview queue: SQLite checkpoints, stable retry task and mode, no repeated successful leaf, manual notes preserved");
+  finishJob(job.id, "done");
+  process.env.INITIAL_OVERVIEW_MODE = "parts";
+  addProjectNotes(project, "old automatically generated map", {});
+  assert.equal(getMemorySha(project), "a".repeat(40), "manual rebuild starts on an already indexed project");
+  assert.equal(enqueueOverviewJob(project, { reason: "manual" }, true), "queued");
+  const manual = listDueJobs(1)[0];
+  const callsBeforeManual = calls;
+  markJobRunning(manual.id);
+  const rebuilt = await executeOverviewJob({ ...manual, attempts: 1 });
+  assert.equal(rebuilt.quality, "complete");
+  assert.equal(getDb().prepare("SELECT json_extract(payload,'$.initialMapMode') AS mode FROM review_jobs WHERE id=?").get(manual.id)?.mode, "parts",
+    "the ordinary full-overview button rebuilds the map using parts even when notes and memory already exist");
+  assert.equal(getProjectNotes(project)?.body, notes);
+  assert.ok(calls > callsBeforeManual, "a new manual job reads the current source rather than reusing an older job's answer");
+  console.log("ok real overview queue: SQLite checkpoints, stable retry task and mode, no repeated successful leaf, manual notes preserved, existing-project manual map rebuild");
 } finally { getDb().close(); await rm(directory, { recursive: true, force: true }); }

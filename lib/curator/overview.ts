@@ -145,8 +145,11 @@ export async function executeOverviewJob(job: ReviewJob, cacheOnly = false): Pro
   const dismissed = selectDismissedFindings(loadDismissedFindings(prId), new Set());
   const notes = getProjectNotes(project.id);
   const payload = job.payload as OverviewPayload & { initialMapMode?: "parts" | "snapshot" | "agent" };
-  const initialMapMode = payload.initialMapMode ?? (payload.reason === "initial" && !notes && !getMemorySha(project.id) && process.env.INITIAL_OVERVIEW_MODE !== "agent"
-    ? process.env.INITIAL_OVERVIEW_MODE === "parts" ? "parts" : "snapshot" : "agent");
+  const configuredMapMode = process.env.INITIAL_OVERVIEW_MODE;
+  const rebuildMap = payload.reason === "manual" && configuredMapMode === "parts";
+  const initialMapMode = payload.initialMapMode ?? (rebuildMap ? "parts"
+    : payload.reason === "initial" && !notes && !getMemorySha(project.id) && configuredMapMode !== "agent"
+      ? configuredMapMode === "parts" ? "parts" : "snapshot" : "agent");
   if (!payload.initialMapMode) getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.initialMapMode',?) WHERE id=?").run(initialMapMode, job.id);
   const snapshotMode = initialMapMode !== "agent";
   type Checkpoint = { version?: 1; sha: string; spent: number; evidence: string; research?: ResearchState; budget?: ExecutionBudgetSnapshot };
