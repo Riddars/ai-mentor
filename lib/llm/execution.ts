@@ -3,9 +3,12 @@ export type CompletionReason =
   | "completed" | "token_limit" | "tool_limit" | "output_limit" | "deadline"
   | "provider_timeout" | "provider_network" | "provider_http" | "invalid_format"
   | "no_progress" | "incomplete_snapshot" | "cancelled" | "superseded"
-  | "process_failure" | "interrupted" | "format_error" | "stall" | "context_limit";
+  | "process_failure" | "interrupted" | "format_error" | "stall" | "context_limit" | "daily_tokens" | "daily_capacity";
 export type LlmPhase = "research" | "compact" | "synthesis" | "json_repair" | "verify";
 export type UsageSource = "reported" | "estimated" | "unknown";
+export function automaticallyRetryExecution(reason: string): boolean {
+  return reason === "daily_tokens" || reason === "deadline" || reason === "interrupted";
+}
 
 export interface ExecutionUsage {
   /** Total prompt tokens, including cached input. Cache fields are a breakdown, never added twice. */
@@ -65,6 +68,7 @@ export interface ExecutionBudgetOptions {
   unknownTokens?: number;
   calls?: LlmCallRecord[];
   onCall?: (call: LlmCallRecord) => void;
+  beforeCall?: (call: LlmCallRecord) => void;
 }
 
 function count(value: number | undefined): number {
@@ -93,6 +97,7 @@ export class ExecutionBudget {
   outputChars: number;
   unknownTokens: number;
   private readonly onCall?: (call: LlmCallRecord) => void;
+  private readonly beforeCall?: (call: LlmCallRecord) => void;
 
   constructor(options: ExecutionBudgetOptions) {
     if (!Number.isFinite(options.maxTokens) || options.maxTokens <= 0 || !Number.isFinite(options.deadlineAt)) {
@@ -109,6 +114,7 @@ export class ExecutionBudget {
     this.unknownTokens = count(options.unknownTokens);
     this.calls = (options.calls ?? []).map(call => ({ ...call }));
     this.onCall = options.onCall;
+    this.beforeCall = options.beforeCall;
   }
 
   get remainingTokens(): number {
@@ -150,6 +156,7 @@ export class ExecutionBudget {
 
   recordCall(call: LlmCallRecord): void {
     const index = this.calls.findIndex(item => item.id === call.id);
+    if (index < 0 && call.status === "started") this.beforeCall?.(call);
     if (index >= 0) this.calls[index] = { ...call };
     else this.calls.push({ ...call });
     this.onCall?.({ ...call });

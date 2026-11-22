@@ -424,6 +424,10 @@ function migrate(db: DatabaseSync): void {
       PRIMARY KEY(scope, part_id)
     ); PRAGMA user_version = 22;`);
   }
+  if (version < 23) {
+    addColumns(db, "context_pipeline_parts", { job_id: "INTEGER REFERENCES review_jobs(id) ON DELETE CASCADE" });
+    db.exec("CREATE INDEX IF NOT EXISTS context_pipeline_parts_job ON context_pipeline_parts(job_id); PRAGMA user_version = 23;");
+  }
 
 }
 

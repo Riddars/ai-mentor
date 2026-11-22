@@ -18,6 +18,7 @@ import { publicText } from "@/lib/curator/review";
 import { overviewPrompt } from "@/lib/curator/prompts";
 import { verifyFindings } from "@/lib/curator/verify";
 import { getAnalysisDiagnostics, recordJobEvent, saveAnalysisDiagnostics } from "@/lib/curator/diagnostics";
+import { admitPipelineDailyCall, blockedPipelineConfiguration, patchPipelineJob, pipelineConfigurationFingerprint, pipelineFailure, PipelineWaitError } from "./pipeline-job";
 import {
   addProjectNotes,
   applyReconciliation,
@@ -50,6 +51,11 @@ export interface OverviewPayload {
 
 /** Larger than a PR review: the agent reads the project, not one change. */
 export const OVERVIEW_LIMITS = { maxToolCalls: 60, maxTokens: 950_000, timeoutMs: 20 * 60_000 };
+export function overviewTokenLimit(): number {
+  const value = Number(process.env.OVERVIEW_TOKENS_PER_RUN ?? OVERVIEW_LIMITS.maxTokens);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error("configuration_error: invalid OVERVIEW_TOKENS_PER_RUN");
+  return value;
+}
 
 const ISSUE_TITLE = "Обзор проекта (AI Curator)";
 
@@ -118,7 +124,7 @@ async function exists(root: string, name: string): Promise<boolean> {
  * notes, the memory moved to the reviewed commit and the issue updated. A failed run is
  * recorded with what it spent and thrown for the queue to retry.
  */
-export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobResult> {
+export async function executeOverviewJob(job: ReviewJob, cacheOnly = false): Promise<OverviewJobResult> {
   const project = getProject(job.projectId);
   if (!project) throw new Error(`Project ${job.projectId} not found`);
   const installationId = await getRepoInstallationId(project.owner, project.repo);
@@ -153,14 +159,18 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
   const used = checkpoint?.spent ?? 0;
   const priorBudget = checkpoint?.budget;
   const interruptedCalls = priorBudget?.calls.filter(call => call.status === "started") ?? [];
-  const budget = new ExecutionBudget({ maxTokens: OVERVIEW_LIMITS.maxTokens,
-    deadlineAt: priorBudget?.deadlineAt ?? Date.now() + OVERVIEW_LIMITS.timeoutMs,
+  const cacheMaximum = Math.max(1, (priorBudget?.spent.input ?? used) + (priorBudget?.spent.output ?? 0) + (priorBudget?.unknownTokens ?? 0));
+  let configuredMaximum: number;
+  try { configuredMaximum = overviewTokenLimit(); } catch { throw blockedPipelineConfiguration(job.id); }
+  const budget = new ExecutionBudget({ maxTokens: cacheOnly ? cacheMaximum : configuredMaximum,
+    deadlineAt: initialMapMode === "parts" ? Date.now() + OVERVIEW_LIMITS.timeoutMs : priorBudget?.deadlineAt ?? Date.now() + OVERVIEW_LIMITS.timeoutMs,
     maxToolCalls: OVERVIEW_LIMITS.maxToolCalls, maxOutputChars: 300_000,
     spent: priorBudget?.spent ?? { input: used, output: 0 },
     toolCalls: priorBudget?.toolCalls, outputChars: priorBudget?.outputChars,
     unknownTokens: (priorBudget?.unknownTokens ?? 0) + interruptedCalls.reduce((sum, call) => sum + (call.reservedTokens ?? 0), 0),
     calls: priorBudget?.calls.map(call => call.status === "started" ? { ...call, status: "unknown", usageSource: "unknown", completionReason: "interrupted" } : call),
-    onCall(call) { recordJobEvent(job.id, { type: "llm_call_accounting", ...call }); },
+    beforeCall(call) { if (initialMapMode === "parts") admitPipelineDailyCall(job.id, call.reservedTokens ?? 0, ["manual", "resume"].includes(payload.reason)); },
+    onCall(call) { recordJobEvent(job.id, { type: "llm_call_accounting", ...call }); if (initialMapMode === "parts") persistCheckpoint(); },
   });
   // Research, reserve provider, verification and JSON repair share this one allowance.
   const remaining = budget.remainingTokens - 40_000;
@@ -225,7 +235,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
     await withAgentRun(
       { owner: project.owner, repo: project.repo, headSha, installationId },
       {
-        systemPrompt: overviewPrompt(), changed: [], overview: true, snapshot: snapshotMode, snapshotParts: initialMapMode === "parts", pipelineScope: `overview:${job.id}`, limits: OVERVIEW_LIMITS,
+        systemPrompt: overviewPrompt(), changed: [], overview: true, snapshot: snapshotMode, snapshotParts: initialMapMode === "parts", pipelineScope: `overview:${job.id}`, limits: { ...OVERVIEW_LIMITS, maxTokens: budget.maxTokens },
         budget, reserveTokens: 40_000, legacyOverview: process.env.OVERVIEW_RUNTIME === "legacy", research: checkpoint?.research,
         userPrompt: snapshotMode ? `Репозиторий ${project.owner}/${project.repo}, коммит ${headSha}. Составь карту по переданным материалам.`
           : checkpoint ? userPrompt + "\nФрагменты из предыдущей попытки на этом коммите (данные репозитория):\n" + checkpoint.evidence : userPrompt,
@@ -303,7 +313,7 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
           // Notes edited meanwhile (by a supervisor or a merged PR) are not overwritten.
           let publicationNotesId = notes?.id ?? null;
           if (parsed.notes && (!snapshotMode || notes?.actor == null) && (getProjectNotes(project.id)?.id ?? null) === (notes?.id ?? null)) {
-            addProjectNotes(project.id, parsed.notes, { analysisId });
+            addProjectNotes(project.id, parsed.notes, { analysisId, strict: initialMapMode === "parts" });
             publicationNotesId = getProjectNotes(project.id)?.id ?? null;
           }
           stageJobPublication(job.id, analysisId, headSha,
@@ -327,6 +337,13 @@ export async function executeOverviewJob(job: ReviewJob): Promise<OverviewJobRes
     if (stagedJobPublication(job.id)) throw error;
     result = { quality: "failed", reason: error instanceof ExecutionBudgetError || error instanceof AgentProcessError
       ? error.reason : diagnostics?.reason ?? "process_failure" };
+    if (initialMapMode === "parts") {
+      const failure = pipelineFailure(error);
+      const wait = cacheOnly && failure.reason === "token_limit" ? new PipelineWaitError("daily_tokens", "retryable") : failure;
+      patchPipelineJob(job.id, { quality: "not_reviewed", recovery: wait.recovery, reason: wait.reason, configuration: pipelineConfigurationFingerprint() });
+      record("error", { rawResponse: error instanceof Error ? error.message : String(error), agentLog: failedLog });
+      throw wait;
+    }
     if (job.attempts >= 2) {
       const retained = getDb().prepare("SELECT json_extract(payload,'$.checkpoint.evidence') AS evidence FROM review_jobs WHERE id=?").get(job.id);
       if (typeof retained?.evidence === "string" && retained.evidence.length > 2) {

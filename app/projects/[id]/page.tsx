@@ -237,6 +237,8 @@ function overviewState(status: JobStatus | null, last: AnalysisRow | null): stri
 }
 
 function unreviewedReason(status: string, note: string | null): string {
+  if (note === "pipeline-blocked") return "ожидает изменения настройки сервиса";
+  if (note === "limited") return "разбор с ограничениями";
   if (status === "failed") return "разбор не удался";
   if (status === "done") return "ответ модели не удалось разобрать";
   if (note === "limit") return "исчерпан дневной лимит, разбор в очереди";

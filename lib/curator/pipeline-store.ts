@@ -6,7 +6,7 @@ export interface PipelineStore {
   save(id: string, requestHash: string, answer: ChatResult): void;
 }
 /** Scope binds the job, revisions, model and prompts; results never cross jobs implicitly. */
-export function sqlitePipelineStore(scope: string): PipelineStore {
+export function sqlitePipelineStore(scope: string, jobId?: number): PipelineStore {
   return {
     load(id, requestHash) {
       const row = getDb().prepare("SELECT response_json FROM context_pipeline_parts WHERE scope=? AND part_id=? AND request_hash=?").get(scope, id, requestHash);
@@ -16,8 +16,8 @@ export function sqlitePipelineStore(scope: string): PipelineStore {
       return answer;
     },
     save(id, requestHash, answer) {
-      getDb().prepare("INSERT INTO context_pipeline_parts(scope,part_id,request_hash,response_json) VALUES (?,?,?,?) ON CONFLICT(scope,part_id) DO UPDATE SET request_hash=excluded.request_hash,response_json=excluded.response_json")
-        .run(scope, id, requestHash, JSON.stringify(answer));
+      getDb().prepare("INSERT INTO context_pipeline_parts(scope,part_id,request_hash,response_json,job_id) VALUES (?,?,?,?,?) ON CONFLICT(scope,part_id) DO UPDATE SET request_hash=excluded.request_hash,response_json=excluded.response_json,job_id=COALESCE(excluded.job_id,context_pipeline_parts.job_id)")
+        .run(scope, id, requestHash, JSON.stringify(answer), jobId ?? null);
     },
   };
 }

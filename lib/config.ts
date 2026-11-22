@@ -19,9 +19,9 @@ const REVIEWERS: readonly Reviewer[] = ["simulate", "llm"];
 
 // Как разбирается коммит при CURATOR_REVIEWER=llm: `diff` — один запрос по изменениям,
 // `agent` — агент над копией репозитория (lib/agent). Ответы на комментарии всегда идут по diff.
-export type ReviewMode = "diff" | "agent";
+export type ReviewMode = "diff" | "agent" | "context";
 
-const REVIEW_MODES: readonly ReviewMode[] = ["diff", "agent"];
+const REVIEW_MODES: readonly ReviewMode[] = ["diff", "agent", "context"];
 
 export function reviewMode(): ReviewMode {
   const raw = process.env.REVIEW_MODE ?? "agent";

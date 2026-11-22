@@ -23,6 +23,7 @@ const MODE_LABEL: Record<AnalysisMode, string> = {
   diff: "по изменениям",
   agent: "агент",
   agent_fallback: "по изменениям после сбоя агента",
+  context: "по полному diff",
 };
 
 export default async function AnalysisPage({
@@ -62,7 +63,8 @@ export default async function AnalysisPage({
   const reason = typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
   const deliveryState = typeof diagnostics?.delivery === "string" ? diagnostics.delivery :
     typeof delivery?.state === "string" ? delivery.state : typeof delivery?.status === "string" ? delivery.status : null;
-  const unresolved = questions.filter(question => ["pending", "blocked", "unresolved"].includes(String(question.status)));
+  const unresolved: Array<Record<string, unknown>> = [...questions.filter(question => ["pending", "blocked", "unresolved"].includes(String(question.status))),
+    ...(Array.isArray(diagnostics?.unresolved) ? diagnostics.unresolved.filter((q): q is string => typeof q === "string").map(question => ({ question })) : [])];
   const verification = diagnosticObject(diagnostics?.verification);
   const toolCalls = research?.toolCalls ?? budget?.toolCalls;
   const reads = diagnosticRows(research?.reads);

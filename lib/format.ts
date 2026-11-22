@@ -74,6 +74,10 @@ const DIAGNOSTIC_REASON_LABEL: Record<string, string> = {
   process_failure: "Процесс проверки завершился со сбоем", interrupted: "Проверка была прервана",
   verification_failed: "Перепроверка находок не завершена", publication_failed: "Не удалось опубликовать результат",
   format_error: "Ответ не соответствует формату", stall: "Повторные действия не продвинули проверку",
+    context_limit: "Материалы не помещаются в окно модели", limited: "Разбор завершён с ограничениями",
+    configuration_error: "Необходимо исправить настройки сервиса", model_configuration: "Необходимо проверить настройки модели",
+    base_changed: "Базовая ветка изменилась — проверим актуальную версию", daily_tokens: "Ожидает дневного бюджета",
+    daily_capacity: "Дневной бюджет меньше одного необходимого запроса",
 };
 
 export function diagnosticReasonLabel(reason: string): string {

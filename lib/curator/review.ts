@@ -351,13 +351,23 @@ const RESOLVED_LABEL: Partial<Record<FindingStatus, string>> = {
   dismissed: "снято",
 };
 
-interface ReviewOutcome {
+export interface ReviewOutcome {
   analysisId: number;
   comment: string;
-  outcome: "ok" | "parse_error";
+  outcome: "ok" | "partial" | "parse_error";
   summary: string;
   statusChanges: StatusChange[];
   kept: KeptFinding[];
+}
+
+export interface ReviewRunContext {
+  isCurrent?: () => boolean;
+  validateCurrent?: () => Promise<boolean>;
+  stage?: (result: ReviewOutcome) => void;
+  fixesFinal?: () => boolean;
+  attempt?: number;
+  jobId?: number;
+  cacheOnly?: boolean;
 }
 
 /**
@@ -369,14 +379,17 @@ async function runReview(
   params: ReviewParams,
   prId: number,
   trigger: "commit" | "comment",
-  context: {
-    isCurrent?: () => boolean;
-    validateCurrent?: () => Promise<boolean>;
-    stage?: (result: ReviewOutcome) => void;
-    fixesFinal?: () => boolean;
-    attempt?: number;
-  } = {},
+  context: ReviewRunContext = {},
 ): Promise<ReviewOutcome> {
+  let selectedMode: string | undefined;
+  if (trigger === "commit" && context.jobId !== undefined) {
+    const { getDb } = await import("@/lib/db");
+    const row = getDb().prepare("SELECT json_extract(payload,'$.reviewMode') AS mode FROM review_jobs WHERE id=?").get(context.jobId);
+    const mode = typeof row?.mode === "string" ? row.mode : reviewMode();
+    selectedMode = mode;
+    if (!row?.mode) getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.reviewMode',?) WHERE id=?").run(mode, context.jobId);
+    if (mode === "context") return (await import("./context-review")).runContextReview(params, prId, context.jobId, context);
+  }
   const { prompt, materials, priorIds, reopenableIds, changed } = await collectReviewContext(params, prId);
   const tokens = emptySpend();
   const spend = (answer: ChatResult) => addSpend(tokens, answer.usage, answer.provider);
@@ -385,7 +398,7 @@ async function runReview(
   let result: { answer: ChatResult; parsed: ReconcileResult | null } | null = null;
   let agentNote: string | null = null;
   let agentLog: string | null = null;
-  if (trigger === "commit" && reviewMode() === "agent") {
+  if (trigger === "commit" && (selectedMode ?? reviewMode()) === "agent") {
     const attempt = context.attempt ?? 0;
     mode = "agent_fallback";
     if (attempt < MAX_AGENT_ATTEMPTS) {
@@ -507,12 +520,7 @@ async function runReview(
       changed,
       branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
     });
-    // Reviewed after the merge into the main branch: a requested overview starts now.
-    if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId, false);
-    if (fixesFinal && kept.some((f) => f.fixNotCounted)) {
-      const project = getProjectByRepo(params.owner, params.repo);
-      if (project) startOverview(project.id, "merge");
-    }
+    afterReviewReconciliation(params, prId, trigger, fixesFinal, kept);
     // Findings of other PRs the model only left open go to the list of the rest of the project,
     // not among this PR's findings; so the student sees the whole project without repeats.
     const open = loadOpenFindings(prId).filter((f) => f.status !== "pending");
@@ -541,6 +549,15 @@ async function runReview(
  * falls back to the diff review, and later attempts (infrastructure failures) skip the agent.
  */
 const MAX_AGENT_ATTEMPTS = 2;
+
+/** Shared by legacy and full-diff adapters, inside the reconciliation/outbox transaction. */
+export function afterReviewReconciliation(params: ReviewParams, prId: number, trigger: "commit" | "comment", fixesFinal: boolean, kept: KeptFinding[]): void {
+  if (trigger === "commit" && fixesFinal) overviewAfterMerge(prId, false);
+  if (fixesFinal && kept.some(f => f.fixNotCounted)) {
+    const project = getProjectByRepo(params.owner, params.repo);
+    if (project) startOverview(project.id, "merge");
+  }
+}
 
 /** `log` — the agent's run step by step, when the agent process got to run. */
 type AgentOutcome =
@@ -908,7 +925,7 @@ export class CheckUpdateError extends Error {
 
 /** Equal Git blobs are conservative evidence that the reviewed fix survived merging.
  * Unavailable or changed evidence needs a main-branch overview instead of closing a finding. */
-async function confirmMergedFixes(
+export async function confirmMergedFixes(
   params: Pick<ReviewParams, "owner" | "repo" | "prNumber" | "installationId">,
   findings: PriorFinding[], headSha: string, live?: ClosedPullRequest,
 ): Promise<Set<number>> {
@@ -971,6 +988,12 @@ async function publishStagedResult(params: Pick<ReviewParams, "owner" | "repo" |
   await postIssueCommentOnce({ ...params, issueNumber: params.prNumber,
     key: publication.key, body: publication.body });
   setJobPublishedAnalysis(jobId, publication.analysisId, publication.body);
+  const { loadPipelineJob, patchPipelineJob } = await import("./pipeline-job");
+  if (loadPipelineJob(jobId).quality) {
+    patchPipelineJob(jobId, { delivery: "delivered" });
+    const { getAnalysisDiagnostics, saveAnalysisDiagnostics } = await import("./diagnostics");
+    saveAnalysisDiagnostics(publication.analysisId, { ...getAnalysisDiagnostics(publication.analysisId), delivery: "delivered" });
+  }
   return publication;
 }
 
@@ -984,6 +1007,7 @@ export async function executeCommitJob(
   prId: number,
   jobId: number,
   attempt = 0,
+  cacheOnly = false,
 ): Promise<void> {
   const isCurrent = () => {
     const pr = getPullRequest(prId);
@@ -1010,6 +1034,8 @@ export async function executeCommitJob(
       fixesFinal: () => getPullRequest(prId)?.mergedIntoDefault ?? false,
       stage,
       attempt,
+      jobId,
+      cacheOnly,
     });
   }
   const { outcome } = await publishStagedResult(params, jobId);
@@ -1019,7 +1045,8 @@ export async function executeCommitJob(
   const checkRunId = getJobCheckRun(jobId);
   if (checkRunId !== null) {
     const conclude = outcome === "ok" ? concludeCheck : concludeUnreviewedCheck;
-    const summary = outcome === "ok" ? "Разбор изменений завершён." : "Не разобрано: ответ модели не удалось разобрать.";
+    const summary = outcome === "ok" ? "Разбор изменений завершён." : outcome === "partial"
+      ? "Разбор с ограничениями. Подтверждённые замечания опубликованы; непроверенные вопросы сохранены." : "Не разобрано: ответ модели не удалось разобрать.";
     try {
       await conclude(params, checkRunId, summary);
     } catch (error) {

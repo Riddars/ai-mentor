@@ -9,7 +9,8 @@ import { isProjectMember } from "@/lib/github/members";
 import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator/acknowledgements";
 import { memoryGap } from "@/lib/curator/memory";
 import { recordJobEvent } from "@/lib/curator/diagnostics";
-import { executeOverviewJob, OVERVIEW_LIMITS, startOverview, type OverviewPayload } from "@/lib/curator/overview";
+import { blockedPipelineConfiguration, PipelineWaitError, hasSavedPipelineFinal, pipelineDailyLiability, waitPipelineJob, wakeChangedPipelineJobs } from "./pipeline-job";
+import { executeOverviewJob, overviewTokenLimit, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
   concludeCheck,
   concludeUnreviewedCheck,
@@ -65,33 +66,33 @@ export interface OverviewJobResult {
 }
 
 export interface WorkerDeps {
-  runCommit(job: ReviewJob): Promise<void>;
+  runCommit(job: ReviewJob, options?: { cacheOnly: boolean }): Promise<void>;
   runComment(job: ReviewJob): Promise<void>;
-  runOverview(job: ReviewJob): Promise<void | OverviewJobResult>;
+  runOverview(job: ReviewJob, options?: { cacheOnly: boolean }): Promise<void | OverviewJobResult>;
   concludeUnreviewed(job: ReviewJob, summary: string): Promise<boolean | void>;
-  concludePublished(job: ReviewJob, outcome: "ok" | "parse_error" | "error" | "stale"): Promise<void>;
+  concludePublished(job: ReviewJob, outcome: "ok" | "partial" | "parse_error" | "error" | "stale"): Promise<void>;
   reportFailure(job: ReviewJob): Promise<void>;
 }
 
 const realDeps: WorkerDeps = {
-  runCommit: async (job) => {
+  runCommit: async (job, options) => {
     const params = job.payload as ReviewParams;
     await acknowledgePullRequest(params);
-    await executeCommitJob(params, job.prId, job.id, job.attempts);
+    await executeCommitJob(params, job.prId, job.id, job.attempts, options?.cacheOnly);
   },
   runComment: async (job) => {
     const params = job.payload as CommentReviewParams;
     await acknowledgeStudentComment(params);
     await executeCommentJob(params, job.id);
   },
-  runOverview: (job) => executeOverviewJob(job),
+  runOverview: (job, options) => executeOverviewJob(job, options?.cacheOnly),
   concludeUnreviewed: (job, summary) =>
     concludeUnreviewedCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
   concludePublished: async (job, outcome) => {
     if (job.checkRunId === null) return;
     const params = job.payload as ReviewParams;
     if (outcome === "ok") await concludeCheck(params, job.checkRunId, "Разбор изменений завершён.");
-    else await concludeUnreviewedCheck(params, job.checkRunId, "Не разобрано: ответ модели не удалось разобрать.");
+    else await concludeUnreviewedCheck(params, job.checkRunId, outcome === "partial" ? "Разбор с ограничениями. Непроверенные вопросы сохранены." : "Не разобрано: ответ модели не удалось разобрать.");
   },
   // A failed overview is already recorded with what it spent; it has no PR to report to.
   reportFailure: async (job) => {
@@ -149,6 +150,7 @@ async function concludeIfOpen(job: ReviewJob, summary: string, deps: WorkerDeps)
  */
 export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promise<void> {
   const settings = queueSettings();
+  const finishCompleted = () => finishJob(job.id, "done", stagedJobPublication(job.id)?.outcome === "partial" ? "limited" : undefined);
   const finishOverview = (result: void | OverviewJobResult) => {
     if (result) {
       recordJobEvent(job.id, { type: "job_finished", ...result });
@@ -161,10 +163,10 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   const published = job.kind === "commit"
     ? publishedCommitAnalysisOutcome(job.id)
     : null;
-  if (published !== null && published !== "partial") {
+  if (published !== null && (published !== "partial" || (job.payload as { reviewMode?: string }).reviewMode === "context")) {
     try {
       await deps.concludePublished(job, published);
-      finishJob(job.id, "done");
+      finishCompleted();
     } catch (error) {
       console.error(`[queue] check update of job ${job.id} failed, retrying:`, error);
       rescheduleJob(job.id, { delayMs: 60_000 }, "check update failed");
@@ -194,7 +196,7 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
         return;
       }
       else await deps.runComment(job);
-      finishJob(job.id, "done");
+      finishCompleted();
     } catch (error) {
       console.warn(`[queue] publication of job ${job.id} failed, retrying:`, error);
       if (job.kind === "overview" && (job.publicationAttempts ?? 0) >= 3) finishJob(job.id, "failed", "Обзор сохранён, публикация не удалась");
@@ -214,17 +216,31 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   // for (button, resume) is not held back by the project's budget, only by the service's.
   const checkpoint = (job.payload as { checkpoint?: { spent?: unknown } } | null)?.checkpoint;
   const spent = typeof checkpoint?.spent === "number" && Number.isFinite(checkpoint.spent) ? Math.max(0, checkpoint.spent) : 0;
-  const reserve = job.kind === "overview" ? Math.max(0, OVERVIEW_LIMITS.maxTokens - spent) : 0;
+  const pipeline = job.payload as { reviewMode?: string; contextPipeline?: { budget?: { spent: { input: number; output: number }; unknownTokens: number } } };
+  const contextReview = job.kind === "commit" && (pipeline.reviewMode ?? process.env.REVIEW_MODE) === "context";
+  let reserve = 0;
+  if (job.kind === "overview") {
+    try { reserve = Math.max(0, overviewTokenLimit() - spent); }
+    catch {
+      if (!markJobRunning(job.id)) return;
+      const wait = blockedPipelineConfiguration(job.id);
+      waitPipelineJob(job.id, wait, 60000);
+      await concludeIfOpen(job, "Разбор ожидает исправления настройки бюджета сервиса.", deps);
+      return;
+    }
+  }
   const asked = job.kind === "overview" && ["manual", "resume"].includes((job.payload as OverviewPayload).reason);
   const overLimit =
     recent.count >= settings.dailyLimit
       ? NOT_REVIEWED_LIMIT
-      : !asked && settings.projectDailyTokens > 0 && recentTokens(job.projectId) + reserve >= settings.projectDailyTokens
+      : !asked && settings.projectDailyTokens > 0 && recentTokens(job.projectId) + pipelineDailyLiability(job.projectId) + reserve >= settings.projectDailyTokens
         ? NOT_REVIEWED_PROJECT_TOKENS
-        : settings.dailyTokens > 0 && recentTokens(null) + reserve >= settings.dailyTokens
+        : settings.dailyTokens > 0 && recentTokens(null) + pipelineDailyLiability(null) + reserve >= settings.dailyTokens
           ? NOT_REVIEWED_TOKENS
           : null;
-  if (overLimit) {
+  const contextOverview = job.kind === "overview" && (job.payload as { initialMapMode?: string }).initialMapMode === "parts";
+  const cacheOnly = !!overLimit && (contextReview || contextOverview) && hasSavedPipelineFinal(job.id);
+  if (overLimit && !cacheOnly) {
     if (await concludeIfOpen(job, overLimit, deps)) {
       markCheckConcluded(job.id, overLimit === NOT_REVIEWED_LIMIT ? "limit" : "budget");
     }
@@ -239,14 +255,27 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
   if (job.kind === "overview") job = { ...job, attempts: getJobAttempts(job.id).model };
   if (job.kind === "overview") recordJobEvent(job.id, { type: "job_started", attempt: job.attempts });
   try {
-    if (job.kind === "commit") await deps.runCommit(job);
+    if (job.kind === "commit") await deps.runCommit(job, { cacheOnly });
     else if (job.kind === "overview") {
-      finishOverview(await deps.runOverview(job));
+      finishOverview(await deps.runOverview(job, { cacheOnly }));
       return;
     }
     else await deps.runComment(job);
-    finishJob(job.id, "done");
+    finishCompleted();
   } catch (error) {
+    if (error instanceof PipelineWaitError) {
+      recordJobEvent(job.id, { type: "pipeline_wait", reason: error.reason, recovery: error.recovery });
+      const age = Date.now() - (parseDbDate(job.createdAt)?.getTime() ?? Date.now());
+      if (error.recovery === "retryable" && error.reason !== "daily_tokens" && age >= settings.retryWindowMs) {
+        await concludeIfOpen(job, `Разбор не завершён: ${error.reason}. Подробности сохранены руководителю.`, deps);
+        finishJob(job.id, "failed", error.reason);
+        await deps.reportFailure(job).catch(e => console.error("[queue] failed to report pipeline failure", e));
+      } else {
+        await concludeIfOpen(job, error.recovery === "blocked" ? `Разбор ожидает настройки сервиса: ${error.reason}. Сотруднику не нужно создавать новый PR.` : `Сервис временно недоступен (${error.reason}). Повторим автоматически.`, deps);
+        waitPipelineJob(job.id, error, error.reason === "daily_tokens" ? 3600000 : Math.min(2 ** Math.min(job.attempts, 5), 30) * 60000);
+      }
+      return;
+    }
     if (error instanceof CheckUpdateError) {
       console.error(`[queue] check update of job ${job.id} failed, retrying:`, error);
       rescheduleJob(job.id, { delayMs: 60_000 }, "check update failed");
@@ -449,6 +478,7 @@ async function tick(): Promise<void> {
   const settings = queueSettings();
   const free = settings.concurrency - inFlight.size;
   if (free > 0) {
+    wakeChangedPipelineJobs();
     for (const job of listDueJobs(settings.concurrency)) {
       if (inFlight.size >= settings.concurrency) break;
       if (inFlight.has(job.id)) continue;

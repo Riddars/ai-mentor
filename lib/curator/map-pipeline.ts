@@ -9,10 +9,12 @@ import { assertUnitCoverage, hashText, packContext, packUnits, sourceUnit, split
 import { measureContext, type ContextLimits } from "./context-size";
 import { repositoryInventory } from "./repository-inventory";
 import { memoryPipelineStore, sqlitePipelineStore, type PipelineStore } from "./pipeline-store";
+import { repairSchema } from "./schema-repair";
+import { NOTES_MAX_CHARS, NOTES_TARGET_CHARS } from "./notes-policy";
 
 interface MapAnswer { summary: string; notes: string; findings: never[] }
 const HEADINGS = ["### Суть", "### Карта репозитория", "### Путь данных", "### Сознательные решения"];
-export function decodeMapAnswer(raw: string, maxNotes = 6000): MapAnswer | null {
+export function decodeMapAnswer(raw: string, maxNotes = NOTES_MAX_CHARS): MapAnswer | null {
   try {
     const text = raw.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "");
     const value = JSON.parse(text) as MapAnswer;
@@ -32,7 +34,7 @@ export interface MapPipelineOptions {
 const mergeRules = "\nПереданы ОПИСАНИЯ частей, а не исходники. Объедини их в карту. " +
   "Сохрани источники и существенные неопределённости; противоречия не разрешай догадками. Не утверждай, что видел отсутствующий код.";
 const partRules = "\nЕсли передан только фрагмент проекта, опиши именно его. " +
-  "Отметь внешние зависимости и непроверенные связи. Включай пути источников. notes не более 6000 символов.";
+  "Отметь внешние зависимости и непроверенные связи. Включай пути источников. Соблюдай предел notes этого запуска.";
 function descriptionSource(id: string, map: MapAnswer, revision: string): ContextSource {
   const bytes = Buffer.from(JSON.stringify({ sourcePart: id, map }), "utf8");
   const viewHash = hashText(bytes);
@@ -48,7 +50,7 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
     const inventory = await repositoryInventory(root, options.revision, scratch);
     if (!inventory.sources.length) throw new Error("incomplete_snapshot: no eligible materials for project map");
     const limits = options.limits ?? { contextTokens: Number(process.env.INITIAL_MAP_CONTEXT_TOKENS ?? 128000), outputTokens: 4000, safetyRatio: 0.15 };
-    let notesLimit = 6000;
+    let notesLimit = Math.min(6000, NOTES_MAX_CHARS);
     let rules = initialMapPrompt() + partRules;
     const ask = options.ask ?? chat;
     const excluded = inventory.excluded.slice(0, 100);
@@ -62,7 +64,7 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
     // Backslashes exercise double JSON escaping, more expensive than ordinary prose.
     const mergeLimits = { ...limits, contextTokens: Math.min(limits.contextTokens, Number(process.env.LLM_FALLBACK_CONTEXT_TOKENS ?? limits.contextTokens)) };
     while (true) {
-      rules = initialMapPrompt() + partRules + `\nОбязательный предел notes для этого запуска: ${notesLimit} символов.`;
+        rules = initialMapPrompt() + partRules + `\nЦелевой объём notes: ${Math.min(NOTES_TARGET_CHARS, Math.floor(notesLimit * 0.75))} символов. Обязательный предел notes для этого запуска: ${notesLimit} символов. Группируй файлы по роли и пиши кратко, оставляя запас до предела.`;
       const worst: MapAnswer = { summary: "\\".repeat(1500), findings: [], notes: "\\".repeat(notesLimit) };
       const probe = [descriptionSource("a".repeat(64), worst, options.revision), descriptionSource("b".repeat(64), worst, options.revision)];
       if (measureContext(await template(true).template(probe.map(s => sourceUnit(s))), mergeLimits).fits) break;
@@ -71,7 +73,8 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
     }
     const scope = hashText(JSON.stringify([options.scope, options.revision, task, rules, mergeRules,
       process.env.LLM_PROVIDER, process.env.LLM_MODEL, process.env.LLM_FALLBACK_PROVIDER, process.env.LLM_FALLBACK_MODEL, "map-v3.2"]));
-    const store = options.store ?? (options.scope ? sqlitePipelineStore(scope) : memoryPipelineStore());
+    const jobMatch = /^overview:(\d+)$/.exec(options.scope ?? "");
+    const store = options.store ?? (options.scope ? sqlitePipelineStore(scope, jobMatch ? Number(jobMatch[1]) : undefined) : memoryPipelineStore());
     const finalHash = hashText(JSON.stringify([inventory.sources.map(s => s.id), inventory.excluded, rules, task]));
     const savedFinal = store.load("final", finalHash);
     const repacked = new Map<string, { limits: ContextLimits; depth: number }>();
@@ -99,15 +102,32 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
       const replacements = await restoreReplacement(parts[index], false);
       if (replacements) { parts.splice(index, 1, ...replacements); index--; }
     }
+    const terminalParts = new Set(parts.length === 1 ? [parts[0].id] : []);
+    const answerLimit = (part: ContextPart<ChatMessage[]>) => terminalParts.has(part.id) ? NOTES_MAX_CHARS : notesLimit;
     onEvent({ type: "map_plan", parts: parts.map(p => ({ id: p.id, units: p.units.map(u => ({ id: u.id, path: u.source.path, from: u.from, to: u.to })), inputTokens: p.measurement.inputTokens })),
       revision: options.revision, excluded: inventory.excluded, counter: parts[0].measurement.counter, estimated: true });
     const worstMap: MapAnswer = { summary: "\\".repeat(1500), findings: [], notes: "\\".repeat(notesLimit) };
+    const repairRules = `Сохрани смысл, СОКРАТИ notes до целевых ${Math.min(NOTES_TARGET_CHARS, Math.floor(notesLimit * 0.75))} символов (жёсткий максимум ${notesLimit}). При превышении объёма сократи формулировки каждого раздела минимум на четверть; не возвращай прежний длинный текст. ` +
+      'Схема: {"summary":"непустая строка до1500 символов","findings":[],"notes":"' + HEADINGS.join("; ") + '"}. Все четыре заголовка обязательны.';
+    const cachedAnswer = (part: ContextPart<ChatMessage[]>) => {
+      const canonical = store.load(part.id, part.requestHash);
+      if (canonical) return canonical;
+      const raw = store.load("map-raw:" + part.id, part.requestHash);
+      if (raw && decodeMapAnswer(raw.content, answerLimit(part))) { store.save(part.id, part.requestHash, raw); return raw; }
+      return null;
+    };
+    const pendingCost = (part: ContextPart<ChatMessage[]>) => {
+      if (cachedAnswer(part)) return 0;
+      const raw = store.load("map-raw:" + part.id, part.requestHash);
+      if (!raw) return part.measurement.required;
+      return 2 * measureContext([{ role: "system", content: repairRules }, { role: "user", content: raw.content }], limits).required;
+    };
     /** Plan every remaining normal call, including all reducer levels. Cached answers use actual sizes. */
     const estimateRemaining = async (work: ContextPart<ChatMessage[]>[]): Promise<number> => {
-      let cost = work.reduce((sum, p) => sum + (store.load(p.id, p.requestHash) ? 0 : p.measurement.required), 0);
+      let cost = work.reduce((sum, p) => sum + pendingCost(p), 0);
       let descriptions = work.map(part => {
-        const cached = store.load(part.id, part.requestHash);
-        return { source: descriptionSource(part.id, cached ? decodeMapAnswer(cached.content, notesLimit)! : worstMap, options.revision), known: !!cached };
+        const cached = cachedAnswer(part);
+        return { source: descriptionSource(part.id, cached ? decodeMapAnswer(cached.content, answerLimit(part))! : worstMap, options.revision), known: !!cached };
       });
       while (descriptions.length > 1) {
         const known = new Set(descriptions.filter(d => d.known).map(d => d.source.id));
@@ -118,10 +138,11 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
           const restored = await restoreReplacement(next[index], true);
           if (restored) { next.splice(index, 1, ...restored); index--; }
         }
+        if (next.length === 1) terminalParts.add(next[0].id);
         descriptions = next.map(part => {
-          const cached = part.units.every(unit => known.has(unit.source.id)) ? store.load(part.id, part.requestHash) : null;
-          if (!cached) cost += part.measurement.required;
-          return { source: descriptionSource(part.id, cached ? decodeMapAnswer(cached.content, notesLimit)! : worstMap, options.revision), known: !!cached };
+          const cached = part.units.every(unit => known.has(unit.source.id)) ? cachedAnswer(part) : null;
+          if (!cached) cost += pendingCost(part);
+          return { source: descriptionSource(part.id, cached ? decodeMapAnswer(cached.content, answerLimit(part))! : worstMap, options.revision), known: !!cached };
         });
       }
       return cost;
@@ -135,30 +156,32 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
     let last: ChatResult | undefined;
     let completed = 0;
     const execute = async (part: ContextPart<ChatMessage[]>, merging: boolean): Promise<ChatResult> => {
-      const cached = store.load(part.id, part.requestHash);
+      const cached = cachedAnswer(part);
       if (cached) {
-        if (!decodeMapAnswer(cached.content, notesLimit)) throw new Error("invalid_format: corrupt map checkpoint");
+        if (!decodeMapAnswer(cached.content, answerLimit(part))) throw new Error("invalid_format: corrupt map checkpoint");
         onEvent({ type: "map_part_reused", id: part.id }); return cached;
       }
       const selectedLimits = repacked.get(part.id)?.limits ?? limits;
       const messages = await rebuildPartRequest(part, template(merging, selectedLimits));
       const measurement = measureContext(messages, selectedLimits);
       const futureCost = await estimateRemaining(parts);
-      const futureReserve = Math.max(0, futureCost - part.measurement.required);
+      const futureReserve = Math.max(0, futureCost - pendingCost(part));
       const reserve = futureReserve + Math.min(8000, Math.max(0, budget.remainingTokens - futureCost));
-      if (measurement.required + reserve > budget.remainingTokens) throw new ExecutionBudgetError("token_limit");
+      const raw = store.load("map-raw:" + part.id, part.requestHash);
+      if (!raw && measurement.required + reserve > budget.remainingTokens) throw new ExecutionBudgetError("token_limit");
       onEvent({ type: "map_part_started", id: part.id, merging });
-      let answer = await ask(messages, { budget, phase: "synthesis", maxOutputTokens: limits.outputTokens, reserveTokens: reserve, onEvent,
+      let answer = raw ?? await ask(messages, { budget, phase: "synthesis", maxOutputTokens: limits.outputTokens, reserveTokens: reserve, onEvent,
         contextTokens: selectedLimits.contextTokens, fallbackContextTokens: Number(process.env.LLM_FALLBACK_CONTEXT_TOKENS ?? selectedLimits.contextTokens) });
-      for (let attempt = 0; !decodeMapAnswer(answer.content, notesLimit) && attempt < 2; attempt++) {
-        const repair: ChatMessage[] = [{ role: "system", content: `Исправь только JSON/формат. Не добавляй фактов. Сохрани смысл, сократи notes до ${notesLimit} символов. ` +
-          'Схема: {"summary":"непустая строка до1500 символов","findings":[],"notes":"' + HEADINGS.join("; ") + '"}. Все четыре заголовка обязательны.' },
-        { role: "user", content: answer.content }];
-        if (!measureContext(repair, limits).fits) throw new Error("invalid_format: response too large for repair");
-        answer = await ask(repair, { budget, phase: "json_repair", maxOutputTokens: limits.outputTokens, reserveTokens: futureReserve, onEvent,
-          contextTokens: limits.contextTokens, fallbackContextTokens: Number(process.env.LLM_FALLBACK_CONTEXT_TOKENS ?? limits.contextTokens) });
-      }
-      const parsed = decodeMapAnswer(answer.content, notesLimit);
+      store.save("map-raw:" + part.id, part.requestHash, answer);
+      const repaired = await repairSchema(answer, raw => decodeMapAnswer(raw, answerLimit(part)), { id: "map:" + part.id, hash: part.requestHash,
+        schema: repairRules, limits, budget, reserve: futureReserve, store, ask: (messages, options) => ask(messages, { ...options, onEvent }),
+        validationError: raw => {
+          try { const value = JSON.parse(raw); return `Измерено программой: summary ${typeof value.summary === "string" ? value.summary.length : "не строка"}/1500, notes ${typeof value.notes === "string" ? value.notes.length : "не строка"}/${notesLimit} символов. ${typeof value.notes === "string" && value.notes.length > notesLimit ? "ОШИБКА: notes слишком длинный. Требуется именно сокращение, а не только оформление JSON." : "Проверь типы, пустые findings и четыре обязательных заголовка."}`; }
+          catch { return "ОШИБКА: ответ не разбирается как JSON."; }
+        },
+        fallbackContextTokens: Number(process.env.LLM_FALLBACK_CONTEXT_TOKENS ?? limits.contextTokens) });
+      answer = repaired.answer;
+      const parsed = repaired.value;
       if (!parsed) throw new Error("invalid_format: map response failed validation after two repairs");
       answer = { ...answer, content: JSON.stringify(parsed) };
       store.save(part.id, part.requestHash, answer);
@@ -196,6 +219,7 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
             groups: replacements.map(p => p.units.map(u => ({ source: u.source.id, from: u.from, to: u.to }))) }),
           provider: "internal", model: "replacement-plan", usage: { input: 0, output: 0 } });
           for (const replacement of replacements) repacked.set(replacement.id, { limits: smaller, depth: previous.depth + 1 });
+          terminalParts.delete(part.id);
           parts.splice(index, 1, ...replacements); index--;
         }
       }
@@ -203,6 +227,7 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
       const sources = answers.map(({ id, answer }) => descriptionSource(id, decodeMapAnswer(answer.content, notesLimit)!, options.revision));
       const next = await packContext(sources, template(true));
       if (next.length >= parts.length) throw new Error("context_limit: map reduction made no progress");
+      if (next.length === 1) terminalParts.add(next[0].id);
       parts = next; merging = true; levels++;
     }
     store.save("final", finalHash, last!);

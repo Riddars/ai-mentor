@@ -38,3 +38,5 @@ export function verifyPrompt(): string {
 
 /** First connection: one complete selected snapshot, no research tools or findings. */
 export function initialMapPrompt(): string { return render("initial-map"); }
+export function prContextPrompt(merging = false): string { return render("pr-context-part") + (merging ? "\n" + render("pr-context-merge") : ""); }
+export function prContextVerifyPrompt(): string { return render("pr-context-verify"); }

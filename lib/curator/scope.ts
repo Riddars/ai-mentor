@@ -18,7 +18,7 @@ export function lineRange(detail: string | null | undefined): { from: number; to
   if (!match) return null;
   const from = Number(match[1]);
   const to = match[2] ? Number(match[2]) : from;
-  return from >= 1 && to >= from ? { from, to } : null;
+  return Number.isSafeInteger(from) && Number.isSafeInteger(to) && from >= 1 && to >= from ? { from, to } : null;
 }
 
 /** New-file line numbers added by a unified diff patch. */

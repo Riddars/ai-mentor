@@ -17,6 +17,7 @@ import {
   type StudentResponse,
 } from "@/lib/curator/store";
 import type { ReviewParams } from "@/lib/curator/review";
+import type { ReviewRepository } from "./pr-full-diff";
 
 // What the model is given for one review: the open and dismissed findings of the project, the
 // notes about it, the project documents, the PR description, the student's replies and the PR
@@ -359,4 +360,27 @@ export async function collectReviewContext(
       studentResponses: replies.length,
     },
   };
+}
+
+/** The new runtime gets its diff from Git; never fetch capped GitHub patch pages here. */
+export async function collectFullReviewContext(params: ReviewParams, prId: number, repository: ReviewRepository) {
+  const document = async (path: string) => {
+    const file = await repository.readFile(path, "head");
+    if (!file) return null;
+    try { return new TextDecoder("utf-8", { fatal: true }).decode(file.bytes); } catch { return null; }
+  };
+  const research = await document("RESEARCH.md"), plan = await document("PLAN.md"), pr = await fetchPullRequest(params);
+  const prior = loadOpenFindings(prId), dismissed = loadDismissedFindings(prId), responses = loadStudentResponses(prId);
+  const files = repository.changes.map(c => c.newPath);
+  const notes = getProjectNotes(getPullRequest(prId)!.projectId);
+  const shownPrior = selectPriorFindings(prior, params.prNumber), shownDismissed = selectDismissedFindings(dismissed, new Set(files)), replies = selectReplies(responses);
+  const prompt = buildReviewPrompt({ prNumber: params.prNumber, prior: shownPrior, dismissed: shownDismissed,
+    notes: notes?.body ?? null, notesByPerson: notes?.actor != null, research, plan, prBody: pr.body, replies,
+    changes: "Полный diff или назначенная часть будет добавлена отдельно; отсутствие patch здесь не означает отсутствия изменений." }) +
+    `\nСправочный список прежних замечаний: ${shownPrior.length}/${prior.length}; снятых: ${shownDismissed.length}/${dismissed.length}; ответов: ${replies.length}/${responses.length}. ` +
+    "Полная отдельная сверка прежних замечаний выполняется программой. Не дублируй известные замечания новыми.";
+  const materials: AnalysisMaterials = { files, omitted: repository.sources.filter(s => s.omittedReason).map(s => s.path), unlisted: 0,
+    researchDoc: research !== null, planDoc: plan !== null, truncated: repository.sources.some(s => !!s.omittedReason),
+    priorFindings: prior.length, dismissedFindings: dismissed.length, notes: notes !== null, studentResponses: responses.length };
+  return { prompt, materials, prior, dismissed, responses };
 }

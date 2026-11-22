@@ -90,7 +90,7 @@ export type PullRequestState = "open" | "merged" | "closed";
 export type AnalysisOutcome = "partial" | "ok" | "parse_error" | "error" | "stale";
 
 /** `agent_fallback`: the agent failed and the same job reviewed the diff. */
-export type AnalysisMode = "diff" | "agent" | "agent_fallback";
+export type AnalysisMode = "diff" | "agent" | "agent_fallback" | "context";
 
 /** A project row with the aggregates the overview table shows. */
 export interface ProjectSummary {
@@ -1133,7 +1133,8 @@ export function loadDismissedFindings(prId: number): DismissedFinding[] {
 // --- Notes about the project ---
 
 /** Longest notes kept; the model is asked for less. */
-export const NOTES_MAX_CHARS = 6_000;
+export { NOTES_MAX_CHARS } from "./notes-policy";
+import { NOTES_MAX_CHARS } from "./notes-policy";
 
 export interface ProjectNotes {
   id: number;
@@ -1174,8 +1175,9 @@ function clipNotes(body: string): string {
 export function addProjectNotes(
   projectId: number,
   body: string,
-  source: { analysisId?: number | null; actor?: string | null },
+  source: { analysisId?: number | null; actor?: string | null; strict?: boolean },
 ): void {
+  if (source.strict && body.trim().length > NOTES_MAX_CHARS) throw new Error("invalid_format: project notes exceed storage allowance");
   getDb()
     .prepare(
       `INSERT INTO project_notes (project_id, body, analysis_id, actor)
@@ -2000,7 +2002,7 @@ export function listDueJobs(limit: number): ReviewJob[] {
   const rows = getDb()
     .prepare(
       `${JOB_SELECT}
-       WHERE j.status = 'queued' AND j.run_after <= datetime('now')
+       WHERE j.status = 'queued' AND j.run_after <= datetime('now') AND COALESCE(j.note,'') != 'pipeline-blocked'
          AND pr.project_id NOT IN (
            SELECT p2.project_id FROM review_jobs j2
            JOIN pull_requests p2 ON p2.id = j2.pull_request_id WHERE j2.status = 'running')

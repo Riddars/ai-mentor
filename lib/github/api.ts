@@ -5,11 +5,12 @@ interface RequestOptions {
   method?: string;
   token: string;
   body?: unknown;
+  signal?: AbortSignal;
 }
 
 export async function githubRequest<T = unknown>(
   path: string,
-  { method = "GET", token, body }: RequestOptions,
+  { method = "GET", token, body, signal }: RequestOptions,
 ): Promise<T> {
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
@@ -21,7 +22,7 @@ export async function githubRequest<T = unknown>(
     },
     body: body ? JSON.stringify(body) : undefined,
     // A hung connection would otherwise hold the caller (e.g. a worker tick) for minutes.
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

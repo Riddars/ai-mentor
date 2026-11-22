@@ -52,8 +52,8 @@ try {
   enqueueOverviewJob(project, { reason: "initial" }, true);
   let job = listDueJobs(1)[0];
   markJobRunning(job.id);
-  await assert.rejects(executeOverviewJob({ ...job, attempts: 1 }), /interruption/);
-  assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM context_pipeline_parts").get()?.n, 1);
+  await assert.rejects(executeOverviewJob({ ...job, attempts: 1 }), { reason: "provider_network", recovery: "retryable" });
+  assert.equal(getDb().prepare("SELECT COUNT(*) AS n FROM context_pipeline_parts WHERE part_id NOT LIKE 'map-raw:%'").get()?.n, 1);
   addProjectNotes(project, "human notes must survive", { actor: "supervisor" });
   process.env.INITIAL_OVERVIEW_MODE = "agent"; // A retry must keep the pinned pipeline.
   getDb().prepare("UPDATE review_jobs SET status='queued' WHERE id=?").run(job.id);

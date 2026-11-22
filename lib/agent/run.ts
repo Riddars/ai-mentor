@@ -1,9 +1,9 @@
 import { downloadTextSnapshot } from "@/lib/agent/text-snapshot";
 import { fork } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { getInstallationToken } from "@/lib/github/auth";
@@ -431,7 +431,7 @@ function sleep(ms: number): Promise<void> {
 export async function removeStaleAgentDirs(): Promise<void> {
   const base = tmpdir();
   // Twice the longest run, which leaves room for the verification request after it.
-  const maxAgeMs = 2 * (agentLimits().timeoutMs + CHILD_GRACE_MS + DOWNLOAD_TIMEOUT_MS);
+  const maxAgeMs = 2 * (Math.max(agentLimits().timeoutMs, numberEnv("PR_TIMEOUT_MS", 20 * 60000), 20 * 60000) + CHILD_GRACE_MS + DOWNLOAD_TIMEOUT_MS);
   let entries: string[];
   try {
     entries = await readdir(base);
@@ -439,10 +439,12 @@ export async function removeStaleAgentDirs(): Promise<void> {
     return;
   }
   for (const name of entries) {
-    if (!name.startsWith(TEMP_PREFIX)) continue;
-    const dir = join(base, name);
+    if (![TEMP_PREFIX, "curator-pr-git-", "curator-map-views-"].some(prefix => name.startsWith(prefix))) continue;
+    const dir = resolve(base, name);
+    if (dirname(dir) !== resolve(base)) continue;
     try {
-      if (Date.now() - (await stat(dir)).mtimeMs < maxAgeMs) continue;
+      const entry = await lstat(dir);
+      if (!entry.isDirectory() || entry.isSymbolicLink() || Date.now() - entry.mtimeMs < Math.max(maxAgeMs, 2 * 20 * 60000)) continue;
       await rm(dir, { recursive: true, force: true, maxRetries: 3 });
       console.log(`[agent] removed a stale repository copy: ${dir}`);
     } catch (error) {
