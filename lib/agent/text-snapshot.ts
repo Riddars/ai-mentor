@@ -1,6 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { Header } from "tar";
 import { githubRequest } from "@/lib/github/api";
+import { snapshotExclusion } from "@/lib/curator/snapshot-policy";
 
 interface Entry { path: string; size?: number; mode: string; sha: string; type: string }
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
@@ -17,7 +18,7 @@ export async function downloadTextSnapshot(base: string, sha: string, token: str
   for (const entry of files.sort((a,b) => priority(a.path) - priority(b.path) || a.path.localeCompare(b.path))) {
     if (count >= 80) break;
     if (entry.size === undefined || entry.size > 192 * 1024 || bytes + entry.size > MAX_SNAPSHOT_BYTES ||
-        !/\.(md|rst|txt|py|js|tsx?|jsx|cs|go|rs|java|c|cpp|h|rb|php|sh|sql|r|jl|toml|json|ya?ml|csv|tsv|html|css)$/i.test(entry.path)) continue;
+        snapshotExclusion(entry.path)) continue;
     if (entry.path.split("/").some(part => !part || part === "." || part === ".." || /[\\:\x00-\x1f]/.test(part))) continue;
     const header = new Header({path: "snapshot/" + entry.path, type: "File", size: entry.size, mode: 0o600});
     const block = Buffer.alloc(512);

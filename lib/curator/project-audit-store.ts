@@ -1,6 +1,7 @@
 import { getDb } from "@/lib/db";
 import { hashText } from "./context-parts";
 import { ensureOverviewPullRequest, saveReviewResult, type JobStatus } from "./store";
+import { SNAPSHOT_POLICY_VERSION } from "./snapshot-policy";
 
 export const AUDIT_VERSION = "project-audit-v1";
 export const projectAuditEnabled = () => process.env.PROJECT_AUDIT_ENABLED === "true";
@@ -9,7 +10,11 @@ export interface ProjectMap {
 }
 const mapSelect = "SELECT id, project_id AS projectId, job_id AS jobId, analysis_id AS analysisId, sha, body, manifest FROM project_maps";
 export function latestProjectMap(projectId: number): ProjectMap | null {
-  return getDb().prepare(mapSelect + " WHERE project_id=? ORDER BY id DESC LIMIT 1").get(projectId) as unknown as ProjectMap ?? null;
+  const map = getDb().prepare(mapSelect + " WHERE project_id=? ORDER BY id DESC LIMIT 1").get(projectId) as unknown as ProjectMap ?? null;
+  return hasCurrentMapPolicy(map) ? map : null;
+}
+export function hasCurrentMapPolicy(map: ProjectMap | null): map is ProjectMap {
+  return map !== null && JSON.parse(map.manifest).version === SNAPSHOT_POLICY_VERSION;
 }
 export function auditMap(jobId: number): ProjectMap {
   const row = getDb().prepare(`SELECT m.id,m.project_id AS projectId,m.job_id AS jobId,m.analysis_id AS analysisId,m.sha,m.body,m.manifest

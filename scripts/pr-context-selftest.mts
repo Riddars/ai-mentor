@@ -38,6 +38,8 @@ try {
     ["100644", fresh, "link"], ["100644", await blob("NEW_SECRET"), ".env"],
     ["100644", await blob("я😀".repeat(25000)), "giant.json"], ["100644", await blob(Buffer.from([0, 1, 2])), "binary.bin"],
     ["100644", await blob("CSV_VALUES_MUST_NOT_LEAK\n1,2\n"), "dataset.csv"],
+    ["100644", await blob(JSON.stringify({ cells: [{ cell_type: "code", source: ["print('notebook source')"],
+      outputs: [{ text: "NOTEBOOK_OUTPUT_MUST_NOT_LEAK" }] }] })), "work.ipynb"],
     ["160000", base, "submodule"], ...Array.from({ length: 310 }, (_, i): [string, string, string] => ["100644", fresh, `many/${i}.ts`])]);
   const head = await commit(base);
   const repository = await openReviewRepository(gitDir, base, head);
@@ -49,8 +51,11 @@ try {
   assert.equal(await repository.readFile("../outside", "head"), null);
   assert.equal(await repository.readFile("submodule", "head"), null);
   const sources = repository.sources;
-  assert.ok(!(await Promise.all(sources.map(s => unitText(sourceUnit(s))))).join("\n").includes("NEW_SECRET"));
-  assert.ok(!(await Promise.all(sources.map(s => unitText(sourceUnit(s))))).join("\n").includes("CSV_VALUES_MUST_NOT_LEAK"));
+  const rendered = (await Promise.all(sources.map(s => unitText(sourceUnit(s))))).join("\n");
+  assert.ok(!rendered.includes("NEW_SECRET"));
+  assert.ok(!rendered.includes("CSV_VALUES_MUST_NOT_LEAK"));
+  assert.ok(!rendered.includes("NOTEBOOK_OUTPUT_MUST_NOT_LEAK"));
+  assert.ok(rendered.includes("print('notebook source')"));
   const parts = await packContext(sources, { version: "pr-test", limits: { contextTokens: 8000, outputTokens: 1000 }, split: splitDiffUnit,
     template: async units => ({ system: "review", diffs: await Promise.all(units.map(async u => ({ meta: diffRangeMetadata(u), text: await unitText(u) }))) }) });
   assert.ok(parts.length > 1);

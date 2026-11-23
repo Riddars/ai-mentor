@@ -154,13 +154,13 @@ export async function executeOverviewJob(job: ReviewJob, cacheOnly = false): Pro
       ? configuredMapMode === "parts" ? "parts" : "snapshot" : "agent");
   if (!payload.initialMapMode) getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.initialMapMode',?) WHERE id=?").run(initialMapMode, job.id);
   const snapshotMode = initialMapMode !== "agent";
-  type Checkpoint = { version?: 1; sha: string; spent: number; evidence: string; research?: ResearchState; budget?: ExecutionBudgetSnapshot };
+  type Checkpoint = { version?: 1; policy?: string; sha: string; spent: number; evidence: string; research?: ResearchState; budget?: ExecutionBudgetSnapshot };
   const previous = (job.payload as OverviewPayload & { checkpoint?: Checkpoint }).checkpoint;
   if (previous && previous.sha !== headSha) {
     recordJobEvent(job.id, { type: "job_finished", reason: "superseded", oldSha: previous.sha, headSha });
     return { quality: "failed", reason: "superseded" };
   }
-  const checkpoint = previous;
+  const checkpoint = previous && previous.policy !== SNAPSHOT_POLICY_VERSION ? { ...previous, evidence: "", research: undefined } : previous;
   const used = checkpoint?.spent ?? 0;
   const priorBudget = checkpoint?.budget;
   const interruptedCalls = priorBudget?.calls.filter(call => call.status === "started") ?? [];
@@ -212,7 +212,7 @@ export async function executeOverviewJob(job: ReviewJob, cacheOnly = false): Pro
   };
   const persistCheckpoint = (research = diagnostics?.research, evidence = research?.notes ?? checkpoint?.evidence ?? "") => {
     const snapshot = budget.snapshot();
-    const value = JSON.stringify({ version: 1, sha: headSha, spent: snapshot.spent.input + snapshot.spent.output,
+    const value = JSON.stringify({ version: 1, policy: SNAPSHOT_POLICY_VERSION, sha: headSha, spent: snapshot.spent.input + snapshot.spent.output,
       evidence, research, budget: snapshot });
     getDb().prepare("UPDATE review_jobs SET payload=json_set(payload,'$.checkpoint',json(?)) WHERE id=? AND status='running'").run(value, job.id);
   };

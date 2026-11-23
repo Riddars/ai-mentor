@@ -12,19 +12,19 @@ import { ExecutionBudget } from "@/lib/llm/execution";
 /** No excerpts: every admitted text file appears in full, once. */
 export async function buildInitialSnapshot(root: string) {
   const included: Array<{ path: string; chars: number }> = [];
-  const excluded: Array<{ path: string; reason: string }> = [];
+  const excluded: Array<{ path: string; reason: string; bytes: number }> = [];
   const blocks: string[] = [];
   let chars = 0;
   for (const file of await listRepoFiles(root)) {
     const reason = snapshotExclusion(file.path);
-    if (reason) { excluded.push({ path: file.path, reason }); continue; }
+    if (reason) { excluded.push({ path: file.path, reason, bytes: file.size }); continue; }
     if (file.size > 2_000_000) throw new Error(`Snapshot text file too large; nothing was truncated: ${file.path}`);
     const bytes = await readFile(join(root, file.path));
     let content: string;
     try {
       if (bytes.includes(0)) throw new Error("binary");
       content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    } catch { excluded.push({ path: file.path, reason: "двоичный или не UTF-8 файл" }); continue; }
+    } catch { excluded.push({ path: file.path, reason: "двоичный или не UTF-8 файл", bytes: file.size }); continue; }
     if (/\.ipynb$/i.test(file.path)) {
       const cells = notebookCells(content);
       if (cells === null) throw new Error(`Invalid notebook: ${file.path}`);

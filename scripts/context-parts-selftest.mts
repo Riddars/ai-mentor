@@ -57,14 +57,16 @@ try {
   await writeFile(join(root, "binary.dat"), Buffer.from([255, 0, 2]));
   await writeFile(join(root, "work.ipynb"), JSON.stringify({ cells: [{ cell_type: "code", source: ["print(1)"], outputs: [{ text: "not-in-view" }] }] }));
   const inventory = await repositoryInventory(root, "commit", scratch);
-  assert.equal(inventory.sources.length, 3);
+  assert.equal(inventory.sources.filter(s => s.kind === "file").length, 2);
   const readme = inventory.sources.find(s => s.path === "README.md")!;
   assert.equal(readme.originalHash, readme.viewHash);
   assert.equal(await unitText(sourceUnit(readme)), "\uFEFFпривет\r\nno-final-newline");
   const notebook = inventory.sources.find(s => s.path === "work.ipynb")!;
   assert.notEqual(notebook.originalHash, notebook.viewHash);
   assert.ok(!(await unitText(sourceUnit(notebook))).includes("not-in-view"));
+  assert.equal(inventory.excluded.find(s => s.path === "table.csv")?.bytes, 11);
   const table = inventory.sources.find(s => s.path === "table.csv")!;
+  assert.equal(table.kind, "metadata");
   assert.ok(!(await unitText(sourceUnit(table))).includes("do-not-send"));
   assert.equal(inventory.excluded.length, 4);
   await assert.rejects(repositoryInventory(root, "commit", root), /outside/);

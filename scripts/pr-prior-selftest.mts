@@ -7,12 +7,12 @@ import { ExecutionBudget } from "@/lib/llm/execution";
 import type { PrPipelineOptions } from "@/lib/curator/pr-pipeline";
 import type { PriorFinding, DismissedFinding } from "@/lib/curator/store";
 
-const change: DiffChange = { oldMode: "100644", newMode: "100644", oldBlob: "a".repeat(40), newBlob: "b".repeat(40), status: "M", oldPath: "data.json", newPath: "data.json" };
+const change: DiffChange = { oldMode: "100644", newMode: "100644", oldBlob: "a".repeat(40), newBlob: "b".repeat(40), status: "M", oldPath: "package.json", newPath: "package.json" };
 const repository: ReviewRepository = { base: "a".repeat(40), mergeBase: "a".repeat(40), head: "b".repeat(40), changes: [change],
-  sources: diffSources(Buffer.from("diff --git a/data.json b/data.json\n--- a/data.json\n+++ b/data.json\n@@ -1 +1 @@\n-old\n+new\n"), [change], "fixture"),
+  sources: diffSources(Buffer.from("diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-old\n+new\n"), [change], "fixture"),
   readFile: async path => ({ path, mode: "100644", revision: "b".repeat(40), blob: "b".repeat(40), bytes: Buffer.from("new") }) };
 const prior = Array.from({ length: 50 }, (_, i): PriorFinding => ({ id: i + 1, prNumber: 1, area: "data", severity: "important", title: `Issue ${i}`,
-  verify: "must be fixed", status: i % 2 ? "pending" : "open", locations: [{ kind: "data", target: "data.json", detail: "1" }] }));
+  verify: "must be fixed", status: i % 2 ? "pending" : "open", locations: [{ kind: "data", target: "package.json", detail: "1" }] }));
 const human: DismissedFinding = { ...prior[0], id: 100, status: "dismissed", reason: "human decision", byPerson: true };
 const modelDismissed: DismissedFinding = { ...human, id: 101, byPerson: false };
 const faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);

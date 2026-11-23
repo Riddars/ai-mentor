@@ -114,7 +114,7 @@ async function toolChecks(work: string): Promise<void> {
   const call = (name: string, args: Record<string, unknown>) => tools[name].execute("call", args as never);
   const textOf = (r: Awaited<ReturnType<typeof call>>) => r.content.map((c) => ("text" in c ? c.text : "")).join("");
 
-  check("tools: only the ten read-only tools", Object.keys(tools).sort().join(",") === "grep,html_info,html_section,json_get,json_info,list_files,read_file,table_info,xml_get,xml_info");
+  check("tools: only the seven read-only tools", Object.keys(tools).sort().join(",") === "grep,json_get,json_info,list_files,read_file,xml_get,xml_info");
   const outside = await rejects(call("read_file", { path: "../../../../Windows/win.ini" }));
   check("tools: path outside the copy refused", outside !== null, String(outside));
   const absolute = await rejects(call("read_file", { path: "/etc/passwd" }));
@@ -125,23 +125,11 @@ async function toolChecks(work: string): Promise<void> {
   const grep = textOf(await call("grep", { text: "never for model selection" }));
   check("tools: grep finds the holdout note", grep.includes("src/splits.py:"), grep.split("\n")[0]);
 
-  const started = Date.now();
-  const table = textOf(
-    await createTools(join(benchDir, "projects", "des-density"), log)
-      .find((t) => t.name === "table_info")!
-      .execute("call", { path: "data/density_measurements.csv" } as never),
-  );
-  check("tools: table_info on 200k rows", table.includes("строк данных: 200000"), `${Date.now() - started} ms`);
-  const head = textOf(
-    await createTools(join(benchDir, "projects", "des-density"), log)
-      .find((t) => t.name === "read_file")!
-      .execute("call", { path: "data/density_measurements.csv", from: 1000, to: 1300 } as never),
-  );
-  check(
-    "tools: read_file shows only the head of a data file",
-    head.includes("\n20\t") && !head.includes("\n21\t") && !head.includes("\n1000\t"),
-    head.split("\n").at(-1),
-  );
+  const density = createTools(join(benchDir, "projects", "des-density"), log)
+    .find((tool) => tool.name === "read_file")!;
+  const denied = await rejects(density.execute("call", { path: "data/density_measurements.csv" } as never));
+  check("tools: data content is excluded", Boolean(denied?.includes("excluded by policy")));
+
   check("tools: viewed files logged", log.viewed.has("notebooks/eda.ipynb"));
 
   const linked = join(work, "linked");
@@ -420,8 +408,8 @@ async function hardeningChecks(work: string): Promise<void> {
   const tools = Object.fromEntries(createTools(repo, createToolLog()).map((t) => [t.name, t]));
   const call = (name: string, args: Record<string, unknown>) => tools[name].execute("call", args as never);
   const textOf = (r: Awaited<ReturnType<typeof call>>) => r.content.map((c) => ("text" in c ? c.text : "")).join("");
-  const wide = textOf(await call("table_info", { path: "wide.csv" }));
-  check("hostile: table_info bounds a huge header", wide.length < 45_000 && wide.includes("… ещё 4900"), `${wide.length} chars`);
+  const wide = await rejects(call("read_file", { path: "wide.csv" }));
+  check("hostile: large table content is excluded", Boolean(wide?.includes("excluded by policy")));
   const listing = textOf(await call("list_files", { dir: "many" }));
   check("hostile: tool output capped", listing.length <= 40_100 && listing.includes("вывод обрезан"), `${listing.length} chars`);
   const dirError = (await rejects(call("read_file", { path: "many" }))) ?? "";

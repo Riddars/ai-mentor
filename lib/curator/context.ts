@@ -2,8 +2,7 @@ import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
 import { SEVERITIES } from "@/lib/curator/finding";
 import { locationText } from "@/lib/format";
-import { fileKind } from "@/lib/curator/file-policy";
-import { snapshotExclusion } from "@/lib/curator/snapshot-policy";
+import { changedFileExclusion, snapshotExclusion } from "@/lib/curator/snapshot-policy";
 import { notebookCells } from "@/lib/curator/notebook";
 import { changedLines, type ChangedLines } from "@/lib/curator/scope";
 import {
@@ -115,7 +114,7 @@ const DATA =
 
 /** Code and documents first, notebooks and data last: what matters most fits the limit. */
 export function rank(path: string): number {
-  if (fileKind(path) !== "text") return 4;
+  if (snapshotExclusion(path)) return 4;
   if (DATA.test(path)) return 4;
   if (path.toLowerCase().endsWith(".ipynb")) return 3;
   if (CODE.test(path)) return 0;
@@ -127,16 +126,6 @@ export function rank(path: string): number {
 export function notebookText(raw: string): string | null {
   const text = notebookCells(raw);
   return text === null ? null : cut(text, LIMITS.notebook, "ноутбук");
-}
-
-function generatedChangeSummary(patch: string | undefined): string {
-  if (!patch) return "";
-  const relevant = patch.split("\n")
-    .filter((line) => /^[+-][^+-]/.test(line) &&
-      /node_modules\/|["']version["']\s*:|\bversion\s*=|\bname\s*=|^[+-][^\n]{1,120}(?:@|:)$/.test(line))
-    .slice(0, 12)
-    .map((line) => line.length > 160 ? `${line.slice(0, 160)}…` : line);
-  return relevant.length ? `Изменённые записи (фрагменты, не весь файл):\n${relevant.join("\n")}\n` : "";
 }
 
 /** The changed files as one text within the diff limit; notebooks are read whole via `readText`. */
@@ -151,17 +140,13 @@ export async function formatChanges(
   for (const file of ordered) {
     const header = `### ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})\n`;
     let body: string;
-    const excluded = snapshotExclusion(file.filename) ?? (file.previous_filename ? snapshotExclusion(file.previous_filename) : null);
-    const notebook = file.filename.toLowerCase().endsWith(".ipynb") && file.status !== "removed"
-      ? await readText(file.filename).then((raw) => (raw ? notebookText(raw) : null))
-      : null;
-    if (excluded && fileKind(file.filename) === "text") {
+    const excluded = changedFileExclusion(file.previous_filename ?? file.filename, file.filename);
+    if (excluded) {
       body = `(содержимое исключено политикой файлов: ${excluded})\n`;
-    } else if (notebook) {
-      body = "Ноутбук целиком — текущие ячейки кода и текста, без выводов:\n```\n" + notebook + "\n```\n";
-    } else if (fileKind(file.filename) !== "text") {
-      body = `(тип: ${fileKind(file.filename)}; полный текст в разбор не передаётся; +${file.additions}/-${file.deletions} строк)\n` +
-        (fileKind(file.filename) === "generated" ? generatedChangeSummary(file.patch) : "");
+    } else if (/\.ipynb$/i.test(file.filename) || /\.ipynb$/i.test(file.previous_filename ?? "")) {
+      const raw = file.status === "removed" || !/\.ipynb$/i.test(file.filename) ? null : await readText(file.filename);
+      const notebook = raw === null ? null : notebookText(raw);
+      body = notebook === null ? "(ячейки ноутбука недоступны)\n" : "Ячейки кода и Markdown:\n```\n" + notebook + "\n```\n";
     } else if (file.patch && /\.(?:json|xml|html?)$/i.test(file.filename) && file.patch.length > 10_000) {
       const markers: string[] = [];
       for (const match of file.patch.matchAll(/(?:"([A-Za-z_][\w-]{0,40})"\s*:|<([A-Za-z][\w:-]{0,40})(?:\s|>))/g)) {
@@ -176,7 +161,7 @@ export async function formatChanges(
     }
     if (out.length + header.length + body.length > LIMITS.diff) {
       // Data and binary files are never reviewed by content, so they are not reported as omitted.
-      if (rank(file.filename) !== 4) omitted.push(file.filename);
+      if (!excluded) omitted.push(file.filename);
       continue;
     }
     out += header + body + "\n";

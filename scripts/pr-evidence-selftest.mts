@@ -14,9 +14,9 @@ const base = "a".repeat(40), head = "b".repeat(40);
 const change = (path: string, status = "M"): DiffChange => ({ oldMode: "100644", newMode: status === "D" ? "000000" : "100644", oldBlob: "c".repeat(40), newBlob: "d".repeat(40), status, oldPath: path, newPath: path });
 const patch = "diff --git a/huge.ts b/huge.ts\n--- a/huge.ts\n+++ b/huge.ts\n" + Array.from({ length: 50 }, (_, i) =>
   `@@ -${i * 100 + 1},2 +${i * 100 + 1},2 @@\n //${"x".repeat(5000)}\n-old\n+new\n`).join("");
-const changes = [change("huge.ts"), change("gone.ts", "D"), change("dataset.json")];
+const changes = [change("huge.ts"), change("gone.ts", "D"), change("package.json")];
 const sources = diffSources(Buffer.from(patch + "diff --git a/gone.ts b/gone.ts\ndeleted file mode 100644\n--- a/gone.ts\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n" +
-  "diff --git a/dataset.json b/dataset.json\n--- a/dataset.json\n+++ b/dataset.json\n@@ -1 +1 @@\n-old\n+new\n"), changes, "fixture");
+  "diff --git a/package.json b/package.json\n--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-old\n+new\n"), changes, "fixture");
 const reads: Array<[string, string]> = [];
 const repository: ReviewRepository = { base, mergeBase: base, head, changes, sources, readFile: async (path, revision) => {
   reads.push([path, revision]);
@@ -46,7 +46,7 @@ const faux = fauxProvider(), models = createModels(); models.setProvider(faux.pr
 for (const kind of ["data", "document", "other"] as const) {
   const node: PrNode = { id: "node-" + kind, units: [sourceUnit(sources[2])], files: [], denied: [], answer: {
     summary: "fixture", changes: "fixture", unresolved: [], refreshOverview: null, candidates: [{ sourceIds: [sources[2].id], rootCause: "fixture",
-      finding: { priorId: null, status: "open", title: "fixture", locations: [location(kind === "other" ? "general claim" : "dataset.json", kind === "other" ? null : "1", kind)] } }],
+      finding: { priorId: null, status: "open", title: "fixture", locations: [location(kind === "other" ? "general claim" : "package.json", kind === "other" ? null : "1", kind)] } }],
   } };
   const common = { repository, context: "fixture", budget: budget(), store: memoryPipelineStore(), primary: { provider: "fixture", model: faux.getModel(), stream: models.streamSimple.bind(models), contextTokens: 16000 } };
   const checked = await verifyPrNode(node, { ...common, ask: async messages => {

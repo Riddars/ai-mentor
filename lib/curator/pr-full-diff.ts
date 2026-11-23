@@ -6,7 +6,8 @@ import { getInstallationToken } from "@/lib/github/auth";
 import { githubRequest } from "@/lib/github/api";
 import type { ReviewParams } from "./review";
 import { hashText, sourceUnit, splitTextUnit, type ContextSource, type SourceUnit } from "./context-parts";
-import { snapshotExclusion } from "./snapshot-policy";
+import { changedFileExclusion, reviewFileExclusion } from "./snapshot-policy";
+import { notebookCells } from "./notebook";
 import { ExecutionBudget, ExecutionBudgetError } from "@/lib/llm/execution";
 
 export interface DiffChange { oldMode: string; newMode: string; oldBlob: string; newBlob: string; status: string; oldPath: string; newPath: string }
@@ -123,7 +124,11 @@ function diffLines(text: string): { lines: DiffLine[]; hunks: number[] } {
   }
   return { lines, hunks };
 }
-export function diffSources(rawPatch: Buffer, changes: DiffChange[], revision: string): DiffSource[] {
+function notebookChange(change: DiffChange) {
+  return /\.ipynb$/i.test(change.oldPath) || /\.ipynb$/i.test(change.newPath);
+}
+
+export function diffSources(rawPatch: Buffer, changes: DiffChange[], revision: string, notebooks = new Map<DiffChange, string>()): DiffSource[] {
   const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(rawPatch);
   const starts = [...text.matchAll(/^diff --git /gm)].map(match => match.index);
   if ((starts.length && starts[0] !== 0) || starts.length < changes.length) throw new Error("incomplete_snapshot: raw/patch file coverage mismatch");
@@ -139,13 +144,15 @@ export function diffSources(rawPatch: Buffer, changes: DiffChange[], revision: s
     const original = text.slice(start, starts[block + count] ?? text.length);
     block += count;
     // Check both names: renaming data to a source extension must not expose its old content.
-    const omittedReason = snapshotExclusion(change.oldPath) ?? snapshotExclusion(change.newPath) ?? undefined;
-    const patch = omittedReason ? JSON.stringify({ change, omittedReason }) : original;
+    const omittedReason = changedFileExclusion(change.oldPath, change.newPath) ?? undefined;
+    const notebook = notebookChange(change);
+    const patch = omittedReason ? JSON.stringify({ change, omittedReason })
+      : notebook ? notebooks.get(change) ?? JSON.stringify({ change, cells: "unavailable" }) : original;
     const bytes = Buffer.from(patch);
     const viewHash = hashText(bytes);
     const id = hashText(JSON.stringify([revision, change, viewHash]));
     return { id, path: change.newPath, revision, kind: "diff", bytes: bytes.length, originalHash: hashText(original), viewHash,
-      transformation: omittedReason ? "excluded-diff-metadata-v2" : "git-unified-diff-v1", change, omittedReason, ...diffLines(patch), read: async (from: number, to: number) => bytes.subarray(from, to) };
+      transformation: omittedReason ? "excluded-diff-metadata-v2" : notebook ? "notebook-code-markdown-v1" : "git-unified-diff-v1", change, omittedReason, ...diffLines(patch), read: async (from: number, to: number) => bytes.subarray(from, to) };
   });
   if (block !== starts.length) throw new Error("incomplete_snapshot: unassigned patch blocks");
   return result;
@@ -182,10 +189,27 @@ export async function openReviewRepository(directory: string, base: string, head
   const raw = await git(["diff", ...flags, "--raw", "-z", mergeBase, head, "--"]);
   const patch = await git(["diff", ...flags, "--patch", "--unified=3", mergeBase, head, "--"]);
   const changes = parseRawChanges(raw);
-  const sources = diffSources(patch, changes, `${mergeBase}..${head}`);
+  const notebooks = new Map<DiffChange, string>();
+  for (const change of changes) {
+    if (!notebookChange(change) || changedFileExclusion(change.oldPath, change.newPath)) continue;
+    const views = [];
+    for (const [side, path, blob, mode] of [
+      ["base", change.oldPath, change.oldBlob, change.oldMode],
+      ["head", change.newPath, change.newBlob, change.newMode],
+    ]) {
+      if (!/\.ipynb$/i.test(path) || !/^100(?:644|755)$/.test(mode) || !SHA.test(blob)) continue;
+      const size = Number((await git(["cat-file", "-s", blob])).toString("utf8"));
+      if (size > 50 * 1024 * 1024) continue;
+      const cells = notebookCells((await git(["cat-file", "blob", blob], { maxBytes: 50 * 1024 * 1024 })).toString("utf8"));
+      if (cells !== null) views.push(`=== ${side}: ${path} ===\n${cells}`);
+    }
+    if (views.length) notebooks.set(change, views.join("\n\n"));
+  }
+  const sources = diffSources(patch, changes, `${mergeBase}..${head}`, notebooks);
   return { base, head, mergeBase, changes, sources,
     async readFile(path, revision) {
       if (!path || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").some(p => p === ".." || p === "." || !p)) return null;
+      if (reviewFileExclusion(path, changes)) return null;
       const sha = revision === "base" ? mergeBase : head;
       const tree = await git(["ls-tree", "-z", sha, "--", ":(literal)" + path]);
       const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(tree.toString("utf8"));

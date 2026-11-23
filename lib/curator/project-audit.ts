@@ -13,7 +13,7 @@ import { hashText, sourceUnit, unitText } from "./context-parts";
 import { durablePipelineBudget, patchPipelineJob, pipelineConfigurationFingerprint, pipelineFailure, PipelineWaitError, loadPipelineJob } from "./pipeline-job";
 import { recordJobEvent, saveAnalysisDiagnostics } from "./diagnostics";
 import { getProject, getProjectNotes, recordAnalysis, setAnalysisComment, saveReviewResult, applyReconciliation, type ReviewJob, type AnalysisOutcome } from "./store";
-import { auditMap, latestProjectMap, projectAuditEnabled, enqueueProjectAudit, loadAuditHistory, auditHistoryHash,
+import { auditMap, hasCurrentMapPolicy, latestProjectMap, projectAuditEnabled, enqueueProjectAudit, loadAuditHistory, auditHistoryHash,
   savedAuditInput, saveAuditInput, completedAudit, completeAudit, AUDIT_VERSION } from "./project-audit-store";
 import { searchProject, verifyProjectCandidates, type AuditInput, type AuditPipelineOptions } from "./project-audit-pipeline";
 import type { OverviewJobResult } from "./worker";
@@ -51,6 +51,7 @@ export async function executeProjectAuditJob(job: ReviewJob, cacheOnly = false, 
   const project = getProject(job.projectId);
   if (!project) throw new Error("Project does not exist");
   const map = auditMap(job.id);
+  if (!hasCurrentMapPolicy(map)) return { quality: "failed", reason: "superseded" };
   let maximum: number, timeout: number, contextTokens: number, fallbackContextTokens: number;
   try {
     maximum = positive("PROJECT_AUDIT_TOKENS_PER_RUN", 950000);
