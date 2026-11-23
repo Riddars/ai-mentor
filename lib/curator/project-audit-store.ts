@@ -1,6 +1,6 @@
 import { getDb } from "@/lib/db";
 import { hashText } from "./context-parts";
-import { ensureOverviewPullRequest, saveReviewResult, type JobStatus } from "./store";
+import { ACTIVE_PROJECT_ANALYSIS, ensureOverviewPullRequest, saveReviewResult, type JobStatus } from "./store";
 import { SNAPSHOT_POLICY_VERSION } from "./snapshot-policy";
 
 export const AUDIT_VERSION = "project-audit-v1";
@@ -26,10 +26,14 @@ export function enqueueProjectAudit(map: ProjectMap, automatic = false): "queued
   return saveReviewResult(() => {
     const db = getDb();
     if (automatic && db.prepare("SELECT 1 FROM project_audit_runs WHERE map_id=? AND automatic=1").get(map.id)) return "active";
-    if (!automatic && db.prepare(`SELECT 1 FROM review_jobs j JOIN pull_requests pr ON pr.id=j.pull_request_id
-      WHERE pr.project_id=? AND j.kind='project_audit' AND j.status IN ('queued','running')`).get(map.projectId)) return "active";
-    const job = db.prepare("INSERT INTO review_jobs(pull_request_id,kind,head_sha,payload) VALUES (?,'project_audit',?,?) RETURNING id")
-      .get(ensureOverviewPullRequest(map.projectId), map.sha, JSON.stringify({ mapId: map.id, automatic, version: AUDIT_VERSION })) as { id: number };
+    const job = db.prepare(`INSERT INTO review_jobs(pull_request_id,kind,head_sha,payload)
+      SELECT @prId,'project_audit',@sha,@payload
+      WHERE @automatic OR (NOT EXISTS (${ACTIVE_PROJECT_ANALYSIS})
+        AND NOT EXISTS (SELECT 1 FROM review_jobs WHERE pull_request_id=@prId AND kind='project_audit' AND status='queued'))
+      RETURNING id`)
+      .get({ projectId: map.projectId, prId: ensureOverviewPullRequest(map.projectId), sha: map.sha, automatic: Number(automatic),
+        payload: JSON.stringify({ mapId: map.id, automatic, version: AUDIT_VERSION }) }) as { id: number } | undefined;
+    if (!job) return "active";
     db.prepare("INSERT INTO project_audit_runs(job_id,map_id,automatic) VALUES (?,?,?)").run(job.id, map.id, Number(automatic));
     return "queued";
   });

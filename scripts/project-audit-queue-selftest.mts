@@ -81,6 +81,8 @@ try {
   assert.equal(scalar("SELECT COUNT(*) AS n FROM project_audit_runs"), 1);
   const map = auditStore.latestProjectMap(project)!;
   auditStore.enqueueProjectAudit(map, true); assert.equal(scalar("SELECT COUNT(*) AS n FROM project_audit_runs"), 1);
+  const manualOverview = () => store.enqueueOverviewJob(project, { reason: "manual" }, true, false, true);
+  for (let i = 0; i < 100; i++) assert.equal(manualOverview(), "active", "queued audit blocks a manual overview");
   auditPhase = true;
   const first = nextAudit(); await runJob(first);
   assert.equal(searchCalls, 1); assert.equal(verificationCalls, 1);
@@ -113,6 +115,17 @@ try {
   await runJob(nextAudit());
   assert.equal(scalar("SELECT COUNT(*) AS n FROM findings"), 1, "manual repeat must not duplicate an existing problem");
   assert.equal(githubWrites, writesBefore);
+  assert.equal(manualOverview(), "queued");
+  const pendingOverview = store.listDueJobs(20).find(j => j.kind === "overview" && j.projectId === project)!;
+  assert.ok(store.hasActiveProjectAnalysis(project));
+  assert.equal(auditStore.enqueueProjectAudit(map), "active", "queued overview blocks a manual audit");
+  getDb().prepare("UPDATE review_jobs SET status='running' WHERE id=?").run(pendingOverview.id);
+  for (let i = 0; i < 100; i++) {
+    assert.equal(manualOverview(), "active");
+    assert.equal(auditStore.enqueueProjectAudit(map), "active");
+  }
+  store.finishJob(pendingOverview.id, "done");
+  assert.equal(store.hasActiveProjectAnalysis(project), false);
   const firstFinding = getDb().prepare("SELECT id FROM findings").get()!.id;
   getDb().prepare("UPDATE findings SET status='closed' WHERE id=?").run(firstFinding);
   historyVerdict = "regression";

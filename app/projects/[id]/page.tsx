@@ -7,6 +7,7 @@ import {
   getProject,
   getProjectLastActivity,
   getProjectNotes,
+  hasActiveProjectAnalysis,
   pendingOverviewRequests,
   getProjectParticipants,
   isSupervisorOf,
@@ -70,6 +71,7 @@ export default async function ProjectPage({
   const lastOverview = analyses.find((a) => a.trigger === "overview") ?? null;
   const overviewIssue = getOverviewIssue(projectId);
   const audit = latestProjectAudit(projectId);
+  const projectAnalysisActive = hasActiveProjectAnalysis(projectId);
   const projectMap = latestProjectMap(projectId);
   const mapCurrent = projectMap !== null && projectMap.sha === getMemorySha(projectId);
   const auditAnalysis = audit?.analysisId ? analyses.find(a => a.id === audit.analysisId) : null;
@@ -138,7 +140,7 @@ export default async function ProjectPage({
                         <span className="font-medium">PR #{u.number}</span>
                         <span className="text-muted-foreground"> · {unreviewedReason(u.status, u.note)}</span>
                       </span>
-                      <RestartReviewButton prId={u.prId} />
+                      <RestartReviewButton prId={u.prId} disabled={u.status === "running"} />
                     </li>
                   ))}
                 </ul>
@@ -175,7 +177,7 @@ export default async function ProjectPage({
                     </>
                   )}
                 </span>
-                <StartOverviewButton projectId={projectId} />
+                <StartOverviewButton projectId={projectId} disabled={projectAnalysisActive || overviewJob?.status === "queued"} />
               </div>
               {projectAuditEnabled() && (
                 <div className="flex flex-col gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
@@ -187,7 +189,7 @@ export default async function ProjectPage({
                   </p>
                   {audit?.status === "queued" && audit.lastError && <p role="status">{audit.lastError}</p>}
                   {!mapCurrent && <p>Сначала обновите карту: запустите полный обзор проекта.</p>}
-                  <StartProjectAuditButton projectId={projectId} disabled={!mapCurrent || project.status !== "active" || audit?.status === "running" || audit?.status === "queued"} />
+                  <StartProjectAuditButton projectId={projectId} disabled={!mapCurrent || project.status !== "active" || projectAnalysisActive || audit?.status === "queued"} />
                 </div>
               )}
             </CardBody>

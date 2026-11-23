@@ -82,7 +82,7 @@ export async function startProjectAuditAction(_prev: ActionState, formData: Form
     if (result === "disabled") return { error: "Поиск проблем пока не включён на сервере." };
     if (result === "paused") return { error: "Проект на паузе." };
     if (result === "map_required") return { error: "Сначала обновите карту: запустите полный обзор проекта." };
-    return { ok: result === "queued" ? "Поиск проблем поставлен в очередь." : "Поиск уже в очереди или выполняется." };
+    return { ok: result === "queued" ? "Поиск проблем поставлен в очередь." : "Разбор проекта уже в очереди или выполняется." };
   } catch (error) {
     console.error("[panel] project audit could not start:", error);
     return { error: "Не удалось проверить версию проекта. Попробуйте позже." };
@@ -98,7 +98,7 @@ export async function startOverviewAction(_prev: ActionState, formData: FormData
   if (result === "unavailable") return { error: "Обзор недоступен: не настроены разбор моделью или агент." };
   return result === "queued"
     ? { ok: "Полный обзор поставлен в очередь." }
-    : { ok: "Полный обзор уже в очереди или идёт." };
+    : { ok: "Разбор проекта уже в очереди или выполняется." };
 }
 
 /** Save the supervisor's edit of the notes about the project and update the overview issue. */

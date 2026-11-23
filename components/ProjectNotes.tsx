@@ -51,13 +51,13 @@ export function ProjectNotes({ projectId, notes }: { projectId: number; notes: s
   );
 }
 
-export function StartOverviewButton({ projectId }: { projectId: number }) {
+export function StartOverviewButton({ projectId, disabled }: { projectId: number; disabled: boolean }) {
   const [state, action, pending] = useActionState<ActionState, FormData>(startOverviewAction, null);
   return (
     <form action={action} className="flex items-center gap-3">
       <input type="hidden" name="projectId" value={projectId} />
       <FormMessage state={state} />
-      <Button type="submit" size="sm" variant="outline" disabled={pending}>
+      <Button type="submit" size="sm" variant="outline" disabled={disabled || pending}>
         {pending && <Spinner />}
         {pending ? "Запускается…" : "Запустить полный обзор"}
       </Button>

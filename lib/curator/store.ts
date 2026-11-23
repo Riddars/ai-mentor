@@ -1269,6 +1269,15 @@ export function ensureOverviewPullRequest(projectId: number): number {
 /** Automatic overviews of a project (initial, memory gap) run at most this often. */
 const AUTO_OVERVIEW_DAYS = 7;
 
+export const ACTIVE_PROJECT_ANALYSIS = `SELECT 1 FROM review_jobs j
+  JOIN pull_requests pr ON pr.id = j.pull_request_id
+  WHERE pr.project_id = @projectId AND j.kind IN ('overview', 'project_audit')
+    AND (j.status = 'running' OR (j.status = 'queued' AND COALESCE(j.note, '') != 'pipeline-blocked'))`;
+
+export function hasActiveProjectAnalysis(projectId: number): boolean {
+  return Boolean(getDb().prepare(ACTIVE_PROJECT_ANALYSIS).get({ projectId }));
+}
+
 /**
  * Queue an overview of the project. Not queued when one is already queued or running, or —
  * unless `force` (a person asked, the project was resumed) — when one was queued in the last
@@ -1279,6 +1288,7 @@ export function enqueueOverviewJob(
   payload: unknown,
   force: boolean,
   followRunning = false,
+  manual = false,
 ): "queued" | "active" | "recent" {
   const db = getDb();
   const latest = db
@@ -1291,10 +1301,15 @@ export function enqueueOverviewJob(
     .get({ projectId, window: `-${AUTO_OVERVIEW_DAYS} days` }) as { status: JobStatus; recent: number } | undefined;
   if (latest?.status === "queued" || (latest?.status === "running" && !followRunning)) return "active";
   if (!force && latest?.recent) return "recent";
-  db.prepare(
-    `INSERT INTO review_jobs (pull_request_id, kind, payload) VALUES (@prId, 'overview', @payload)`,
-  ).run({ prId: ensureOverviewPullRequest(projectId), payload: JSON.stringify(payload) });
-  return "queued";
+  const result = db.prepare(
+    `INSERT INTO review_jobs (pull_request_id, kind, payload)
+     SELECT @prId, 'overview', @payload
+     WHERE NOT EXISTS (SELECT 1 FROM review_jobs WHERE pull_request_id = @prId AND kind = 'overview'
+       AND (status = 'queued' OR (status = 'running' AND NOT @followRunning)))
+     AND (NOT @manual OR NOT EXISTS (${ACTIVE_PROJECT_ANALYSIS}))`,
+  ).run({ projectId, prId: ensureOverviewPullRequest(projectId), payload: JSON.stringify(payload),
+    manual: Number(manual), followRunning: Number(followRunning) });
+  return result.changes ? "queued" : "active";
 }
 
 /** Latest overview job of the project: its state and when it was queued. */
@@ -1838,14 +1853,12 @@ export function enqueueCommitJob(params: {
   deadlineMs: number;
 }): { jobId: number | null; supersededCheckRunIds: number[] } {
   const db = getDb();
-  if (hasJobForHead(params.prId, params.headSha, true)) {
-    return { jobId: null, supersededCheckRunIds: [] };
-  }
-  if (getPullRequestHead(params.prId) !== params.headSha) {
-    return { jobId: null, supersededCheckRunIds: [] };
-  }
-  db.exec("BEGIN");
+  db.exec("BEGIN IMMEDIATE");
   try {
+    if (hasJobForHead(params.prId, params.headSha, true) || getPullRequestHead(params.prId) !== params.headSha) {
+      db.exec("COMMIT");
+      return { jobId: null, supersededCheckRunIds: [] };
+    }
     const replaced = db
       .prepare(
         `SELECT check_run_id AS checkRunId, check_concluded AS concluded FROM review_jobs
