@@ -6,6 +6,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import { DATA_PREVIEW_LINES } from "@/lib/curator/data-files";
 import { fileKind } from "@/lib/curator/file-policy";
+import { pathContentExclusion } from "@/lib/curator/snapshot-policy";
 import { notebookCells } from "@/lib/curator/notebook";
 import { formatSize } from "@/lib/agent/workspace";
 import { htmlInfo, htmlSection, jsonGet, jsonInfo, xmlGet, xmlInfo } from "@/lib/agent/structured.mjs";
@@ -58,7 +59,10 @@ async function resolveInside(root: string, path: string): Promise<{ full: string
   if (full !== realRoot && !full.startsWith(realRoot + sep)) {
     throw new Error(`Path is outside the repository: ${path}`);
   }
-  return { full, rel: relative(realRoot, full).split(sep).join("/") };
+  const rel = relative(realRoot, full).split(sep).join("/");
+  const excluded = pathContentExclusion(rel);
+  if (excluded) throw new Error(`File content excluded by policy: ${excluded}`);
+  return { full, rel };
 }
 
 async function isBinary(full: string): Promise<boolean> {
@@ -421,6 +425,7 @@ export function createTools(root: string, log: ToolLog, overview = false, output
         let skipped = 0;
         const visit = async (full: string, rel: string): Promise<void> => {
           if (hasMore) return;
+          if (pathContentExclusion(rel)) { skipped += 1; return; }
           const info = await stat(full);
           if (info.isDirectory()) {
             for (const entry of await readdir(full)) {

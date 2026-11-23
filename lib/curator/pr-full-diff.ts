@@ -6,7 +6,7 @@ import { getInstallationToken } from "@/lib/github/auth";
 import { githubRequest } from "@/lib/github/api";
 import type { ReviewParams } from "./review";
 import { hashText, sourceUnit, splitTextUnit, type ContextSource, type SourceUnit } from "./context-parts";
-import { sensitivePath } from "./snapshot-policy";
+import { snapshotExclusion } from "./snapshot-policy";
 import { ExecutionBudget, ExecutionBudgetError } from "@/lib/llm/execution";
 
 export interface DiffChange { oldMode: string; newMode: string; oldBlob: string; newBlob: string; status: string; oldPath: string; newPath: string }
@@ -138,13 +138,14 @@ export function diffSources(rawPatch: Buffer, changes: DiffChange[], revision: s
     if (change.status === "T" && /^deleted file mode /m.test(first) && /^new file mode /m.test(second) && first.split("\n")[0] === second.split("\n")[0]) count = 2;
     const original = text.slice(start, starts[block + count] ?? text.length);
     block += count;
-    const omittedReason = sensitivePath(change.oldPath) || sensitivePath(change.newPath) ? "sensitive file content withheld" : undefined;
+    // Check both names: renaming data to a source extension must not expose its old content.
+    const omittedReason = snapshotExclusion(change.oldPath) ?? snapshotExclusion(change.newPath) ?? undefined;
     const patch = omittedReason ? JSON.stringify({ change, omittedReason }) : original;
     const bytes = Buffer.from(patch);
     const viewHash = hashText(bytes);
     const id = hashText(JSON.stringify([revision, change, viewHash]));
     return { id, path: change.newPath, revision, kind: "diff", bytes: bytes.length, originalHash: hashText(original), viewHash,
-      transformation: omittedReason ? "sensitive-diff-metadata-v1" : "git-unified-diff-v1", change, omittedReason, ...diffLines(patch), read: async (from: number, to: number) => bytes.subarray(from, to) };
+      transformation: omittedReason ? "excluded-diff-metadata-v2" : "git-unified-diff-v1", change, omittedReason, ...diffLines(patch), read: async (from: number, to: number) => bytes.subarray(from, to) };
   });
   if (block !== starts.length) throw new Error("incomplete_snapshot: unassigned patch blocks");
   return result;

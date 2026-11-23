@@ -89,7 +89,7 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
   const limits: ContextLimits = { contextTokens: options.primary.contextTokens, outputTokens, safetyRatio: 0.15 };
   const emit = (event: Record<string, unknown>) => options.onEvent?.(event);
   const revision = JSON.stringify([repository.base, repository.mergeBase, repository.head]);
-  const finalKey = hashText(JSON.stringify(["pr-final-v3.1", revision, repository.sources.map(s => [s.id, s.viewHash]), options.context,
+  const finalKey = hashText(JSON.stringify(["pr-final-v3.4", revision, repository.sources.map(s => [s.id, s.viewHash]), options.context,
     options.primary.provider, options.primary.model.id, options.primary.contextTokens, options.fallback?.provider,
     options.fallback?.model.id, options.fallback?.contextTokens, outputTokens, options.prior, options.dismissed, options.responses,
     prContextPrompt(false), prContextPrompt(true), prContextVerifyPrompt()]));
@@ -106,7 +106,7 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
     `unresolved — не более20 пунктов по${bounds.question} символов, при необходимости сгруппируй вопросы без потери существенных ограничений.`;
   const text = async (units: SourceUnit[]) => (await Promise.all(units.map(async unit => "=== MATERIAL " + JSON.stringify({ sourceId: unit.source.id,
     metadata: unit.source.kind === "diff" ? diffRangeMetadata(unit) : { path: unit.source.path } }) + " ===\n" + await unitText(unit) + "\n=== END MATERIAL ==="))).join("\n");
-  const template = (merging: boolean, selectedLimits = limits) => ({ version: "pr-context-v3.1", limits: selectedLimits,
+  const template = (merging: boolean, selectedLimits = limits) => ({ version: "pr-context-v3.4", limits: selectedLimits,
     split: merging ? async () => { throw new Error("context_limit: one PR description cannot fit"); } : splitDiffUnit,
     template: async (units: SourceUnit[]): Promise<ChatMessage[]> => [{ role: "system", content: boundedPrompt(merging) },
       { role: "user", content: options.context + "\nВерсии base/merge-base/head: " + revision + "\nНазначенные материалы:\n" + await text(units) }] });

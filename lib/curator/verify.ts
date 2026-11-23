@@ -4,6 +4,7 @@ import { chat, LlmRequestError, type ChatMessage, type ChatOptions, type ChatRes
 import { ExecutionBudget } from "@/lib/llm/execution";
 import { addSpend, emptySpend, type Spend } from "@/lib/llm/spend";
 import { notebookCells } from "@/lib/curator/notebook";
+import { snapshotExclusion } from "@/lib/curator/snapshot-policy";
 import { lineRange } from "@/lib/curator/scope";
 import { verifyPrompt } from "@/lib/curator/prompts";
 import type { ReconcileResult, ReconciledFinding } from "@/lib/curator/store";
@@ -40,6 +41,7 @@ async function fileLines(root: string, target: string): Promise<string[] | null>
     const realRoot = await realpath(root);
     const full = await realpath(resolve(realRoot, target.replace(/^\/+/, "")));
     if (!full.startsWith(realRoot + sep)) return null;
+    if (snapshotExclusion(target) || snapshotExclusion(full.slice(realRoot.length + 1).split(sep).join("/"))) return null;
     if ((await stat(full)).size > MAX_TEXT_BYTES) return null;
     const raw = await readFile(full, "utf8");
     if (target.toLowerCase().endsWith(".ipynb")) return notebookCells(raw)?.split("\n") ?? null;

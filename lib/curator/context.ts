@@ -3,6 +3,7 @@ import { getInstallationToken } from "@/lib/github/auth";
 import { SEVERITIES } from "@/lib/curator/finding";
 import { locationText } from "@/lib/format";
 import { fileKind } from "@/lib/curator/file-policy";
+import { snapshotExclusion } from "@/lib/curator/snapshot-policy";
 import { notebookCells } from "@/lib/curator/notebook";
 import { changedLines, type ChangedLines } from "@/lib/curator/scope";
 import {
@@ -44,6 +45,7 @@ const LIMITS = {
 
 export interface PrFile {
   filename: string;
+  previous_filename?: string;
   status: string;
   additions: number;
   deletions: number;
@@ -149,10 +151,13 @@ export async function formatChanges(
   for (const file of ordered) {
     const header = `### ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})\n`;
     let body: string;
+    const excluded = snapshotExclusion(file.filename) ?? (file.previous_filename ? snapshotExclusion(file.previous_filename) : null);
     const notebook = file.filename.toLowerCase().endsWith(".ipynb") && file.status !== "removed"
       ? await readText(file.filename).then((raw) => (raw ? notebookText(raw) : null))
       : null;
-    if (notebook) {
+    if (excluded && fileKind(file.filename) === "text") {
+      body = `(содержимое исключено политикой файлов: ${excluded})\n`;
+    } else if (notebook) {
       body = "Ноутбук целиком — текущие ячейки кода и текста, без выводов:\n```\n" + notebook + "\n```\n";
     } else if (fileKind(file.filename) !== "text") {
       body = `(тип: ${fileKind(file.filename)}; полный текст в разбор не передаётся; +${file.additions}/-${file.deletions} строк)\n` +

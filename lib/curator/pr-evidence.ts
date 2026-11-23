@@ -6,6 +6,7 @@ import { sourceUnit, unitText, type SourceUnit } from "./context-parts";
 import { measureContext, type ContextLimits } from "./context-size";
 import { diffRangeMetadata, type DiffSource, type ReviewRepository } from "./pr-full-diff";
 import { lineRange } from "./scope";
+import { reviewFileExclusion } from "./snapshot-policy";
 const LINE_REFERENCE = /^(?:(?:строк[аи]?|стр\.?|lines?)\s*)?\d+(?:\s*[-–—]\s*\d+)?$/i;
 const citedRange = (location: FindingLocation) => LINE_REFERENCE.test(location.detail?.trim() ?? "") ? lineRange(location.detail) : null;
 
@@ -49,7 +50,7 @@ export async function collectPrEvidence(owner: EvidenceOwner, locations: Finding
     }
   }
   const units = [...new Map(selected.map(u => [u.id, u])).values()];
-  const files = new Map(owner.files.filter(f => f.status === "ok" && typeof f.text === "string" &&
+  const files = new Map(owner.files.filter(f => !reviewFileExclusion(f.path, repository.changes) && f.status === "ok" && typeof f.text === "string" &&
     f.sha === (f.revision === "head" ? repository.head : repository.mergeBase))
     .map(f => [JSON.stringify([f.path, f.revision]), f]));
   const diff = await Promise.all(units.map(async u => ({ metadata: diffRangeMetadata(u), text: await unitText(u) })));

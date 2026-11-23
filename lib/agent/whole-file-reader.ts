@@ -1,5 +1,5 @@
 import type { ReviewRepository } from "@/lib/curator/pr-full-diff";
-import { sensitivePath } from "@/lib/curator/snapshot-policy";
+import { reviewFileExclusion } from "@/lib/curator/snapshot-policy";
 import { measureContext, type ContextLimits } from "@/lib/curator/context-size";
 import { ExecutionBudgetError, type ExecutionBudget } from "@/lib/llm/execution";
 
@@ -36,7 +36,8 @@ export function createWholeFileReader(options: WholeFileReaderOptions) {
         denied.push(result); return result; };
       if (stalled) return refuse("no_progress: repeated identical request; finish with explicit unresolved questions");
       if (typeof path !== "string" || !["head", "base"].includes(revision)) return refuse("invalid_request");
-      if (sensitivePath(path)) return refuse("sensitive file: contents not transmitted");
+      const exclusion = reviewFileExclusion(path, options.repository.changes);
+      if (exclusion) return refuse(`file policy: contents not transmitted (${exclusion})`);
       const existing = available.get(key);
       if (existing) return { status: "already_available", path, revision, sha: existing.sha, blob: existing.blob, reason: "full file is already in this conversation" };
       let file;

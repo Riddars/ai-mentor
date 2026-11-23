@@ -10,7 +10,7 @@
     "test:private-pr": "tsx scripts/private-pr-selftest.mts",
     "test:reviews": "tsx scripts/private-pr-selftest.mts",
     "test:context": "tsx scripts/context-parts-selftest.mts && tsx scripts/map-pipeline-selftest.mts && tsx scripts/map-queue-selftest.mts && tsx scripts/context-transport-selftest.mts && tsx scripts/notes-acceptance-selftest.mts",
-    "test:pr-context": "tsx scripts/pr-context-selftest.mts && tsx scripts/pr-evidence-selftest.mts && tsx scripts/pr-prior-selftest.mts && tsx scripts/pr-pipeline-selftest.mts",
+    "test:pr-context": "tsx scripts/pr-context-selftest.mts && tsx scripts/pr-file-policy-selftest.mts && tsx scripts/pr-evidence-selftest.mts && tsx scripts/pr-prior-selftest.mts && tsx scripts/pr-pipeline-selftest.mts",
     "test:context-recovery": "tsx scripts/pr-recovery-selftest.mts && tsx scripts/context-queue-selftest.mts",
     "test:review-migration": "tsx scripts/review-migration-selftest.mts",
     "test:inactivity": "tsx scripts/inactivity-selftest.mts",
