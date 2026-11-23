@@ -59,6 +59,22 @@ try {
     return answer({ status: "confirmed", reason: "Source proves the reversed condition" });
   } }, result.findings, []);
   assert.equal(verified.accepted.length, 1);
+  const mixedReply = { summary: "Two candidates", findings: [
+    { ...finding, source_ids: finding.sourceIds },
+    { ...finding, title: "Invalid category", area: "documentation", source_ids: finding.sourceIds },
+  ], unresolved: [] };
+  let mixedRepairs = 0;
+  const salvaged = await searchProject({ ...options, store: memoryPipelineStore(), ask: async (messages, call) => {
+    if (call?.phase === "json_repair") {
+      mixedRepairs++;
+      assert.match(messages[0].content, /findings\[1\]\.area: allowed values are code, data, methodology/);
+    }
+    return answer(mixedReply);
+  } });
+  assert.equal(mixedRepairs, 2);
+  assert.deepEqual(salvaged.findings.map(candidate => candidate.title), [finding.title]);
+  assert.equal((await verifyProjectCandidates({ ...options, store: memoryPipelineStore(),
+    ask: async () => answer({ status: "confirmed", reason: "Source confirms the remaining candidate" }) }, salvaged.findings, [])).accepted.length, 1);
   const restricted = { ...finding, locations: [{ kind: "data" as const, target: "data.csv", detail: "1" }] };
   const missing = await verifyProjectCandidates({ ...options, ask: async () => { throw new Error("metadata is not evidence"); } }, [restricted], []);
   assert.equal(missing.accepted.length, 0); assert.equal(missing.unresolved.length, 1);

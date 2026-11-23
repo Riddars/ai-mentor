@@ -20,26 +20,62 @@ export interface AuditPipelineOptions {
   configuration?: string;
 }
 const text = (v: unknown, max = 4000): v is string => typeof v === "string" && !!v.trim() && v.length <= max;
-export function decodeAuditSearch(raw: string, sources: Set<string>): SearchAnswer | null {
+function validateAuditSearch(raw: string, sources: Set<string>) {
+  const errors: string[] = [];
+  let value;
   try {
-    const v = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, ""));
-    if (!text(v.summary, 1500) || !Array.isArray(v.findings) || v.findings.length > 30 || !Array.isArray(v.unresolved) ||
-      v.unresolved.length > 20 || !v.unresolved.every((s: unknown) => text(s, 1000))) return null;
-    const findings: AuditCandidate[] = [];
-    for (const f of v.findings) {
-      if (!f || !text(f.title, 200) || !["description", "evidence", "impact", "recommendation", "verify"].every(k => text(f[k])) ||
-        !FINDING_AREAS.includes(f.area) || !SEVERITIES.includes(f.severity) || !Array.isArray(f.locations) || !f.locations.length || f.locations.length > 20 ||
-        !f.locations.every((l: { kind: string; target: unknown; detail: unknown }) => l && LOCATION_KINDS.includes(l.kind as never) && l.kind !== "other" && text(l.target, 1000) && text(l.detail, 1000)) ||
-        !Array.isArray(f.source_ids) || !f.source_ids.length || !f.source_ids.every((id: unknown) => typeof id === "string" && sources.has(id))) return null;
-      findings.push({ priorId: null, status: "open", title: f.title, area: f.area, severity: f.severity, description: f.description,
-        evidence: f.evidence, impact: f.impact, recommendation: f.recommendation, verify: f.verify, locations: f.locations, sourceIds: f.source_ids });
+    value = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""));
+  } catch {
+    return { answer: null, errors: ["Expected valid JSON"] };
+  }
+  if (!text(value?.summary, 1500)) errors.push("summary: expected non-empty string up to 1500 characters");
+  if (!Array.isArray(value?.findings) || value.findings.length > 30) errors.push("findings: expected array of up to 30 entries");
+  if (!Array.isArray(value?.unresolved) || value.unresolved.length > 20 ||
+      !value.unresolved.every((entry: unknown) => text(entry, 1000))) errors.push("unresolved: expected up to 20 non-empty strings of at most 1000 characters");
+  if (errors.length) return { answer: null, errors };
+
+  const findings: AuditCandidate[] = [];
+  for (const [index, finding] of value.findings.entries()) {
+    const field = `findings[${index}]`;
+    const before = errors.length;
+    if (!text(finding?.title, 200)) errors.push(`${field}.title: expected non-empty string up to 200 characters`);
+    for (const key of ["description", "evidence", "impact", "recommendation", "verify"]) {
+      if (!text(finding?.[key])) errors.push(`${field}.${key}: expected non-empty string up to 4000 characters`);
     }
-    return { summary: v.summary, findings, unresolved: v.unresolved };
-  } catch { return null; }
+    if (!FINDING_AREAS.includes(finding?.area)) errors.push(`${field}.area: allowed values are ${FINDING_AREAS.join(", ")}`);
+    if (!SEVERITIES.includes(finding?.severity)) errors.push(`${field}.severity: allowed values are ${SEVERITIES.join(", ")}`);
+    if (!Array.isArray(finding?.locations) || !finding.locations.length || finding.locations.length > 20) {
+      errors.push(`${field}.locations: expected 1 to 20 locations`);
+    } else {
+      for (const [i, location] of finding.locations.entries()) {
+        const prefix = `${field}.locations[${i}]`;
+        if (!LOCATION_KINDS.includes(location?.kind) || location.kind === "other") errors.push(`${prefix}.kind: allowed values are file, document, data`);
+        for (const key of ["target", "detail"]) {
+          if (!text(location?.[key], 1000)) errors.push(`${prefix}.${key}: expected non-empty string up to 1000 characters`);
+        }
+      }
+    }
+    if (!Array.isArray(finding?.source_ids) || !finding.source_ids.length ||
+        !finding.source_ids.every((id: unknown) => typeof id === "string" && sources.has(id))) {
+      errors.push(`${field}.source_ids: use non-empty list of source IDs from the original request, without inventing IDs`);
+    }
+    if (errors.length !== before) continue;
+    findings.push({ priorId: null, status: "open", title: finding.title, area: finding.area, severity: finding.severity,
+      description: finding.description, evidence: finding.evidence, impact: finding.impact, recommendation: finding.recommendation,
+      verify: finding.verify, locations: finding.locations, sourceIds: finding.source_ids });
+  }
+  const answer: SearchAnswer = { summary: value.summary, findings, unresolved: value.unresolved };
+  return { answer, errors };
+}
+
+export function decodeAuditSearch(raw: string, sources: Set<string>): SearchAnswer | null {
+  const { answer, errors } = validateAuditSearch(raw, sources);
+  return errors.length ? null : answer;
 }
 /** Durable transport + bounded schema repair. Invalid/unknown responses never become findings. */
 async function request<T>(options: AuditPipelineOptions, id: string, messages: ChatMessage[], decode: (raw: string) => T | null, schema: string,
-  limits = options.limits, phase: ChatOptions["phase"] = "research"): Promise<T> {
+  limits = options.limits, phase: ChatOptions["phase"] = "research",
+  recovery?: { validationError: (raw: string) => string; salvage: (raw: string) => T | null }): Promise<T> {
   if (!measureContext(messages, limits).fits) throw new Error("context_limit: audit request does not fit");
   const validKey = hashText(JSON.stringify([AUDIT_VERSION, messages, limits.outputTokens, schema]));
   const valid = options.store.load("audit-valid:" + id, validKey);
@@ -55,8 +91,13 @@ async function request<T>(options: AuditPipelineOptions, id: string, messages: C
     options.store.save(id, key, answer);
   }
   const repaired = await repairSchema(answer, decode, { id, hash: key, schema, limits, budget: options.budget,
-    reserve: 0, store: options.store, ask: options.ask ?? chat, fallbackContextTokens: options.fallbackContextTokens });
-  if (repaired.value === null) throw new Error("invalid_format: project audit response");
+    reserve: 0, store: options.store, ask: options.ask ?? chat, fallbackContextTokens: options.fallbackContextTokens,
+    validationError: recovery?.validationError });
+  if (repaired.value === null) {
+    const recovered = recovery?.salvage(repaired.answer.content) ?? recovery?.salvage(answer.content);
+    if (recovered !== null && recovered !== undefined) return recovered;
+    throw new Error("invalid_format: project audit response");
+  }
   options.store.save("audit-valid:" + id, validKey, repaired.answer);
   return repaired.value;
 }
@@ -103,8 +144,15 @@ export async function searchProject(options: AuditPipelineOptions): Promise<Sear
     const limits = replacements.limits(part);
     try {
       const messages = await rebuildPartRequest(part, template(false, limits));
+      const sourceIds = new Set(part.units.map(u => u.source.id));
       const result = await request(options, "audit-search:" + part.id, messages,
-        raw => decodeAuditSearch(raw, new Set(part.units.map(u => u.source.id))), projectAuditPrompt(), limits);
+        raw => decodeAuditSearch(raw, sourceIds), projectAuditPrompt(), limits, "research", {
+          validationError: raw => validateAuditSearch(raw, sourceIds).errors.slice(0, 30).join("\n"),
+          salvage: raw => {
+            const { answer } = validateAuditSearch(raw, sourceIds);
+            return answer?.findings.length ? answer : null;
+          },
+        });
       findings.push(...result.findings); unresolved.push(...result.unresolved); summaries.push(result.summary);
       coverage.push(...part.units.map(u => ({ source: u.source.id, from: u.from, to: u.to })));
     } catch (error) {
