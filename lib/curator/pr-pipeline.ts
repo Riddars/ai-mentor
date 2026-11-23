@@ -272,7 +272,13 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
         const repaired = await repairSchema({ content: run.text, provider: options.primary.provider, model: options.primary.model.id, usage: { input: 0, output: 0 } },
           raw => decodePrPart(raw, allowed, bounds), { id: "pr-node:" + key, hash: part.requestHash, schema: boundedPrompt(merging) + "\nДопустимые source_ids: " + JSON.stringify([...allowed]),
             limits: selectedLimits, budget, reserve: futureReserve, store, ask, fallbackContextTokens: options.fallback?.contextTokens });
-        const answer = repaired.value;
+        // A final node's change description is not passed to another merge request.
+        // Keep the schema strict for findings and bound the stored description.
+        const finalNode = parts.length === 1;
+        const recovered = !repaired.value && finalNode
+          ? decodePrPart(repaired.answer.content, allowed, { ...bounds, changes: Infinity })
+          : null;
+        const answer = repaired.value ?? (recovered && { ...recovered, changes: recovered.changes.slice(0, bounds.changes) });
         if (!answer) throw new Error("invalid_format: PR response failed schema validation");
         node = { id: key, answer, units: merging ? part.units.flatMap(u => previousNodes.get(u.source.id)!.units) : part.units, files: run.files, denied: run.denied, capabilityKey: options.capabilityKey,
           refs: merging ? Object.fromEntries(part.units.map(u => [u.source.id, [...new Set(previousNodes.get(u.source.id)!.units.map(v => v.source.id))]])) : undefined };
