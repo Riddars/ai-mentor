@@ -11,6 +11,7 @@ import { memoryGap } from "@/lib/curator/memory";
 import { recordJobEvent } from "@/lib/curator/diagnostics";
 import { blockedPipelineConfiguration, PipelineWaitError, hasSavedPipelineFinal, pipelineDailyLiability, waitPipelineJob, wakeChangedPipelineJobs } from "./pipeline-job";
 import { executeProjectAuditJob } from "./project-audit";
+import { syncProjectFindingsIssues } from "./project-findings-issue";
 import { completedAudit } from "./project-audit-store";
 import { executeOverviewJob, overviewTokenLimit, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
@@ -58,6 +59,7 @@ import {
 
 const TICK_MS = 15_000;
 const SWEEP_MS = 10 * 60_000;
+const FINDINGS_ISSUE_SYNC_MS = 60_000;
 const HEARTBEAT_MS = 5 * 60_000;
 
 export interface OverviewJobResult {
@@ -479,6 +481,8 @@ const inFlight = new Set<number>();
 let lastActivitySweep = 0;
 let lastSweep = 0;
 let lastHeartbeat = 0;
+let nextFindingsIssueSync = 0;
+let syncingFindingsIssues = false;
 
 async function tick(): Promise<void> {
   // A job left "running" by a crashed run would block its project until a restart.
@@ -503,6 +507,16 @@ async function tick(): Promise<void> {
         .catch((error) => console.error(`[queue] job ${job.id} crashed:`, error))
         .finally(() => inFlight.delete(job.id));
     }
+  }
+
+  if (!syncingFindingsIssues && Date.now() >= nextFindingsIssueSync) {
+    syncingFindingsIssues = true;
+    void syncProjectFindingsIssues()
+      .catch(error => console.error("[findings issue] sync failed:", error))
+      .finally(() => {
+        nextFindingsIssueSync = Date.now() + FINDINGS_ISSUE_SYNC_MS;
+        syncingFindingsIssues = false;
+      });
   }
 
   if (Date.now() - lastSweep >= SWEEP_MS) {

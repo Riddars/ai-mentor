@@ -1,3 +1,6 @@
+import { publicText } from "@/lib/github/public-text";
+import { projectFindingsIssueNumber } from "@/lib/curator/project-findings-issue";
+export { publicText } from "@/lib/github/public-text";
 import { withPrLock } from "@/lib/curator/pr-lock";
 import { githubRequest } from "@/lib/github/api";
 import { getInstallationToken } from "@/lib/github/auth";
@@ -189,26 +192,6 @@ export function parseModelJson(raw: string): ReconcileResult | null {
 
   const summary = typeof obj.summary === "string" ? obj.summary.trim() : "";
   return { summary, findings, notes: str(obj.notes), refreshOverview: str(obj.refresh_overview) };
-}
-
-/**
- * Model text for a public comment: no @-mentions (GitHub would notify those people), no links
- * and no raw HTML (the text may come from the student's materials). Code spans and blocks are
- * left as they are: GitHub neither links, mentions nor renders HTML inside them.
- */
-export function publicText(text: string): string {
-  return text
-    .split(/(```[\s\S]*?```|`[^`\n]*`)/)
-    .map((part, i) =>
-      i % 2 === 1
-        ? part
-        : part
-            .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-            .replace(/\b(?:https?:\/\/|www\.)[^\s`]*[^\s`.,;:!?)»"']/gi, (url) => `\`${url}\``)
-            .replace(/(^|[^\w])@(?=[A-Za-z0-9])/g, "$1@\u200b")
-            .replace(/</g, "&lt;"),
-    )
-    .join("");
 }
 
 /** A quoted fragment as a code block; the fence is longer than any backtick run inside. */
@@ -978,9 +961,12 @@ export async function executeCommitJob(
     }
   }
   if (!stagedJobPublication(jobId) && !isCurrent()) throw new StaleReviewError();
-  const stage = (result: ReviewOutcome) => stageJobPublication(
-    jobId, result.analysisId, `review-${jobId}`, result.comment,
-  );
+  const stage = (result: ReviewOutcome) => {
+    const project = getProjectByRepo(params.owner, params.repo);
+    const issue = project && (result.outcome === "ok" || result.outcome === "partial") ? projectFindingsIssueNumber(project.id) : null;
+    const body = issue === null ? result.comment : `${result.comment.trimEnd()}\n\n[Открытые замечания проекта](https://github.com/${params.owner}/${params.repo}/issues/${issue})`;
+    stageJobPublication(jobId, result.analysisId, `review-${jobId}`, body);
+  };
   if (!stagedJobPublication(jobId)) {
     await runReview(params, prId, "commit", {
       isCurrent,

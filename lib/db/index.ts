@@ -450,6 +450,13 @@ function migrate(db: DatabaseSync): void {
       throw error;
     }
   }
+  if (version < 25) {
+    db.exec(`CREATE TABLE IF NOT EXISTS project_findings_issues (
+      project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      issue_number INTEGER NOT NULL,
+      body_hash TEXT NOT NULL
+    ); PRAGMA user_version = 25;`);
+  }
 
 }
 

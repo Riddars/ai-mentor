@@ -93,6 +93,43 @@ try {
   assert.equal(firstAnalysis.summary, "Поиск завершён: новых подтверждённых замечаний 1.");
   assert.ok(!firstAnalysis.comment!.includes("CSV values"));
   assert.ok(JSON.stringify(getDb().prepare("SELECT diagnostics_json FROM analyses WHERE id=?").get(firstAnalysis.id)).includes("CSV values"));
+  const { syncProjectFindingsIssues, projectFindingsIssueNumber } = await import("@/lib/curator/project-findings-issue");
+  const originalFetch = globalThis.fetch;
+  let published = "";
+  const methods: string[] = [];
+  const findingForIssue = getDb().prepare("SELECT id FROM findings WHERE scope='project'").get()!.id;
+  try {
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const method = init?.method ?? "GET";
+      if (url.pathname === "/repos/sample/project/issues" && method === "GET") return Response.json([]);
+      if (url.pathname === "/repos/sample/project/issues" || url.pathname === "/repos/sample/project/issues/86") {
+        methods.push(method);
+        published = JSON.parse(String(init?.body)).body;
+        return Response.json({ number: 86 });
+      }
+      return originalFetch(input, init);
+    };
+    await syncProjectFindingsIssues();
+    assert.equal(projectFindingsIssueNumber(project), 86);
+    assert.match(published, /<summary>.*Expiry reversed/);
+    assert.match(published, /Expiration test/);
+    await syncProjectFindingsIssues();
+    assert.deepEqual(methods, ["POST"]);
+    getDb().prepare("UPDATE findings SET status='pending' WHERE id=?").run(findingForIssue);
+    await syncProjectFindingsIssues();
+    assert.match(published, /Expiry reversed.*ждёт подтверждения/);
+    getDb().prepare("UPDATE findings SET status='closed' WHERE id=?").run(findingForIssue);
+    await syncProjectFindingsIssues();
+    assert.match(published, /Открытых замечаний сейчас нет/);
+    assert.doesNotMatch(published, /Expiry reversed/);
+    getDb().prepare("UPDATE findings SET status='open', scope='branch' WHERE id=?").run(findingForIssue);
+    await syncProjectFindingsIssues();
+    assert.deepEqual(methods, ["POST", "PATCH", "PATCH"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    getDb().prepare("UPDATE findings SET status='open', scope='project' WHERE id=?").run(findingForIssue);
+  }
   const legacyId = store.recordAnalysis({ prId: first.prId, headSha: sha, trigger: "project_audit", outcome: "partial",
     summary: "Поиск с ограничениями: новых подтверждённых замечаний 1, непроверенных вопросов 6.",
     rawResponse: JSON.stringify({ result: { accepted: [{ title: "Confirmed legacy issue" }] } }) });
@@ -172,7 +209,7 @@ try {
   assert.equal(scalar("SELECT COUNT(*) AS n FROM project_maps"), 0);
   assert.equal(scalar("SELECT COUNT(*) AS n FROM project_audit_runs"), 0);
   assert.equal(scalar("SELECT COUNT(*) AS n FROM context_pipeline_parts"), 0);
-  assert.equal(getDb().prepare("PRAGMA user_version").get()!.user_version, 24);
+  assert.equal(getDb().prepare("PRAGMA user_version").get()!.user_version, 25);
   console.log("ok audit queue: retry without repeated search, stale SHA, disabled/paused guards, no artificial PR and cascade cleanup");
 
   auditPhase = false;
