@@ -4,6 +4,7 @@ import { useActionState } from "react";
 import { restartReviewAction } from "@/app/actions/reviews";
 import type { ActionState } from "@/app/actions/admin";
 import { Button } from "@/components/ui/Button";
+import { Spinner } from "@/components/ui/Spinner";
 import { FormMessage } from "@/components/admin/fields";
 
 export function RestartReviewButton({ prId }: { prId: number }) {
@@ -12,7 +13,8 @@ export function RestartReviewButton({ prId }: { prId: number }) {
     <form action={action} className="flex items-center gap-3">
       <input type="hidden" name="prId" value={prId} />
       <Button type="submit" size="sm" variant="outline" disabled={pending}>
-        Перезапустить разбор
+        {pending && <Spinner />}
+        {pending ? "Перезапускается…" : "Перезапустить разбор"}
       </Button>
       <FormMessage state={state} />
     </form>

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { LiveStatusRefresh } from "@/components/LiveStatusRefresh";
 import "@fontsource-variable/inter/wght.css";
 import "./globals.css";
 
@@ -10,7 +11,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="ru" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        <LiveStatusRefresh />
+      </body>
     </html>
   );
 }

@@ -36,6 +36,7 @@ import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CollapsibleCard } from "@/components/ui/Collapsible";
 import { RestartReviewButton } from "@/components/RestartReviewButton";
 import { ProjectNotes, StartOverviewButton, StartProjectAuditButton } from "@/components/ProjectNotes";
+import { Spinner } from "@/components/ui/Spinner";
 import { latestProjectMap, latestProjectAudit, projectAuditEnabled } from "@/lib/curator/project-audit-store";
 import { getMemorySha } from "@/lib/curator/store";
 import { cn } from "@/lib/utils";
@@ -157,7 +158,8 @@ export default async function ProjectPage({
                 </p>
               ))}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
-                <span>
+                <span role="status">
+                  {overviewJob?.status === "running" && <Spinner />}
                   Полный обзор: {overviewState(overviewJob?.status ?? null, lastOverview)}
                   {overviewIssue !== null && (
                     <>
@@ -177,7 +179,8 @@ export default async function ProjectPage({
               </div>
               {projectAuditEnabled() && (
                 <div className="flex flex-col gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
-                  <p>
+                  <p role="status">
+                    {audit?.status === "running" && <Spinner />}
                     Поиск проблем: {audit ? audit.status === "running" ? "выполняется" : audit.status === "queued" ? "в очереди" : auditAnalysis?.summary ?? audit.lastError ?? "не завершён" : "ещё не запускался"}
                     {audit && <> · версия <code>{audit.sha.slice(0, 7)}</code></>}
                     {audit?.analysisId && <> · <Link className="hover:text-foreground hover:underline" href={`/projects/${projectId}/analyses/${audit.analysisId}`}>Результат</Link></>}
