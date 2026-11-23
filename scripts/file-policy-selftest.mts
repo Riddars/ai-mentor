@@ -59,7 +59,7 @@ try {
   writeFileSync(join(root, "unread.py"), "not actually viewed\n");
   for (let i = 0; i < 100; i++) await cappedRead({ from: 499, to: 500 });
   const refused = await capped.read_file.execute("test", { path: "unread.py" } as never);
-  assert(refused.content.some((part) => part.type === "text" && part.text.includes("Лимит текста")), "exhausted budget did not refuse");
+  assert(cappedLog.outputExhausted && !refused.content.some((part) => part.type === "text" && part.text.includes("not actually viewed")), "exhausted budget did not refuse");
   assert(!cappedLog.viewed.has("unread.py"), "refused file counted as viewed");
   console.log("file policy checks passed");
 } finally {
