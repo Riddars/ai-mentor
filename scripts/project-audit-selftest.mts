@@ -42,7 +42,7 @@ try {
   let calls = 0;
   const options: AuditPipelineOptions = { sources: inventory.sources, excluded: inventory.excluded,
     input: { sha: "a".repeat(40), map: "Project map", notes: "Supervisor requirements", requirements: { "RESEARCH.md": "deadline requirement" }, history: [] },
-    budget: budget(), store: memoryPipelineStore(), limits: { contextTokens: 128000, outputTokens: 8000 },
+    budget: budget(), store: memoryPipelineStore(), limits: { contextTokens: 128000, outputTokens: 15000 },
     ask: async messages => {
       calls++;
       const raw = JSON.stringify(messages);

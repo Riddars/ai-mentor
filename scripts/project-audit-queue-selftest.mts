@@ -43,6 +43,7 @@ globalThis.fetch = async (input, init) => {
     const system = String(body.messages[0].content), user = String(body.messages[1].content);
     let value: unknown;
     if (system.includes("при подключении, а не изменения PR")) {
+      assert.equal(body.max_tokens, 15000, "project search must send the raised output limit to the provider");
       searchCalls++;
       assert.ok(!user.includes("CSV_PRIVATE_VALUES")); assert.ok(user.includes("Expiry must be in the future"));
       sourceId = /"sourceId":"([^"]+)","path":"code.ts"/.exec(user)![1];

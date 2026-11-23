@@ -93,7 +93,7 @@ export async function executeProjectAuditJob(job: ReviewJob, cacheOnly = false, 
         saveAuditInput(job.id, input);
         const options: AuditPipelineOptions = { sources: inventory.sources, excluded: inventory.excluded, input, budget, store,
           configuration,
-          limits: { contextTokens, outputTokens: 8000, safetyRatio: 0.15 }, fallbackContextTokens, ask: deps.ask };
+          limits: { contextTokens, outputTokens: 15000, safetyRatio: 0.15 }, fallbackContextTokens, ask: deps.ask };
         search = await searchProject(options);
         for (let attempt = 0; attempt < 3; attempt++) {
           const history = loadAuditHistory(project.id), notesId = getProjectNotes(project.id)?.id ?? null;
