@@ -6,7 +6,7 @@ import { initialMapPrompt, prContextPrompt, prContextVerifyPrompt, projectAuditP
 import { recentTokens } from "./store";
 import { SNAPSHOT_POLICY_VERSION } from "./snapshot-policy";
 
-export const CONTEXT_PIPELINE_VERSION = "context-v3.4";
+export const CONTEXT_PIPELINE_VERSION = "context-v3.5";
 export function pipelineConfigurationFingerprint(): string {
   const settings = ["LLM_PROVIDER", "LLM_MODEL", "AGENT_MODEL", "LLM_FALLBACK_PROVIDER", "LLM_FALLBACK_MODEL",
     "PR_CONTEXT_TOKENS", "INITIAL_MAP_CONTEXT_TOKENS", "LLM_FALLBACK_CONTEXT_TOKENS", "PR_TOKENS_PER_RUN", "OVERVIEW_TOKENS_PER_RUN", "PR_TIMEOUT_MS", "INITIAL_OVERVIEW_MODE", "TOKENS_PER_DAY", "TOKENS_PER_PROJECT_DAY",

@@ -17,8 +17,8 @@ import type { ChangedLines } from "./scope";
 
 interface Candidate { finding: ReconciledFinding; sourceIds: string[]; rootCause: string }
 interface PartAnswer { summary: string; changes: string; unresolved: string[]; refreshOverview: string | null; candidates: Candidate[] }
-interface DescriptionBounds { summary: number; changes: number; question: number }
-const DEFAULT_BOUNDS: DescriptionBounds = { summary: 1500, changes: 4000, question: 150 };
+interface DescriptionBounds { summary: number; changes: number }
+const DEFAULT_BOUNDS: DescriptionBounds = { summary: 1500, changes: 4000 };
 export interface PrNode { id: string; answer: PartAnswer; units: SourceUnit[]; files: ReadWholeFileResult[]; denied: ReadWholeFileResult[]; refs?: Record<string, string[]>; fullEvidence?: boolean; capabilityKey?: string }
 type Node = PrNode;
 export interface PrPipelineOptions {
@@ -49,7 +49,7 @@ export function decodePrPart(raw: string, allowed: Set<string>, bounds = DEFAULT
   try {
     const value = JSON.parse(raw.trim().replace(/^```(?:json)?\s*/, "").replace(/\s*```$/, "")) as Record<string, unknown>;
     if (!obj(value) || !nonempty(value.summary) || value.summary.length > bounds.summary || !nonempty(value.changes) || value.changes.length > bounds.changes ||
-      !Array.isArray(value.unresolved) || value.unresolved.length > 20 || !value.unresolved.every(s => nonempty(s) && s.length <= bounds.question) || !Array.isArray(value.findings) ||
+      !Array.isArray(value.unresolved) || value.unresolved.length > 20 || !value.unresolved.every(nonempty) || !Array.isArray(value.findings) ||
       !(value.refresh_overview === null || (typeof value.refresh_overview === "string" && value.refresh_overview.length <= 500))) return null;
     const candidates: Candidate[] = [];
     for (const item of value.findings) {
@@ -75,7 +75,7 @@ function description(node: Node, revision: string): ContextSource {
     const chars = JSON.stringify(path).length;
     if (paths.length < 40 && pathChars + chars <= 4000) { paths.push(path); pathChars += chars; }
   }
-  const bytes = Buffer.from(JSON.stringify({ summary: node.answer.summary, changes: node.answer.changes, unresolved: node.answer.unresolved,
+  const bytes = Buffer.from(JSON.stringify({ summary: node.answer.summary, changes: node.answer.changes, unresolvedCount: node.answer.unresolved.length,
     paths, additionalPaths: allPaths.length - paths.length }));
   const viewHash = hashText(bytes), id = hashText(node.id + viewHash);
   return { id, path: "description:" + node.id, revision, kind: "description", bytes: bytes.length, originalHash: viewHash, viewHash,
@@ -103,7 +103,7 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
   }
   let bounds = { ...DEFAULT_BOUNDS };
   const boundedPrompt = (merging: boolean) => prContextPrompt(merging) + `\nОграничения этого запуска: summary <= ${bounds.summary}, changes <= ${bounds.changes} символов; ` +
-    `unresolved — не более20 пунктов по${bounds.question} символов, при необходимости сгруппируй вопросы без потери существенных ограничений.`;
+    "unresolved — не более 20 пунктов. Формулируй вопросы кратко и конкретно.";
   const text = async (units: SourceUnit[]) => (await Promise.all(units.map(async unit => "=== MATERIAL " + JSON.stringify({ sourceId: unit.source.id,
     metadata: unit.source.kind === "diff" ? diffRangeMetadata(unit) : { path: unit.source.path } }) + " ===\n" + await unitText(unit) + "\n=== END MATERIAL ==="))).join("\n");
   const template = (merging: boolean, selectedLimits = limits) => ({ version: "pr-context-v3.4", limits: selectedLimits,
@@ -111,15 +111,15 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
     template: async (units: SourceUnit[]): Promise<ChatMessage[]> => [{ role: "system", content: boundedPrompt(merging) },
       { role: "user", content: options.context + "\nВерсии base/merge-base/head: " + revision + "\nНазначенные материалы:\n" + await text(units) }] });
   const worstAnswer = (): PartAnswer => ({ summary: "\\".repeat(bounds.summary), changes: "\\".repeat(bounds.changes),
-    unresolved: Array.from({ length: 20 }, () => "\\".repeat(bounds.question)), refreshOverview: null, candidates: [] });
+    unresolved: Array(20).fill(""), refreshOverview: null, candidates: [] });
   const worstPaths = [...repository.sources].sort((a, b) => JSON.stringify(b.path).length - JSON.stringify(a.path).length).slice(0, 40).map(s => sourceUnit(s));
   // A currently single request may become multipart after a smaller fallback/API window.
   while (repository.sources.length > 0) {
     const probe = ["a", "b"].map(id => description({ id: id.repeat(64), answer: worstAnswer(), units: worstPaths, files: [], denied: [] }, revision));
     if (measureContext(await template(true).template(probe.map(s => sourceUnit(s))), { ...limits,
       contextTokens: Math.min(limits.contextTokens, options.fallback?.contextTokens ?? limits.contextTokens) }).fits) break;
-    if (bounds.summary <= 64 && bounds.changes <= 128 && bounds.question <= 16) throw new Error("context_limit: context cannot merge bounded PR descriptions");
-    bounds = { summary: Math.max(64, Math.floor(bounds.summary * 0.75)), changes: Math.max(128, Math.floor(bounds.changes * 0.75)), question: Math.max(16, Math.floor(bounds.question * 0.75)) };
+    if (bounds.summary <= 64 && bounds.changes <= 128) throw new Error("context_limit: context cannot merge bounded PR descriptions");
+    bounds = { summary: Math.max(64, Math.floor(bounds.summary * 0.75)), changes: Math.max(128, Math.floor(bounds.changes * 0.75)) };
   }
   let parts = await packContext(repository.sources, template(false));
   const replacements = contextReplacements(store, limits, template);

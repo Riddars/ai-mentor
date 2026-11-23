@@ -30,12 +30,11 @@ const respond = (context: TranscriptContext) => {
   const merging = getCurrentSystemPrompt(context.messages).includes("Сопоставь ВСЕ описания");
   const system = getCurrentSystemPrompt(context.messages);
   const max = /summary <= (\d+), changes <= (\d+)/.exec(system);
-  const question = /пунктов по(\d+) символов/.exec(system);
   if (merging) integrationCalls++; else sourceCalls++;
   if (merging && conflicting && !injectedRead) { injectedRead = true; return fauxAssistantMessage(fauxToolCall("read_file", { path: "context.ts" }), { stopReason: "toolUse" }); }
   return fauxAssistantMessage(fauxText(JSON.stringify({ summary: fillBounds ? "\\".repeat(Number(max![1])) : "fixture reviewed",
     changes: fillBounds ? "\\".repeat(Number(max![2])) : merging ? "combined contracts from all parts" : "documented changes and contracts",
-    unresolved: fillBounds ? Array.from({ length: 20 }, () => "\\".repeat(Number(question![1]))) : forceUnresolved ? ["source question remains open"] : [], refresh_overview: null,
+    unresolved: fillBounds ? Array(20).fill("A long unresolved question. ".repeat(12)) : forceUnresolved ? ["source question remains open"] : [], refresh_overview: null,
     findings: !noFindings && (merging || (conflicting && materials.some(m => m.metadata?.change?.newPath === "a.ts")))
       ? [finding((merging ? materials : materials.filter(m => m.metadata?.change?.newPath === "a.ts")).map(m => m.sourceId))] : [] })));
 };
@@ -131,7 +130,8 @@ fillBounds = true; noFindings = true;
 const singleResult = await runPrPipeline({ ...options, repository: { ...repository, changes: [singleChange], sources: single },
   outputTokens: 8000, store: memoryPipelineStore(), budget: new ExecutionBudget({ maxTokens: 2000000, deadlineAt: Date.now() + 60000 }) });
 assert.ok(integrationCalls > beforeSingleMerge, "a single huge file also adapts descriptions for multipart reduction");
-assert.equal(singleResult.quality, "limited", "max-sized unresolved entries remain explicit");
+assert.equal(singleResult.quality, "limited", "long unresolved entries remain explicit");
+assert.ok((singleResult.diagnostics.unresolved as string[]).includes("A long unresolved question. ".repeat(12)));
 fillBounds = false; noFindings = false;
 noFindings = true;
 const crashStore = memoryPipelineStore();
