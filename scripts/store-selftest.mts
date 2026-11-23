@@ -139,8 +139,9 @@ const result = reconcile(prB, [finding("x", [], "closed", second)], changes(["sr
 check("fix not visible in the PR's changes is not accepted", row(second).status === "open" && result.kept.some((k) => k.fixNotCounted));
 const comment = renderComment({ summary: "s", findings: [] }, result.statusChanges, { kept: result.kept });
 check("comment says the fix was not counted", comment.includes("не засчитано как исправленное"), comment);
-const shortComment = renderComment({ summary: "s", findings: [] }, []);
-check("comment with no findings shows just the summary", shortComment.trim().endsWith("s") && shortComment.split("\n").filter(Boolean).length === 2, shortComment);
+const shortComment = renderComment({ summary: "Internal summary about .gitignore", findings: [] }, []);
+check("comment with no findings shows only the confirmation result", shortComment.includes("Подтверждённых замечаний по этим изменениям нет.") &&
+  !shortComment.includes(".gitignore") && shortComment.split("\n").filter(Boolean).length === 2, shortComment);
 
 // A is merged into main: its branch findings become the project's.
 store.recordPullRequestClosed(prA, "merged-default");

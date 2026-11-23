@@ -215,13 +215,8 @@ export function renderComment(
   );
 
   const parts: string[] = [COMMENT_MARKER, ""];
-  if (result.summary) {
-    // Internal finding ids mean nothing to the student.
-    const summary = result.summary.replace(/\s*\(?\bid\s*=\s*\d+\)?/gi, "").replace(/(находк\S*)\s+#\d+/gi, "$1");
-    parts.push(publicText(summary), "");
-  }
   if (open.length === 0) {
-    if (!result.summary) parts.push("Подтверждённых замечаний по этим изменениям нет.", "");
+    parts.push("Подтверждённых замечаний по этим изменениям нет.", "");
   } else {
     // Most serious first: the list on top and the sections below keep the same numbers.
     const sorted = [...open].sort((a, b) => severityRank(b.severity ?? null) - severityRank(a.severity ?? null));
