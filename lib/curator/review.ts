@@ -7,7 +7,7 @@ import { chat, type ChatMessage, type ChatResult } from "@/lib/llm/chat";
 import { addSpend, emptySpend, mergeSpend, type Spend } from "@/lib/llm/spend";
 import { getConfig, reviewMode } from "@/lib/config";
 import { AgentProcessError, agentModel, withAgentRun } from "@/lib/agent/run";
-import { collectReviewContext, selectPriorFindings } from "@/lib/curator/context";
+import { collectReviewContext } from "@/lib/curator/context";
 import { isProjectMember } from "@/lib/github/members";
 import { advanceMemory } from "@/lib/curator/memory";
 import { verifyFindings } from "@/lib/curator/verify";
@@ -48,7 +48,6 @@ import {
   supersedeCommitJobs,
   upsertParticipant,
   upsertPullRequest,
-  type AnalysisMaterials,
   type AnalysisMode,
   type FindingStatus,
   type KeptFinding,
@@ -212,21 +211,6 @@ export function publicText(text: string): string {
     .join("");
 }
 
-/** What part of the PR the model saw, when not all of it; files the agent opened count as seen. */
-function coverageNote(materials: AnalysisMaterials, viewed: string[] = []): string | null {
-  const omitted = (materials.omitted ?? []).filter((f) => !viewed.includes(f));
-  const unlisted = materials.unlisted ?? 0;
-  if (omitted.length === 0 && unlisted === 0) return null;
-  const total = materials.files.length + unlisted;
-  const reviewed = materials.files.length - omitted.length;
-  const shown = omitted.slice(0, 10).join(", ");
-  const more = omitted.length > 10 ? ` и ещё ${omitted.length - 10}` : "";
-  return (
-    `_Проверено ${reviewed} из ${total} изменённых файлов; не проверено из-за объёма: ` +
-    `${shown || "—"}${more}${unlisted > 0 ? `, ещё ${unlisted} сверх лимита списка` : ""}._`
-  );
-}
-
 /** A quoted fragment as a code block; the fence is longer than any backtick run inside. */
 function codeBlock(text: string): string {
   const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((s) => s.length));
@@ -238,14 +222,10 @@ function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-/** Other open findings of the project listed under a PR comment, at most. */
-const OTHERS_SHOWN = 8;
-
 export function renderComment(
   result: ReconcileResult,
   changes: StatusChange[],
-  materials?: AnalysisMaterials,
-  extra: { kept?: KeptFinding[]; viewed?: string[] | null; others?: PriorFinding[] } = {},
+  extra: { kept?: KeptFinding[] } = {},
 ): string {
   const open = result.findings.filter(
     (f) => f.status === "open" || f.status === "reopened",
@@ -257,16 +237,8 @@ export function renderComment(
     const summary = result.summary.replace(/\s*\(?\bid\s*=\s*\d+\)?/gi, "").replace(/(находк\S*)\s+#\d+/gi, "$1");
     parts.push(publicText(summary), "");
   }
-  const coverage = materials ? coverageNote(materials, extra.viewed ?? []) : null;
-  if (coverage) parts.push(coverage, "");
   if (open.length === 0) {
-    parts.push(
-      coverage
-        ? "Существенных методических проблем в проверенной части не нашёл."
-        : "Существенных методических проблем в этих изменениях не нашёл.",
-      // A blank line keeps a following "---" a separator, not a heading underline.
-      "",
-    );
+    if (!result.summary) parts.push("Подтверждённых замечаний по этим изменениям нет.", "");
   } else {
     // Most serious first: the list on top and the sections below keep the same numbers.
     const sorted = [...open].sort((a, b) => severityRank(b.severity ?? null) - severityRank(a.severity ?? null));
@@ -307,18 +279,6 @@ export function renderComment(
     parts.push("");
   }
 
-  const others = extra.others ?? [];
-  if (others.length > 0) {
-    parts.push("---", `**Ещё открыто в проекте (${others.length}):**`);
-    for (const f of others.slice(0, OTHERS_SHOWN)) {
-      const origin = f.prNumber === 0 ? "обзор проекта" : `PR #${f.prNumber}`;
-      parts.push(`- ${publicText(f.title)} — ${severityLabel(f.severity)}, ${origin}`);
-    }
-    if (others.length > OTHERS_SHOWN) parts.push(`- и ещё ${others.length - OTHERS_SHOWN}`);
-    parts.push("");
-  }
-
-  parts.push("_Решение по каждой находке остаётся за студентом._");
   return parts.join("\n");
 }
 
@@ -527,15 +487,9 @@ async function runReview(
     const otherPr = new Set(open.filter((f) => f.prNumber !== params.prNumber).map((f) => f.id));
     const untouched = (f: ReconciledFinding) => f.priorId !== null && otherPr.has(f.priorId) && f.status === "open";
     const shown = { ...parsed, findings: parsed.findings.filter((f) => !untouched(f)) };
-    const mentioned = new Set([
-      ...statusChanges.map((c) => c.findingId),
-      ...kept.filter((k) => !otherPr.has(k.findingId) || k.fixNotCounted).map((k) => k.findingId),
-    ]);
-    const others = selectPriorFindings(open.filter((f) => !mentioned.has(f.id)), params.prNumber);
-
     return complete({
       analysisId,
-      comment: renderComment(shown, statusChanges, materials, { kept, viewed, others }),
+      comment: renderComment(shown, statusChanges, { kept }),
       outcome: "ok",
       summary: parsed.summary,
       statusChanges,
@@ -1046,7 +1000,7 @@ export async function executeCommitJob(
   if (checkRunId !== null) {
     const conclude = outcome === "ok" ? concludeCheck : concludeUnreviewedCheck;
     const summary = outcome === "ok" ? "Разбор изменений завершён." : outcome === "partial"
-      ? "Разбор с ограничениями. Подтверждённые замечания опубликованы; непроверенные вопросы сохранены." : "Не разобрано: ответ модели не удалось разобрать.";
+      ? "Подтверждённые замечания опубликованы в комментарии к PR." : "Не разобрано: ответ модели не удалось разобрать.";
     try {
       await conclude(params, checkRunId, summary);
     } catch (error) {

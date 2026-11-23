@@ -96,7 +96,7 @@ const realDeps: WorkerDeps = {
     if (job.checkRunId === null) return;
     const params = job.payload as ReviewParams;
     if (outcome === "ok") await concludeCheck(params, job.checkRunId, "Разбор изменений завершён.");
-    else await concludeUnreviewedCheck(params, job.checkRunId, outcome === "partial" ? "Разбор с ограничениями. Непроверенные вопросы сохранены." : "Не разобрано: ответ модели не удалось разобрать.");
+    else await concludeUnreviewedCheck(params, job.checkRunId, outcome === "partial" ? "Подтверждённые замечания опубликованы в комментарии к PR." : "Не разобрано: ответ модели не удалось разобрать.");
   },
   // A failed overview is already recorded with what it spent; it has no PR to report to.
   reportFailure: async (job) => {

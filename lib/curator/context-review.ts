@@ -1,5 +1,5 @@
 import { getDb } from "@/lib/db";
-import { collectFullReviewContext, selectPriorFindings } from "./context";
+import { collectFullReviewContext } from "./context";
 import { recordJobEvent, saveAnalysisDiagnostics } from "./diagnostics";
 import { hashText } from "./context-parts";
 import { runPrPipeline, type PrPipelineResult } from "./pr-pipeline";
@@ -90,9 +90,7 @@ export async function runContextReview(params: ReviewParams, prId: number, jobId
         allowNew: true, changed: completed.changed, fixesFinal, finalFixIds, branch: params.headRef ?? getPullRequest(prId)?.headRef ?? null,
       });
       afterReviewReconciliation(params, prId, "commit", fixesFinal, kept);
-      const others = selectPriorFindings(loadOpenFindings(prId).filter(f => !statusChanges.some(c => c.findingId === f.id) && !kept.some(k => k.findingId === f.id)), params.prNumber);
-      const limited = completed.quality === "limited" ? "\n\n**Разбор с ограничениями.** Непроверенные вопросы сохранены; прежние замечания не закрывались. Подробности видны руководителю.\n" : "";
-      const report: ReviewOutcome = { analysisId, comment: renderComment(completed.result, statusChanges, captured.materials, { kept, others }) + limited,
+      const report: ReviewOutcome = { analysisId, comment: renderComment(completed.result, statusChanges, { kept }),
         outcome, summary: completed.result.summary, statusChanges, kept };
       patchPipelineJob(jobId, { quality: completed.quality, recovery: "terminal", delivery: "pending", reason: completed.quality === "complete" ? "completed" : "limited" });
       context.stage?.(report);

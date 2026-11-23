@@ -137,12 +137,10 @@ check("another PR cannot reopen a pending fix", row(oldBug).status === "pending"
 // B calls the second project finding fixed without touching its file: not accepted.
 const result = reconcile(prB, [finding("x", [], "closed", second)], changes(["src/other.py", [1]]));
 check("fix not visible in the PR's changes is not accepted", row(second).status === "open" && result.kept.some((k) => k.fixNotCounted));
-const comment = renderComment({ summary: "s", findings: [] }, result.statusChanges, undefined, { kept: result.kept });
+const comment = renderComment({ summary: "s", findings: [] }, result.statusChanges, { kept: result.kept });
 check("comment says the fix was not counted", comment.includes("не засчитано как исправленное"), comment);
-const withOthers = renderComment({ summary: "s", findings: [] }, [], undefined, {
-  others: Array.from({ length: 10 }, (_, i) => ({ id: i, prNumber: i === 0 ? 0 : 3, area: null, severity: "critical" as const, title: `other ${i}`, locations: [], verify: null, status: "open" as const })),
-});
-check("comment lists other open findings of the project", withOthers.includes("Ещё открыто в проекте (10)") && withOthers.includes("обзор проекта") && withOthers.includes("и ещё 2"), withOthers);
+const shortComment = renderComment({ summary: "s", findings: [] }, []);
+check("comment with no findings shows just the summary", shortComment.trim().endsWith("s") && shortComment.split("\n").filter(Boolean).length === 2, shortComment);
 
 // A is merged into main: its branch findings become the project's.
 store.recordPullRequestClosed(prA, "merged-default");
