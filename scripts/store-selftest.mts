@@ -463,7 +463,7 @@ check(
 const ownKinds = store.usageByKind(30, undefined, own);
 check(
   "usage by kind: one project, every kind listed",
-  ownKinds.map((k) => `${k.kind}:${k.runs}/${k.failures}/${k.tokens}`).join(" ") === "commit:2/1/1600 comment:1/0/300 overview:1/0/2200",
+  ownKinds.map((k) => `${k.kind}:${k.runs}/${k.failures}/${k.tokens}`).join(" ") === "commit:2/1/1600 comment:1/0/300 overview:1/0/2200 project_audit:0/0/0",
   JSON.stringify(ownKinds),
 );
 check("usage by kind: the head sees more than one project", store.usageByKind(30).reduce((s, k) => s + k.tokens, 0) > 4100);
