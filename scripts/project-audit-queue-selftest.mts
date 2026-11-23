@@ -29,6 +29,7 @@ const sha = "a".repeat(40), notes = "### Суть\nTokens\n### Карта реп
 let head = sha, searchCalls = 0, verificationCalls = 0, failVerification = false, githubWrites = 0, auditPhase = false;
 let historyVerdict = "duplicate", sourceId = "", mapCalls = 0;
 let raceOnVerify = false, raceProject = 0;
+let unconfirmed = false;
 globalThis.fetch = async (input, init) => {
   const url = new URL(String(input)), path = url.pathname;
   if (path.endsWith("/installation")) return Response.json({ id: 7 });
@@ -45,14 +46,14 @@ globalThis.fetch = async (input, init) => {
       searchCalls++;
       assert.ok(!user.includes("CSV_PRIVATE_VALUES")); assert.ok(user.includes("Expiry must be in the future"));
       sourceId = /"sourceId":"([^"]+)","path":"code.ts"/.exec(user)![1];
-      value = { summary: "Existing expiry issue", unresolved: [], findings: [{ title: "Expiry reversed", area: "code", severity: "important", description: "Reversed comparison",
+      value = { summary: "Existing expiry issue", unresolved: ["CSV values were intentionally excluded"], findings: [{ title: "Expiry reversed", area: "code", severity: "important", description: "Reversed comparison",
         evidence: "expiry < Date.now()", impact: "Expired tokens accepted", recommendation: "Reverse condition", verify: "Expiration test",
         locations: [{ kind: "file", target: "code.ts", detail: "1" }], source_ids: [sourceId] }] };
     } else if (system.includes("Независимо проверь кандидата")) {
       verificationCalls++;
       if (failVerification) return new Response("unavailable", { status: 503 });
       if (raceOnVerify) { raceOnVerify = false; store.addProjectNotes(raceProject, "Changed supervisor requirement", { actor: "supervisor" }); }
-      value = { status: "confirmed", reason: "Source proves reversed expiry condition" };
+      value = { status: unconfirmed ? "unresolved" : "confirmed", reason: unconfirmed ? "Insufficient evidence for hypothesis" : "Source proves reversed expiry condition" };
     } else if (system.includes("полной историей")) {
       value = { status: historyVerdict, matchingIds: [1], reason: "Same source and cause" };
     } else { mapCalls++; value = { summary: "map", findings: [], notes }; }
@@ -84,6 +85,19 @@ try {
   assert.equal(searchCalls, 1); assert.equal(verificationCalls, 1);
   assert.equal(scalar("SELECT COUNT(*) AS n FROM findings WHERE scope='project' AND status='open'"), 1);
   assert.equal(auditStore.latestProjectAudit(project)!.status, "done");
+  const firstAnalysis = store.getAnalysis(auditStore.latestProjectAudit(project)!.analysisId!)!;
+  assert.equal(firstAnalysis.outcome, "ok", "normal exclusions do not make a completed search partial");
+  assert.equal(firstAnalysis.summary, "Поиск завершён: новых подтверждённых замечаний 1.");
+  assert.ok(!firstAnalysis.comment!.includes("CSV values"));
+  assert.ok(JSON.stringify(getDb().prepare("SELECT diagnostics_json FROM analyses WHERE id=?").get(firstAnalysis.id)).includes("CSV values"));
+  const legacyId = store.recordAnalysis({ prId: first.prId, headSha: sha, trigger: "project_audit", outcome: "partial",
+    summary: "Поиск с ограничениями: новых подтверждённых замечаний 1, непроверенных вопросов 6.",
+    rawResponse: JSON.stringify({ result: { accepted: [{ title: "Confirmed legacy issue" }] } }) });
+  store.setAnalysisComment(legacyId, "Непроверенный вопрос: legacy hypothesis");
+  assert.equal(store.getAnalysis(legacyId)!.outcome, "ok");
+  assert.ok(!store.getAnalysis(legacyId)!.comment!.includes("hypothesis"));
+  assert.equal(store.listProjectAnalyses(project).find(a => a.id === legacyId)!.outcome, "ok");
+  assert.equal(getDb().prepare("SELECT outcome FROM analyses WHERE id=?").get(legacyId)!.outcome, "partial", "legacy raw history stays immutable");
   assert.equal(store.getProjectNotes(project)!.body, notes);
   assert.equal(store.getMemorySha(project), sha);
   await executeProjectAuditJob(first); assert.equal(searchCalls, 1, "crash after commit must not rerun search");
@@ -107,10 +121,19 @@ try {
   console.log("ok audit queue: initial map without PR -> one audit, project findings, manual repeat, regressions, unchanged map/statuses and zero GitHub writes");
 
   historyVerdict = "duplicate";
+  unconfirmed = true;
+  await startProjectAudit(project); await runJob(nextAudit());
+  const unconfirmedAnalysis = store.getAnalysis(auditStore.latestProjectAudit(project)!.analysisId!)!;
+  assert.equal(unconfirmedAnalysis.outcome, "ok");
+  assert.equal(unconfirmedAnalysis.summary, "Поиск завершён: новых подтверждённых замечаний 0.");
+  assert.ok(!unconfirmedAnalysis.comment!.includes("Insufficient evidence"));
+  assert.equal(scalar("SELECT COUNT(*) AS n FROM findings"), 2);
+  unconfirmed = false;
   await startProjectAudit(project);
   failVerification = true;
   const interrupted = nextAudit(); await runJob(interrupted);
   assert.equal(auditStore.latestProjectAudit(project)!.status, "queued");
+  assert.equal(getDb().prepare("SELECT outcome FROM analyses WHERE json_extract(diagnostics_json,'$.jobId')=? ORDER BY id DESC LIMIT 1").get(interrupted.id)!.outcome, "error", "real transport failures remain incomplete");
   const searchesBefore = searchCalls;
   failVerification = false;
   getDb().prepare("UPDATE review_jobs SET run_after=datetime('now') WHERE id=?").run(interrupted.id);

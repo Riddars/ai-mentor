@@ -60,10 +60,11 @@ export default async function AnalysisPage({
   const requestDuration = calls.reduce((total, call) => total + (typeof call.durationMs === "number" ? call.durationMs :
     typeof call.startedAt === "number" && typeof call.endedAt === "number" ? Math.max(0,call.endedAt-call.startedAt) : 0),0);
   const duration = typeof diagnostics?.durationMs === "number" ? diagnostics.durationMs : requestDuration || null;
-  const reason = typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
+  const reason = analysis.trigger === "project_audit" && analysis.outcome === "ok" && diagnostics?.reason === "limited"
+    ? "completed" : typeof diagnostics?.reason === "string" ? diagnostics.reason : null;
   const deliveryState = typeof diagnostics?.delivery === "string" ? diagnostics.delivery :
     typeof delivery?.state === "string" ? delivery.state : typeof delivery?.status === "string" ? delivery.status : null;
-  const unresolved: Array<Record<string, unknown>> = [...questions.filter(question => ["pending", "blocked", "unresolved"].includes(String(question.status))),
+  const unresolved: Array<Record<string, unknown>> = analysis.trigger === "project_audit" ? [] : [...questions.filter(question => ["pending", "blocked", "unresolved"].includes(String(question.status))),
     ...(Array.isArray(diagnostics?.unresolved) ? diagnostics.unresolved.filter((q): q is string => typeof q === "string").map(question => ({ question })) : [])];
   const verification = diagnosticObject(diagnostics?.verification);
   const toolCalls = research?.toolCalls ?? budget?.toolCalls;

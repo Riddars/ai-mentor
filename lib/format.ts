@@ -172,13 +172,13 @@ export function outcomeLabel(outcome: string | null, trigger: string | null): st
     case "ok":
       return "выполнен";
     case "partial":
-      return "частичный обзор";
+      return trigger === "project_audit" ? "поиск не завершён" : "частичный обзор";
     case "parse_error":
       return "ответ модели не разобран";
     case "stale":
       return "устарел — пришёл новый коммит";
     case "error":
-      return trigger === "comment" ? "сбой сверки по ответу студента" : "ошибка разбора";
+      return trigger === "project_audit" ? "поиск не завершён" : trigger === "comment" ? "сбой сверки по ответу студента" : "ошибка разбора";
     default:
       return outcome;
   }

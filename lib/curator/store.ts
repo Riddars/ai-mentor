@@ -1,5 +1,6 @@
 import { getDb } from "@/lib/db";
 import type { FindingArea, FindingLocation, Severity } from "@/lib/curator/finding";
+import { presentProjectAudit } from "./project-audit-report";
 import { findingScope, fixVisible, type ChangedLines, type FindingScope } from "@/lib/curator/scope";
 
 // Репозиторий памяти проекта (этап 3). Тонкие функции над getDb(); никакой SQL за
@@ -456,7 +457,7 @@ export function getFindingHistory(findingId: number): StatusHistoryRow[] {
 }
 
 export function listProjectAnalyses(projectId: number): AnalysisRow[] {
-  return getDb()
+  const rows = getDb()
     .prepare(
       `SELECT a.id, pr.number AS prNumber, a.head_sha AS headSha, a.trigger, a.outcome,
               a.summary, a.created_at AS createdAt
@@ -466,6 +467,7 @@ export function listProjectAnalyses(projectId: number): AnalysisRow[] {
        ORDER BY a.created_at DESC, a.id DESC`,
     )
     .all({ projectId }) as unknown as AnalysisRow[];
+  return rows.map(presentProjectAudit);
 }
 
 export function getAnalysis(id: number): AnalysisDetail | null {
@@ -488,7 +490,7 @@ export function getAnalysis(id: number): AnalysisDetail | null {
     | undefined;
   if (!row) return null;
   return {
-    ...row,
+    ...presentProjectAudit(row),
     materials: parseJson<AnalysisMaterials>(row.materials),
     viewedFiles: parseJson<string[]>(row.viewedFiles),
   };

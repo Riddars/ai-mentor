@@ -9,10 +9,24 @@ import { ExecutionBudget, ContextWindowError } from "@/lib/llm/execution";
 import { assertUnitCoverage, sourceUnit } from "@/lib/curator/context-parts";
 import type { ChatMessage, ChatResult } from "@/lib/llm/chat";
 import type { AuditHistory } from "@/lib/curator/project-audit-store";
+import { presentProjectAudit, projectAuditReport, projectAuditSummary } from "@/lib/curator/project-audit-report";
+import { outcomeLabel } from "@/lib/format";
 
 const directory = await mkdtemp(join(tmpdir(), "project-audit-test-"));
 const budget = () => new ExecutionBudget({ maxTokens: 950000, deadlineAt: Date.now() + 60000 });
 const answer = (value: unknown): ChatResult => ({ content: JSON.stringify(value), usage: { input: 10, output: 10 }, model: "fixture", provider: "fixture" });
+const legacy = { trigger: "project_audit", outcome: "partial", headSha: "a".repeat(40),
+  summary: "Поиск с ограничениями: новых подтверждённых замечаний 4, непроверенных вопросов 6.",
+  comment: "Непроверенный вопрос: ignored hypothesis", rawResponse: JSON.stringify({ result: { accepted: [{ title: "Confirmed issue" }] } }) };
+const presented = presentProjectAudit(legacy);
+assert.equal(presented.outcome, "ok"); assert.equal(presented.summary, projectAuditSummary(4));
+assert.ok(presented.comment.includes("Confirmed issue")); assert.ok(!presented.comment.includes("hypothesis"));
+assert.equal(legacy.outcome, "partial", "historical storage is not rewritten");
+assert.equal(presentProjectAudit({ ...legacy, trigger: "overview" }).outcome, "partial");
+assert.equal(presentProjectAudit({ ...legacy, outcome: "error", summary: "Поиск не завершён: deadline" }).outcome, "error");
+assert.equal(presentProjectAudit({ ...legacy, summary: "Материалы не были обработаны" }).outcome, "partial");
+assert.equal(outcomeLabel("error", "project_audit"), "поиск не завершён");
+assert.ok(projectAuditReport(projectAuditSummary(0), legacy.headSha, []).includes("замечаний 0"));
 try {
   const root = join(directory, "repo"), scratch = join(directory, "views");
   await mkdir(root); await mkdir(scratch);

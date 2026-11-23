@@ -17,6 +17,7 @@ import { auditMap, latestProjectMap, projectAuditEnabled, enqueueProjectAudit, l
   savedAuditInput, saveAuditInput, completedAudit, completeAudit, AUDIT_VERSION } from "./project-audit-store";
 import { searchProject, verifyProjectCandidates, type AuditInput, type AuditPipelineOptions } from "./project-audit-pipeline";
 import type { OverviewJobResult } from "./worker";
+import { projectAuditSummary, projectAuditReport } from "./project-audit-report";
 
 const positive = (key: string, fallback: number) => {
   const value = Number(process.env[key] ?? fallback);
@@ -74,9 +75,7 @@ export async function executeProjectAuditJob(job: ReviewJob, cacheOnly = false, 
     saveAnalysisDiagnostics(id, { version: 1, jobId: job.id, reason: outcome === "ok" ? "completed" : outcome === "stale" ? "superseded" : outcome === "partial" ? "limited" : loadPipelineJob(job.id).reason,
       budget: budget.snapshot(), calls: budget.calls, mapId: map.id, mapAnalysisId: map.analysisId, sha: map.sha, search, verification: result,
       unresolved: [...(search?.unresolved ?? []), ...(result?.unresolved ?? [])], delivery: "not_applicable", details });
-    setAnalysisComment(id, [summary, `Версия проекта: \`${map.sha}\`.`,
-      ...(result?.accepted.map(f => `- ${f.title}`) ?? []),
-      ...[...(search?.unresolved ?? []), ...(result?.unresolved ?? [])].map(q => `Непроверенный вопрос: ${q}`)].join("\n\n"));
+    setAnalysisComment(id, projectAuditReport(summary, map.sha, result?.accepted.map(f => f.title) ?? []));
     return id;
   };
   try {
@@ -112,13 +111,12 @@ export async function executeProjectAuditJob(job: ReviewJob, cacheOnly = false, 
               completeAudit(job.id, id); return true;
             }
             const unresolved = [...search!.unresolved, ...result!.unresolved];
-            const summary = unresolved.length ? `Поиск с ограничениями: новых подтверждённых замечаний ${result!.accepted.length}, непроверенных вопросов ${unresolved.length}.`
-              : `Поиск завершён: новых подтверждённых замечаний ${result!.accepted.length}.`;
-            const id = record(unresolved.length ? "partial" : "ok", summary, { search, result, unresolved });
+            const summary = projectAuditSummary(result!.accepted.length);
+            const id = record("ok", summary, { search, result, unresolved });
             applyReconciliation(job.prId, id, { summary, findings: result!.accepted, notes: null }, {
               allowedPriorIds: new Set(), reopenableIds: new Set(), allowNew: true, fixesFinal: true, wholeRepository: true, changed: new Map() });
             completeAudit(job.id, id);
-            patchPipelineJob(job.id, { quality: unresolved.length ? "limited" : "complete", recovery: "terminal", delivery: "not_applicable", reason: unresolved.length ? "limited" : "completed", configuration });
+            patchPipelineJob(job.id, { quality: "complete", recovery: "terminal", delivery: "not_applicable", reason: "completed", configuration });
             return true;
           });
           if (stable) return;
