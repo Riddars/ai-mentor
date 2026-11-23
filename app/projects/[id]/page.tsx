@@ -35,7 +35,9 @@ import { Badge, SeverityBadge } from "@/components/ui/Badge";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/Card";
 import { CollapsibleCard } from "@/components/ui/Collapsible";
 import { RestartReviewButton } from "@/components/RestartReviewButton";
-import { ProjectNotes, StartOverviewButton } from "@/components/ProjectNotes";
+import { ProjectNotes, StartOverviewButton, StartProjectAuditButton } from "@/components/ProjectNotes";
+import { latestProjectMap, latestProjectAudit, projectAuditEnabled } from "@/lib/curator/project-audit-store";
+import { getMemorySha } from "@/lib/curator/store";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -66,6 +68,10 @@ export default async function ProjectPage({
   const overviewJob = getLatestOverviewJob(projectId);
   const lastOverview = analyses.find((a) => a.trigger === "overview") ?? null;
   const overviewIssue = getOverviewIssue(projectId);
+  const audit = latestProjectAudit(projectId);
+  const projectMap = latestProjectMap(projectId);
+  const mapCurrent = projectMap !== null && projectMap.sha === getMemorySha(projectId);
+  const auditAnalysis = audit?.analysisId ? analyses.find(a => a.id === audit.analysisId) : null;
   const supervisors = isHead
     ? (() => {
         const ids = new Set(listProjectSupervisors(projectId));
@@ -168,6 +174,18 @@ export default async function ProjectPage({
                 </span>
                 <StartOverviewButton projectId={projectId} />
               </div>
+              {projectAuditEnabled() && (
+                <div className="flex flex-col gap-3 border-t border-border pt-3 text-xs text-muted-foreground">
+                  <p>
+                    Поиск проблем: {audit ? audit.status === "running" ? "выполняется" : audit.status === "queued" ? "в очереди" : auditAnalysis?.summary ?? audit.lastError ?? "не завершён" : "ещё не запускался"}
+                    {audit && <> · версия <code>{audit.sha.slice(0, 7)}</code></>}
+                    {audit?.analysisId && <> · <Link className="hover:text-foreground hover:underline" href={`/projects/${projectId}/analyses/${audit.analysisId}`}>Результат</Link></>}
+                  </p>
+                  {audit?.status === "queued" && audit.lastError && <p role="status">{audit.lastError}</p>}
+                  {!mapCurrent && <p>Сначала обновите карту: запустите полный обзор проекта.</p>}
+                  <StartProjectAuditButton projectId={projectId} disabled={!mapCurrent || project.status !== "active" || audit?.status === "running" || audit?.status === "queued"} />
+                </div>
+              )}
             </CardBody>
           </Card>
 
@@ -335,7 +353,7 @@ function AnalysisList({ analyses, projectId }: { analyses: AnalysisRow[]; projec
           >
             <span className="font-medium group-hover:underline">{relativeDate(a.createdAt)}</span>
             <span className="text-muted-foreground">
-              {a.trigger === "overview"
+              {a.trigger === "overview" || a.trigger === "project_audit"
                 ? triggerLabel(a.trigger)
                 : `${a.prNumber !== null ? prLabel(a.prNumber) : "—"} · ${triggerLabel(a.trigger)}`}
             </span>

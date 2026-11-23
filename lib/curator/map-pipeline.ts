@@ -237,6 +237,6 @@ export async function runMapPipeline(root: string, task: string, budget: Executi
         viewed: inventory.sources.map(s => s.path), skipped: [], partialCopy: null, partialReview: false,
         transcript: JSON.stringify({ mode: "map-parts", completed, levels, sources: inventory.sources.map(s => ({ path: s.path, id: s.id })), excluded: inventory.excluded }),
         diagnostics: { version: 1, reason: "completed", calls: budget.calls, unknownTokens: budget.unknownTokens, budget: budget.snapshot(),
-          snapshot: { mode: "parts", included: inventory.sources.map(s => ({ path: s.path, bytes: s.bytes })), excluded: inventory.excluded, levels, completed } } } };
+          snapshot: { mode: "parts", included: inventory.sources.map(s => ({ path: s.path, bytes: s.bytes, id: s.id, originalHash: s.originalHash, viewHash: s.viewHash, transformation: s.transformation, kind: s.kind })), excluded: inventory.excluded, levels, completed } } } };
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }

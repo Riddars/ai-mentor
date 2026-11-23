@@ -10,6 +10,8 @@ import { acknowledgePullRequest, acknowledgeStudentComment } from "@/lib/curator
 import { memoryGap } from "@/lib/curator/memory";
 import { recordJobEvent } from "@/lib/curator/diagnostics";
 import { blockedPipelineConfiguration, PipelineWaitError, hasSavedPipelineFinal, pipelineDailyLiability, waitPipelineJob, wakeChangedPipelineJobs } from "./pipeline-job";
+import { executeProjectAuditJob } from "./project-audit";
+import { completedAudit } from "./project-audit-store";
 import { executeOverviewJob, overviewTokenLimit, startOverview, type OverviewPayload } from "@/lib/curator/overview";
 import {
   concludeCheck,
@@ -68,6 +70,7 @@ export interface OverviewJobResult {
 export interface WorkerDeps {
   runCommit(job: ReviewJob, options?: { cacheOnly: boolean }): Promise<void>;
   runComment(job: ReviewJob): Promise<void>;
+  runAudit?(job: ReviewJob, options?: { cacheOnly: boolean }): Promise<void | OverviewJobResult>;
   runOverview(job: ReviewJob, options?: { cacheOnly: boolean }): Promise<void | OverviewJobResult>;
   concludeUnreviewed(job: ReviewJob, summary: string): Promise<boolean | void>;
   concludePublished(job: ReviewJob, outcome: "ok" | "partial" | "parse_error" | "error" | "stale"): Promise<void>;
@@ -85,6 +88,7 @@ const realDeps: WorkerDeps = {
     await acknowledgeStudentComment(params);
     await executeCommentJob(params, job.id);
   },
+  runAudit: (job, options) => executeProjectAuditJob(job, options?.cacheOnly),
   runOverview: (job, options) => executeOverviewJob(job, options?.cacheOnly),
   concludeUnreviewed: (job, summary) =>
     concludeUnreviewedCheck(job.payload as ReviewParams, job.checkRunId as number, summary),
@@ -96,7 +100,7 @@ const realDeps: WorkerDeps = {
   },
   // A failed overview is already recorded with what it spent; it has no PR to report to.
   reportFailure: async (job) => {
-    if (job.kind !== "overview") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind, job.id);
+    if (job.kind === "commit" || job.kind === "comment") await reportReviewFailure(job.payload as ReviewParams, job.prId, job.kind, job.id);
   },
 };
 
@@ -157,6 +161,11 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
       finishJob(job.id, result.quality === "failed" || result.quality === "invalid" ? "failed" : "done", result.quality === "complete" ? undefined : result.reason);
     } else finishJob(job.id, "done");
   };
+  // A crash after the audit transaction needs no model, GitHub or daily admission.
+  if (job.kind === "project_audit" && completedAudit(job.id) !== null) {
+    finishJob(job.id, "done");
+    return;
+  }
 
   // A prior attempt already published its comment. After a restart or failed GitHub PATCH,
   // finish only the check; never spend tokens or post the same comment again.
@@ -195,7 +204,8 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
         finishOverview(await deps.runOverview(job));
         return;
       }
-      else await deps.runComment(job);
+      else if (job.kind === "comment") await deps.runComment(job);
+      else throw new Error("Audit cannot have a GitHub publication");
       finishCompleted();
     } catch (error) {
       console.warn(`[queue] publication of job ${job.id} failed, retrying:`, error);
@@ -238,8 +248,9 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
         : settings.dailyTokens > 0 && recentTokens(null) + pipelineDailyLiability(null) + reserve >= settings.dailyTokens
           ? NOT_REVIEWED_TOKENS
           : null;
+  const contextAudit = job.kind === "project_audit";
   const contextOverview = job.kind === "overview" && (job.payload as { initialMapMode?: string }).initialMapMode === "parts";
-  const cacheOnly = !!overLimit && (contextReview || contextOverview) && hasSavedPipelineFinal(job.id);
+  const cacheOnly = !!overLimit && (contextReview || contextOverview || contextAudit) && hasSavedPipelineFinal(job.id);
   if (overLimit && !cacheOnly) {
     if (await concludeIfOpen(job, overLimit, deps)) {
       markCheckConcluded(job.id, overLimit === NOT_REVIEWED_LIMIT ? "limit" : "budget");
@@ -260,7 +271,12 @@ export async function runJob(job: ReviewJob, deps: WorkerDeps = realDeps): Promi
       finishOverview(await deps.runOverview(job, { cacheOnly }));
       return;
     }
-    else await deps.runComment(job);
+    else if (job.kind === "project_audit") {
+      finishOverview(await (deps.runAudit ?? realDeps.runAudit!)(job, { cacheOnly }));
+      return;
+    }
+    else if (job.kind === "comment") await deps.runComment(job);
+    else throw new Error("Unknown job kind");
     finishCompleted();
   } catch (error) {
     if (error instanceof PipelineWaitError) {

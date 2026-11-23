@@ -1,4 +1,5 @@
 import { fileKind } from "./file-policy";
+export const SNAPSHOT_POLICY_VERSION = "snapshot-files-v2";
 
 const OMIT_DIR = /(?:^|\/)(?:\.git|node_modules|\.next|\.venv|venv|__pycache__|dist|build|coverage)(?:\/|$)/;
 const BINARY = /\.(?:png|jpe?g|gif|webp|svg|ico|pdf|zip|gz|tar|7z|exe|dll|so|dylib|pyc|woff2?|ttf|mp[34]|wav|bin|pt|pth|onnx)$/i;

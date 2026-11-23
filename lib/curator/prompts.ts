@@ -40,3 +40,5 @@ export function verifyPrompt(): string {
 export function initialMapPrompt(): string { return render("initial-map"); }
 export function prContextPrompt(merging = false): string { return render("pr-context-part") + (merging ? "\n" + render("pr-context-merge") : ""); }
 export function prContextVerifyPrompt(): string { return render("pr-context-verify"); }
+export function projectAuditPrompt(): string { return render("project-audit"); }
+export function projectAuditVerifyPrompt(): string { return render("project-audit-verify"); }

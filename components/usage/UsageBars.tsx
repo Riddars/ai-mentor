@@ -8,12 +8,14 @@ export const KIND_FILL: Record<WorkKind, string> = {
   commit: "fill-series-1",
   comment: "fill-series-2",
   overview: "fill-series-3",
+  project_audit: "fill-foreground",
 };
 
 export const KIND_SWATCH: Record<WorkKind, string> = {
   commit: "bg-series-1",
   comment: "bg-series-2",
   overview: "bg-series-3",
+  project_audit: "bg-foreground",
 };
 
 /** Gap between stacked segments, in chart units (the chart is 100 high). */
@@ -46,7 +48,7 @@ export function UsageBars({ days, period }: { days: DayUsage[]; period: number }
     const date = new Date();
     date.setDate(date.getDate() - (period - 1 - i));
     const key = localDay(date);
-    return { date, usage: byDay.get(key) ?? { day: key, runs: 0, commit: 0, comment: 0, overview: 0 } };
+    return { date, usage: byDay.get(key) ?? { day: key, runs: 0, commit: 0, comment: 0, overview: 0, project_audit: 0 } };
   });
   const max = Math.max(...series.map((s) => total(s.usage)), 0);
   const label = (i: number) => DAY.format(series[i].date);

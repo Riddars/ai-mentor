@@ -890,7 +890,7 @@ export function stagedJobPublication(jobId: number): {
 export function recordAnalysis(params: {
   prId: number;
   headSha: string;
-  trigger: "commit" | "comment" | "overview";
+  trigger: "commit" | "comment" | "overview" | "project_audit";
   outcome: AnalysisOutcome;
   summary?: string | null;
   provider?: string | null;
@@ -956,9 +956,9 @@ export function recentTokens(projectId: number | null): number {
 // --- Usage ---
 
 /** What a model run was for: a commit review, a check of a student's reply, an overview. */
-export type WorkKind = "commit" | "comment" | "overview";
+export type WorkKind = "commit" | "comment" | "overview" | "project_audit";
 
-export const WORK_KINDS: readonly WorkKind[] = ["commit", "comment", "overview"];
+export const WORK_KINDS: readonly WorkKind[] = ["commit", "comment", "overview", "project_audit"];
 
 const TOKENS = "COALESCE(a.tokens_in, 0) + COALESCE(a.tokens_out, 0)";
 
@@ -1763,7 +1763,7 @@ export function setFindingStatusByPerson(params: {
 
 // --- Review queue ---
 
-export type JobKind = "commit" | "comment" | "overview";
+export type JobKind = "commit" | "comment" | "overview" | "project_audit";
 export type JobStatus = "queued" | "running" | "done" | "failed" | "superseded";
 
 export interface ReviewJob {
@@ -2006,7 +2006,7 @@ export function listDueJobs(limit: number): ReviewJob[] {
          AND pr.project_id NOT IN (
            SELECT p2.project_id FROM review_jobs j2
            JOIN pull_requests p2 ON p2.id = j2.pull_request_id WHERE j2.status = 'running')
-       ORDER BY j.kind = 'overview', j.run_after, j.id`,
+       ORDER BY j.kind IN ('overview','project_audit'), j.run_after, j.id`,
     )
     .all() as unknown as RawJob[];
   const seen = new Set<number>();

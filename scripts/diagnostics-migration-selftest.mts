@@ -11,7 +11,7 @@ if (process.argv[2] === "child") {
   const { getDb } = await import("@/lib/db");
   const { recordJobEvent, saveAnalysisDiagnostics, getAnalysisDiagnostics, getJobDiagnostics } = await import("@/lib/curator/diagnostics");
   const db = getDb();
-  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 23);
+  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 24);
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='context_pipeline_parts'").get());
   if (process.argv[3] === "fresh") {
     db.exec(`INSERT INTO projects(id,owner,repo) VALUES(1,'test','diagnostics');
@@ -53,7 +53,7 @@ if (process.argv[2] === "child") {
   const backup = process.env.DATABASE_PATH! + ".backup";
   db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
   const restored = new DatabaseSync(backup);
-  assert.equal(restored.prepare("PRAGMA user_version").get()?.user_version, 23);
+  assert.equal(restored.prepare("PRAGMA user_version").get()?.user_version, 24);
   assert.equal(restored.prepare("SELECT COUNT(*) AS n FROM review_diagnostic_events").get()?.n, 5);
   assert.equal(restored.prepare("SELECT diagnostics_json FROM analyses WHERE id=1").get()?.diagnostics_json, JSON.stringify(diagnostics));
   restored.close();

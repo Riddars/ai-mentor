@@ -428,6 +428,28 @@ function migrate(db: DatabaseSync): void {
     addColumns(db, "context_pipeline_parts", { job_id: "INTEGER REFERENCES review_jobs(id) ON DELETE CASCADE" });
     db.exec("CREATE INDEX IF NOT EXISTS context_pipeline_parts_job ON context_pipeline_parts(job_id); PRAGMA user_version = 23;");
   }
+  if (version < 24) {
+    db.exec("SAVEPOINT audit_v24");
+    try {
+    db.exec(`CREATE TABLE IF NOT EXISTS project_maps (
+      id INTEGER PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      job_id INTEGER NOT NULL UNIQUE REFERENCES review_jobs(id) ON DELETE CASCADE,
+      analysis_id INTEGER NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
+      sha TEXT NOT NULL, body TEXT NOT NULL, manifest TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS project_audit_runs (
+      job_id INTEGER PRIMARY KEY REFERENCES review_jobs(id) ON DELETE CASCADE,
+      map_id INTEGER NOT NULL REFERENCES project_maps(id) ON DELETE CASCADE,
+      automatic INTEGER NOT NULL DEFAULT 0,
+      input_json TEXT, analysis_id INTEGER REFERENCES analyses(id) ON DELETE SET NULL);
+    CREATE UNIQUE INDEX IF NOT EXISTS project_audit_automatic ON project_audit_runs(map_id) WHERE automatic=1;
+    PRAGMA user_version = 24;`);
+    db.exec("RELEASE audit_v24");
+    } catch (error) {
+      db.exec("ROLLBACK TO audit_v24; RELEASE audit_v24");
+      throw error;
+    }
+  }
 
 }
 

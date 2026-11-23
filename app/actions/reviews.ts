@@ -15,6 +15,7 @@ import {
   NOTES_MAX_CHARS,
 } from "@/lib/curator/store";
 import { getViewer } from "@/lib/users";
+import { startProjectAudit } from "@/lib/curator/project-audit";
 import type { ActionState } from "@/app/actions/admin";
 
 /** Restart the review of a PR's latest commit (a supervisor of the project or the head). */
@@ -70,6 +71,22 @@ async function projectManager(projectId: number): Promise<{ login: string } | nu
   if (!viewer || !getProject(projectId)) return null;
   if (viewer.role !== "head" && !isSupervisorOf(viewer.userId, projectId)) return null;
   return viewer;
+}
+
+export async function startProjectAuditAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  const projectId = Number(formData.get("projectId"));
+  if (!(await projectManager(projectId))) return { error: "Нет доступа к этому проекту." };
+  try {
+    const result = await startProjectAudit(projectId);
+    revalidatePath(`/projects/${projectId}`);
+    if (result === "disabled") return { error: "Поиск проблем пока не включён на сервере." };
+    if (result === "paused") return { error: "Проект на паузе." };
+    if (result === "map_required") return { error: "Сначала обновите карту: запустите полный обзор проекта." };
+    return { ok: result === "queued" ? "Поиск проблем поставлен в очередь." : "Поиск уже в очереди или выполняется." };
+  } catch (error) {
+    console.error("[panel] project audit could not start:", error);
+    return { error: "Не удалось проверить версию проекта. Попробуйте позже." };
+  }
 }
 
 /** Queue a full overview of the project now. */

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
-import { saveProjectNotesAction, startOverviewAction } from "@/app/actions/reviews";
+import { saveProjectNotesAction, startOverviewAction, startProjectAuditAction } from "@/app/actions/reviews";
 import type { ActionState } from "@/app/actions/admin";
 import { Button } from "@/components/ui/Button";
 import { FormMessage, inputClass } from "@/components/admin/fields";
@@ -59,6 +59,19 @@ export function StartOverviewButton({ projectId }: { projectId: number }) {
       <Button type="submit" size="sm" variant="outline" disabled={pending}>
         Запустить полный обзор
       </Button>
+    </form>
+  );
+}
+
+export function StartProjectAuditButton({ projectId, disabled }: { projectId: number; disabled: boolean }) {
+  const [state, action, pending] = useActionState<ActionState, FormData>(startProjectAuditAction, null);
+  return (
+    <form action={action} className="flex flex-wrap items-center gap-3">
+      <input type="hidden" name="projectId" value={projectId} />
+      <Button type="submit" size="sm" variant="outline" disabled={disabled || pending}>
+        Проверить проект на ошибки
+      </Button>
+      <FormMessage state={state} />
     </form>
   );
 }

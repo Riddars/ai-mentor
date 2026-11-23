@@ -16,7 +16,7 @@ if (process.argv[2] === "child") {
   ]) {
     assert.ok((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((c) => c.name === column));
   }
-  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 23);
+  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 24);
   assert.equal(db.prepare("SELECT comment FROM analyses WHERE id = 1").get()?.comment, "existing review");
   assert.equal(db.prepare("SELECT status FROM review_jobs WHERE id = 1").get()?.status, "queued");
   db.close();
@@ -49,7 +49,7 @@ if (process.argv[2] === "child") {
         env: { ...process.env, DATABASE_PATH: path }, encoding: "utf8",
       });
       assert.equal(child.status, 0, child.stdout + child.stderr);
-      console.log(`ok version ${version} upgraded to 23, existing rows preserved`);
+      console.log(`ok version ${version} upgraded to 24, existing rows preserved`);
     }
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 3 });

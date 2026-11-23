@@ -162,7 +162,7 @@ export default async function AnalysisPage({
             {analysis.comment && (
               <Card className="shadow-card">
                 <CardHeader>
-                  <CardTitle>{analysis.trigger === "overview" ? analysis.outcome === "partial" ? "Черновик частичного обзора" : "Текст обзора" : "Комментарий в pull request"}</CardTitle>
+                  <CardTitle>{analysis.trigger === "project_audit" ? "Поиск проблем проекта" : analysis.trigger === "overview" ? analysis.outcome === "partial" ? "Черновик частичного обзора" : "Текст обзора" : "Комментарий в pull request"}</CardTitle>
                 </CardHeader>
                 <CardBody className="pt-0">
                   <Markdown>{analysis.comment}</Markdown>
@@ -285,7 +285,7 @@ export default async function AnalysisPage({
                   {analysis.mode && (
                     <>
                       <dt className="text-muted-foreground">Режим</dt>
-                      <dd>{MODE_LABEL[analysis.mode]}</dd>
+                      <dd>{analysis.trigger === "project_audit" ? "по исходникам проекта" : MODE_LABEL[analysis.mode]}</dd>
                     </>
                   )}
                   {analysis.tokensIn !== null && (

@@ -1,4 +1,6 @@
 import { getDb } from "@/lib/db";
+import { saveProjectMap } from "./project-audit-store";
+import { SNAPSHOT_POLICY_VERSION } from "./snapshot-policy";
 import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { githubRequest } from "@/lib/github/api";
@@ -322,6 +324,12 @@ export async function executeOverviewJob(job: ReviewJob, cacheOnly = false): Pro
           stageJobPublication(job.id, analysisId, headSha,
             overviewIssueBody(project.id, { sha: headSha, body: snapshotMode && notes?.actor != null ? notes.body : parsed.notes || "" }),
             { notesId: publicationNotesId });
+          if (initialMapMode === "parts" && diagnostics?.snapshot?.included) {
+            saveProjectMap(project.id, job.id, analysisId, headSha, parsed.notes || "", {
+              version: SNAPSHOT_POLICY_VERSION,
+              included: diagnostics.snapshot.included, excluded: diagnostics.snapshot.excluded,
+            }, payload.reason === "initial" || payload.reason === "manual");
+          }
           return analysisId;
         });
         result.analysisId = saved;

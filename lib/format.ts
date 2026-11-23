@@ -196,6 +196,7 @@ export function prStateLabel(state: string | null): string {
 }
 
 const TRIGGER_LABEL: Record<string, string> = {
+  project_audit: "поиск проблем проекта",
   commit: "новый коммит",
   comment: "ответ студента",
   overview: "полный обзор",
@@ -211,6 +212,7 @@ export function triggerLabel(trigger: string): string {
 }
 
 const WORK_KIND_LABEL: Record<string, string> = {
+  project_audit: "Поиск проблем проекта",
   commit: "Разбор PR",
   comment: "Сверка по ответу студента",
   overview: "Полный обзор",

@@ -203,6 +203,24 @@ export interface AgentRun {
   calls?: LlmCallRecord[];
 }
 
+/** Obtain an immutable complete copy without starting an agent or exposing model tools. */
+export async function withRepositoryCopy<T>(target: AgentTarget, budget: ExecutionBudget, consume: (root: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
+  try {
+    const tarPath = join(dir, "repo.tar.gz"), root = join(dir, "repo");
+    const partial = await prepareRepositoryArchive(target, tarPath, true, budget);
+    const { mkdir } = await import("node:fs/promises");
+    const { extractTarball } = await import("./workspace");
+    const { snapshotExclusion } = await import("@/lib/curator/snapshot-policy");
+    await mkdir(root);
+    const extracted = await extractTarball(tarPath, root);
+    if (partial || extracted.stoppedOn || extracted.skipped.some(e => !snapshotExclusion(e.path))) {
+      throw new Error("incomplete_snapshot: project audit requires the complete selected snapshot");
+    }
+    return await consume(root);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+}
+
 /**
  * Run the agent over a copy of the repository at the commit and hand the result, with the
  * copy still on disk, to `use`; the copy is removed afterwards.

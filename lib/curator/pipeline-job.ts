@@ -2,16 +2,17 @@ import { getDb } from "@/lib/db";
 import { ExecutionBudget, ExecutionBudgetError, type ExecutionBudgetSnapshot } from "@/lib/llm/execution";
 import { hashText } from "./context-parts";
 import { recordJobEvent } from "./diagnostics";
-import { initialMapPrompt, prContextPrompt, prContextVerifyPrompt } from "./prompts";
+import { initialMapPrompt, prContextPrompt, prContextVerifyPrompt, projectAuditPrompt, projectAuditVerifyPrompt } from "./prompts";
 import { recentTokens } from "./store";
 
 export const CONTEXT_PIPELINE_VERSION = "context-v3.4";
 export function pipelineConfigurationFingerprint(): string {
   const settings = ["LLM_PROVIDER", "LLM_MODEL", "AGENT_MODEL", "LLM_FALLBACK_PROVIDER", "LLM_FALLBACK_MODEL",
-    "PR_CONTEXT_TOKENS", "INITIAL_MAP_CONTEXT_TOKENS", "LLM_FALLBACK_CONTEXT_TOKENS", "PR_TOKENS_PER_RUN", "OVERVIEW_TOKENS_PER_RUN", "PR_TIMEOUT_MS", "INITIAL_OVERVIEW_MODE", "TOKENS_PER_DAY", "TOKENS_PER_PROJECT_DAY"];
+    "PR_CONTEXT_TOKENS", "INITIAL_MAP_CONTEXT_TOKENS", "LLM_FALLBACK_CONTEXT_TOKENS", "PR_TOKENS_PER_RUN", "OVERVIEW_TOKENS_PER_RUN", "PR_TIMEOUT_MS", "INITIAL_OVERVIEW_MODE", "TOKENS_PER_DAY", "TOKENS_PER_PROJECT_DAY",
+    "PROJECT_AUDIT_ENABLED", "PROJECT_AUDIT_TOKENS_PER_RUN", "PROJECT_AUDIT_CONTEXT_TOKENS", "PROJECT_AUDIT_TIMEOUT_MS"];
   return hashText(JSON.stringify([CONTEXT_PIPELINE_VERSION, settings.map(k => [k, process.env[k]]),
     ["SELECTEL_API_KEY", "PROVOD_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"].map(k => hashText(process.env[k] ?? "")),
-    initialMapPrompt(), prContextPrompt(false), prContextPrompt(true), prContextVerifyPrompt()]));
+    initialMapPrompt(), prContextPrompt(false), prContextPrompt(true), prContextVerifyPrompt(), projectAuditPrompt(), projectAuditVerifyPrompt()]));
 }
 export interface PipelineJobState {
   version: string;
@@ -85,7 +86,7 @@ export function waitPipelineJob(jobId: number, wait: PipelineWaitError, delayMs:
     .run(wait.recovery === "blocked" ? "pipeline-blocked" : null, wait.message, `+${Math.max(1, Math.ceil(delayMs / 1000))} seconds`, jobId);
 }
 export function hasSavedPipelineFinal(jobId: number): boolean {
-  return !!getDb().prepare("SELECT 1 FROM context_pipeline_parts WHERE job_id=? AND part_id IN ('pr-final','final') LIMIT 1").get(jobId);
+  return !!getDb().prepare("SELECT 1 FROM context_pipeline_parts WHERE job_id=? AND part_id IN ('pr-final','final','audit-final') LIMIT 1").get(jobId);
 }
 
 /** Admission liability, separate from billed UI usage: in-flight/unknown and unrecorded usage. */
