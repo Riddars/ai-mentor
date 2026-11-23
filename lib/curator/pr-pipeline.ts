@@ -1,5 +1,5 @@
 import type { PrAgentTarget, PrAgentCheckpoint } from "@/lib/agent/pr-context-agent.mjs";
-import type { ReadWholeFileResult } from "@/lib/agent/whole-file-reader";
+import { FILE_POLICY_DENIAL, type ReadWholeFileResult } from "@/lib/agent/whole-file-reader";
 import { chat, LlmRequestError, type ChatMessage, type ChatOptions, type ChatResult } from "@/lib/llm/chat";
 import { ContextWindowError, ExecutionBudget, ExecutionBudgetError } from "@/lib/llm/execution";
 import { FINDING_AREAS, LOCATION_KINDS, SEVERITIES, type FindingArea, type FindingLocation, type Severity } from "./finding";
@@ -194,7 +194,7 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
   const decisions = new Map<string, { finding: ReconciledFinding; status: "confirmed" | "refuted" | "unresolved"; owners: Node[] }>();
   const issues: Array<{ reason: string; retryable: boolean; detail: string }> = [];
   const verificationHistory: Array<{ ids: string[]; unresolved: string[]; issues: typeof issues }> = [];
-  const unresolved: string[] = repository.sources.filter(s => s.omittedReason).map(s => `${s.path}: ${s.omittedReason}`);
+  const unresolved: string[] = [];
   let level = 0;
   let previousNodes = new Map<string, Node>();
   const effective = { ...options, store, ask };
@@ -279,7 +279,11 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
         store.save("pr-node:" + key, part.requestHash, { content: JSON.stringify({ id: node.id, answer: node.answer, files: node.files, denied: node.denied, refs: node.refs, capabilityKey: node.capabilityKey }),
           provider: options.primary.provider, model: options.primary.model.id, usage: { input: 0, output: 0 } });
       }
-      nodes.push(node); allNodes.push(node); unresolved.push(...node.answer.unresolved, ...node.denied.map(d => `${d.path}: ${d.reason}`));
+      nodes.push(node);
+      allNodes.push(node);
+      unresolved.push(...node.answer.unresolved, ...node.denied
+        .filter(d => !d.reason?.startsWith(FILE_POLICY_DENIAL))
+        .map(d => `${d.path}: ${d.reason}`));
       const ownVerification = await verifyNode(node, 0, true);
       const reserve = Math.max(0, await estimateRemainingPlan(parts, merging) - ownVerification.cost);
       const verification = await verifyNode(node, reserve);

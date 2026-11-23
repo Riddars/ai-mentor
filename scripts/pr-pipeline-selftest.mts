@@ -146,6 +146,13 @@ const beforeBoundaryRestore = sourceCalls + integrationCalls;
 const restoredBoundary = await runPrPipeline({ ...boundaryOptions, budget: new ExecutionBudget({ maxTokens: 100, deadlineAt: Date.now() + 60000 }) });
 assert.equal(restoredBoundary.quality, "complete");
 assert.equal(sourceCalls + integrationCalls, beforeBoundaryRestore, "finished agent turn survives a crash before node save with budget100 and zero calls");
+const lockChange = { ...changes[0], oldPath: "uv.lock", newPath: "uv.lock" };
+const [lockSource] = diffSources(Buffer.from("diff --git a/uv.lock b/uv.lock\n--- a/uv.lock\n+++ b/uv.lock\n@@ -1 +1 @@\n-old\n+new\n"), [lockChange], "fixture");
+const withLock = await runPrPipeline({ ...boundaryOptions, store: memoryPipelineStore(),
+  repository: { ...repository, changes: [changes[0], lockChange], sources: [repository.sources[0], lockSource] } });
+assert.equal(withLock.quality, "complete");
+assert.deepEqual(withLock.diagnostics.unresolved, []);
+assert.deepEqual(withLock.diagnostics.exclusions, [{ path: "uv.lock", reason: lockSource.omittedReason }]);
 noFindings = false;
 const largeChanges: DiffChange[] = Array.from({ length: 10 }, (_, i) => ({ ...changes[0], oldPath: `${i}.ts`, newPath: `${i}.ts` }));
 const large = diffSources(Buffer.from(largeChanges.map(c => `diff --git a/${c.newPath} b/${c.newPath}\n--- a/${c.newPath}\n+++ b/${c.newPath}\n@@ -0,0 +1 @@\n+${"x".repeat(140000)}\n`).join("")), largeChanges, "large");

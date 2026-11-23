@@ -3,6 +3,8 @@ import { reviewFileExclusion } from "@/lib/curator/snapshot-policy";
 import { measureContext, type ContextLimits } from "@/lib/curator/context-size";
 import { ExecutionBudgetError, type ExecutionBudget } from "@/lib/llm/execution";
 
+export const FILE_POLICY_DENIAL = "file policy: contents not transmitted";
+
 export interface ReadWholeFileResult {
   status: "ok" | "denied" | "already_available";
   path: string;
@@ -37,7 +39,7 @@ export function createWholeFileReader(options: WholeFileReaderOptions) {
       if (stalled) return refuse("no_progress: repeated identical request; finish with explicit unresolved questions");
       if (typeof path !== "string" || !["head", "base"].includes(revision)) return refuse("invalid_request");
       const exclusion = reviewFileExclusion(path, options.repository.changes);
-      if (exclusion) return refuse(`file policy: contents not transmitted (${exclusion})`);
+      if (exclusion) return refuse(`${FILE_POLICY_DENIAL} (${exclusion})`);
       const existing = available.get(key);
       if (existing) return { status: "already_available", path, revision, sha: existing.sha, blob: existing.blob, reason: "full file is already in this conversation" };
       let file;
