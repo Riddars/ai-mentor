@@ -99,6 +99,7 @@ export default async function ProjectPage({
         <div className="mt-2 mb-6">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+            <Link href={`/admin/projects/${projectId}`} className="text-sm text-muted-foreground hover:underline">Настройки проекта</Link>
             {project.status === "paused" && <Badge tone="neutral">на паузе</Badge>}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">

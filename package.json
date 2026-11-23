@@ -15,6 +15,7 @@
     "test:review-migration": "tsx scripts/review-migration-selftest.mts",
     "test:inactivity": "tsx scripts/inactivity-selftest.mts",
     "test:project-audit": "tsx scripts/project-audit-selftest.mts && tsx scripts/project-audit-queue-selftest.mts && tsx scripts/project-audit-migration-selftest.mts",
+    "test:project-supervisors": "tsx scripts/project-supervisors-selftest.mts",
     "test:reliability": "tsx scripts/research-state-selftest.mts && tsx scripts/runtime-budget-selftest.mts && tsx scripts/overview-recovery-selftest.mts && tsx scripts/diagnostics-migration-selftest.mts && tsx scripts/agent-selftest.mts"
   },
   "dependencies": {

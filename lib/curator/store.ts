@@ -1,4 +1,5 @@
 import { getDb } from "@/lib/db";
+import type { Role } from "@/lib/auth";
 import type { FindingArea, FindingLocation, Severity } from "@/lib/curator/finding";
 import { presentProjectAudit } from "./project-audit-report";
 import { findingScope, fixVisible, type ChangedLines, type FindingScope } from "@/lib/curator/scope";
@@ -610,6 +611,19 @@ export function assignSupervisor(projectId: number, userId: string): void {
        ON CONFLICT (project_id, user_id) DO NOTHING`,
     )
     .run({ projectId, userId });
+}
+
+/** Called with the authenticated action viewer; project managers may add a colleague. */
+export function addProjectSupervisor(projectId: number, userId: string, viewer: { userId: string; role: Role } | null): void {
+  if (!viewer || !Number.isSafeInteger(projectId) || projectId <= 0 || !getProject(projectId) ||
+      (viewer.role !== "head" && !(viewer.role === "supervisor" && isSupervisorOf(viewer.userId, projectId)))) {
+    throw new Error("Нет доступа к этому проекту.");
+  }
+  const user = getDb().prepare("SELECT role,disabled FROM users WHERE id=?").get(userId);
+  if (!user || user.role !== "supervisor" || user.disabled) {
+    throw new Error("Выберите действующую учётную запись руководителя проекта.");
+  }
+  assignSupervisor(projectId, userId);
 }
 
 export function unassignSupervisor(projectId: number, userId: string): void {

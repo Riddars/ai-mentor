@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
-  assignSupervisor,
+  addProjectSupervisor,
   createProjectManual,
   deleteProjectCascade,
   getProject,
@@ -192,14 +192,11 @@ export async function deleteProjectAction(
 }
 
 export async function assignSupervisorAction(form: FormData): Promise<void> {
-  await requireHead();
+  const viewer = await requireViewer();
   const projectId = Number(str(form, "projectId"));
   const userId = str(form, "userId");
-  const user = userId ? findUserById(userId) : null;
-  if (!Number.isNaN(projectId) && user && user.role === "supervisor") {
-    assignSupervisor(projectId, userId);
-    refresh();
-  }
+  addProjectSupervisor(projectId, userId, viewer);
+  refresh();
 }
 
 export async function unassignSupervisorAction(form: FormData): Promise<void> {

@@ -41,7 +41,7 @@ export default async function AdminProjectPage({
   const project = Number.isNaN(id) ? null : getProject(id);
   if (!project || (!isHead && !isSupervisorOf(viewer.userId, id))) notFound();
 
-  const users = isHead ? listUsers() : [];
+  const users = listUsers().filter((u) => u.role === "supervisor");
   const assignedIds = new Set(listProjectSupervisors(id));
   const assigned = users.filter((u) => assignedIds.has(u.id));
   const available = users.filter(
@@ -90,7 +90,6 @@ export default async function AdminProjectPage({
             </CardBody>
           </Card>
 
-          {isHead && (
           <Card className="shadow-card">
             <CardHeader>
               <CardTitle>Руководители</CardTitle>
@@ -98,7 +97,7 @@ export default async function AdminProjectPage({
             <CardBody className="flex flex-col gap-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 {assigned.length > 0 ? (
-                  assigned.map((u) => (
+                  assigned.map((u) => isHead ? (
                     <form key={u.id} action={unassignSupervisorAction} className="contents">
                       <input type="hidden" name="projectId" value={id} />
                       <input type="hidden" name="userId" value={u.id} />
@@ -110,6 +109,10 @@ export default async function AdminProjectPage({
                         {u.name ?? u.login} <span aria-hidden>✕</span>
                       </button>
                     </form>
+                  ) : (
+                    <span key={u.id} className="inline-flex rounded-full bg-accent px-2.5 py-1 text-xs text-accent-foreground">
+                      {u.name ?? u.login}
+                    </span>
                   ))
                 ) : (
                   <span className="text-sm text-amber">Руководитель не назначен.</span>
@@ -120,11 +123,12 @@ export default async function AdminProjectPage({
                   <input type="hidden" name="projectId" value={id} />
                   <select
                     name="userId"
+                    aria-label="Руководитель проекта"
                     defaultValue=""
                     className="h-8 rounded-md border border-border bg-card px-2 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <option value="" disabled>
-                      назначить…
+                      Выберите руководителя…
                     </option>
                     {available.map((u) => (
                       <option key={u.id} value={u.id}>
@@ -133,13 +137,15 @@ export default async function AdminProjectPage({
                     ))}
                   </select>
                   <Button variant="outline" size="sm" type="submit">
-                    Назначить
+                    Добавить руководителя
                   </Button>
                 </form>
               )}
+              {available.length === 0 && (
+                <p className="text-xs text-muted-foreground">Других активных руководителей для добавления нет. Новую учётную запись создаёт руководитель центра.</p>
+              )}
             </CardBody>
           </Card>
-          )}
 
           <Card className="shadow-card">
             <CardHeader className="flex items-center justify-between gap-3">
