@@ -16,7 +16,7 @@ import type { ResearchState } from "@/lib/agent/research";
 // the agent in a separate process whose environment holds only the model key, enforces the
 // time limit and removes the copy afterwards.
 
-const MAX_ARCHIVE_BYTES = 300 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const CHILD_GRACE_MS = 60_000;
 const CHILD_EXIT_WAIT_MS = 5_000;
