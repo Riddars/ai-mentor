@@ -36,6 +36,8 @@ try {
   await index([["100644", fresh, "a.ts"], ["0", "0".repeat(40), "old name.txt"], ["100644", same, "new name.txt"],
     ["0", "0".repeat(40), "deleted.txt"], ["100755", old, "mode.sh"], ["100644", fresh, weird],
     ["100644", fresh, "link"], ["100644", await blob("NEW_SECRET"), ".env"],
+    ["120000", await blob("a.ts"), "linked.md"], ["120000", await blob(".env"), "restricted.md"],
+    ["120000", link, "outside.md"],
     ["100644", await blob("я😀".repeat(25000)), "giant.json"], ["100644", await blob(Buffer.from([0, 1, 2])), "binary.bin"],
     ["100644", await blob("CSV_VALUES_MUST_NOT_LEAK\n1,2\n"), "dataset.csv"],
     ["100644", await blob(JSON.stringify({ cells: [{ cell_type: "code", source: ["print('notebook source')"],
@@ -50,6 +52,9 @@ try {
   assert.equal((await repository.readFile("a.ts", "base"))?.bytes.toString(), "return 1;\r\n");
   assert.equal(await repository.readFile("../outside", "head"), null);
   assert.equal(await repository.readFile("submodule", "head"), null);
+  assert.equal((await repository.readFile("linked.md", "head"))?.bytes.toString(), "return 2;\r\n");
+  assert.equal(await repository.readFile("restricted.md", "head"), null);
+  assert.equal(await repository.readFile("outside.md", "head"), null);
   const sources = repository.sources;
   const rendered = (await Promise.all(sources.map(s => unitText(sourceUnit(s))))).join("\n");
   assert.ok(!rendered.includes("NEW_SECRET"));

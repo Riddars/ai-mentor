@@ -330,7 +330,9 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
   const priorCheck = await checkPriorGroups(priorGroups, effective, limits);
   findings.push(...priorCheck.findings); issues.push(...priorCheck.issues);
   unresolved.push(...priorCheck.issues.map(i => i.detail + ": " + i.reason));
-  const quality = unresolved.length ? "limited" : "complete";
+  // Model caveats and unconfirmed hypotheses are useful diagnostics. Only a
+  // concrete failure to obtain or verify evidence limits the review.
+  const quality = issues.length ? "limited" : "complete";
   const changed: ChangedLines = new Map(repository.sources.map(s => [s.path, s.path.toLowerCase().endsWith(".ipynb") || s.omittedReason || !s.hunks.length ? null : new Set(s.lines.flatMap(l => l.operation === "+" && l.newLine !== null ? [l.newLine] : []))]));
   const summaries = allNodes.filter(n => n.units.length && n.answer.summary).slice(-10).map(n => n.answer.summary);
   const completed: PrPipelineResult = { quality, result: { summary: summaries.join("\n"), findings: quality === "limited" ? findings.filter(f => f.priorId === null) : findings,

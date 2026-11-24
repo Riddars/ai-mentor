@@ -457,6 +457,21 @@ function migrate(db: DatabaseSync): void {
       body_hash TEXT NOT NULL
     ); PRAGMA user_version = 25;`);
   }
+  if (version < 26) {
+    db.exec(`BEGIN;
+      WITH latest AS (
+        SELECT (SELECT MAX(a.id) FROM analyses a WHERE a.pull_request_id=pr.id
+          AND a.trigger='commit' AND a.outcome IN ('ok', 'partial') AND a.head_sha=pr.head_sha) AS id
+        FROM pull_requests pr WHERE pr.number>0 AND pr.state='open'
+      ), requests AS (
+        SELECT a.id, CASE WHEN json_valid(a.raw_response) THEN json_extract(a.raw_response,'$.refreshOverview') END AS reason
+        FROM analyses a JOIN latest ON latest.id=a.id WHERE a.outcome='partial' AND a.overview_reason IS NULL
+      )
+      UPDATE analyses SET overview_reason=(SELECT reason FROM requests WHERE requests.id=analyses.id)
+      WHERE id IN (SELECT id FROM requests WHERE typeof(reason)='text' AND length(trim(reason)) BETWEEN 1 AND 500);
+      PRAGMA user_version = 26;
+      COMMIT;`);
+  }
 
 }
 

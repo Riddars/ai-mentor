@@ -148,7 +148,7 @@ export async function executeOverviewJob(job: ReviewJob, cacheOnly = false): Pro
   const notes = getProjectNotes(project.id);
   const payload = job.payload as OverviewPayload & { initialMapMode?: "parts" | "snapshot" | "agent" };
   const configuredMapMode = process.env.INITIAL_OVERVIEW_MODE;
-  const rebuildMap = payload.reason === "manual" && configuredMapMode === "parts";
+  const rebuildMap = (payload.reason === "manual" || payload.reason === "merge") && configuredMapMode === "parts";
   const initialMapMode = payload.initialMapMode ?? (rebuildMap ? "parts"
     : payload.reason === "initial" && !notes && !getMemorySha(project.id) && configuredMapMode !== "agent"
       ? configuredMapMode === "parts" ? "parts" : "snapshot" : "agent");

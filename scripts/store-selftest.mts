@@ -249,7 +249,7 @@ check("…the model can neither reopen it nor raise it as new",
 const notesProject = store.createProjectManual("org", "notes");
 const prO = store.upsertPullRequest(notesProject, 1, { state: "open", headSha: "o-head", headRef: "feat-o", mergedIntoDefault: false });
 store.addProjectNotes(notesProject, "initial notes", { actor: "sup" });
-store.recordAnalysis({ prId: prO, headSha: "o-head", trigger: "commit", outcome: "ok", overviewReason: "first code" });
+store.recordAnalysis({ prId: prO, headSha: "o-head", trigger: "commit", outcome: "partial", overviewReason: "first code" });
 check("a PR review leaves the notes alone", store.getProjectNotes(notesProject)!.body === "initial notes");
 check("an open PR asking to re-read the project is listed",
   JSON.stringify(store.pendingOverviewRequests(notesProject)) === JSON.stringify([{ prNumber: 1, reason: "first code" }]));

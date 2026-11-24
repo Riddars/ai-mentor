@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, opendir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { getInstallationToken } from "@/lib/github/auth";
 import { githubRequest } from "@/lib/github/api";
 import type { ReviewParams } from "./review";
@@ -213,8 +213,19 @@ export async function openReviewRepository(directory: string, base: string, head
       if (!path || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").some(p => p === ".." || p === "." || !p)) return null;
       if (reviewFileExclusion(path, changes)) return null;
       const sha = revision === "base" ? mergeBase : head;
-      const tree = await git(["ls-tree", "-z", sha, "--", ":(literal)" + path]);
-      const match = /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(tree.toString("utf8"));
+      const entry = async (name: string) => /^(\d{6}) (\w+) ([0-9a-f]+)\t/.exec(
+        (await git(["ls-tree", "-z", sha, "--", ":(literal)" + name])).toString("utf8"));
+      let match = await entry(path);
+      if (match?.[1] === "120000" && match[2] === "blob") {
+        // Resolve one committed link inside this Git tree, without touching the filesystem.
+        const targetBytes = await git(["cat-file", "blob", match[3]], { maxBytes: 4096 });
+        const target = targetBytes.toString("utf8");
+        if (!target || !Buffer.from(target).equals(targetBytes) || target.startsWith("/") || /[\\:\x00-\x1f]/.test(target)) return null;
+        const resolved = posix.join(posix.dirname(path), target);
+        if (resolved === ".." || resolved.startsWith("../") || changedFileExclusion(path, resolved) ||
+            reviewFileExclusion(resolved, changes)) return null;
+        match = await entry(resolved);
+      }
       if (!match || match[2] !== "blob") return null;
       const mode = match[1], blob = match[3];
       if (!/^100(?:644|755)$/.test(mode)) return null;

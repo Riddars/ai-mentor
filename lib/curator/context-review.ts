@@ -38,7 +38,8 @@ export async function runContextReview(params: ReviewParams, prId: number, jobId
       provider: [...new Set(budget.calls.map(c => c.provider))].join("+") || targets.primary.provider,
       model: targets.primary.model.id, materials: input?.materials, summary: result?.result.summary ?? reason,
       rawResponse: result ? JSON.stringify(result.result) : reason, tokensIn: Math.max(0, budget.spent.input - charged.input),
-      tokensOut: Math.max(0, budget.spent.output - charged.output), overviewReason: outcome === "ok" ? result?.result.refreshOverview : null });
+      tokensOut: Math.max(0, budget.spent.output - charged.output),
+      overviewReason: outcome === "ok" || outcome === "partial" ? result?.result.refreshOverview : null });
     saveAnalysisDiagnostics(id, { ...result?.diagnostics, version: 1, jobId, reason: reason ?? (result?.quality === "complete" ? "completed" : "limited"), budget: budget.snapshot(), calls: budget.calls,
       quality: result?.quality ?? "not_reviewed", recovery: outcome === "ok" || outcome === "partial" ? "terminal" : loadPipelineJob(jobId).recovery,
       delivery: outcome === "ok" || outcome === "partial" ? "pending" : "not_applicable", configuration });

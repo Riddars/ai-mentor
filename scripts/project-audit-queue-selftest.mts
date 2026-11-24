@@ -209,7 +209,7 @@ try {
   assert.equal(scalar("SELECT COUNT(*) AS n FROM project_maps"), 0);
   assert.equal(scalar("SELECT COUNT(*) AS n FROM project_audit_runs"), 0);
   assert.equal(scalar("SELECT COUNT(*) AS n FROM context_pipeline_parts"), 0);
-  assert.equal(getDb().prepare("PRAGMA user_version").get()!.user_version, 25);
+  assert.equal(getDb().prepare("PRAGMA user_version").get()!.user_version, 26);
   console.log("ok audit queue: retry without repeated search, stale SHA, disabled/paused guards, no artificial PR and cascade cleanup");
 
   auditPhase = false;

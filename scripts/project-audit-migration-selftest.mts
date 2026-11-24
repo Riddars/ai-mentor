@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 if (process.argv[2] === "child") {
   const { getDb } = await import("@/lib/db");
   const db = getDb();
-  assert.equal(db.prepare("PRAGMA user_version").get()!.user_version, 25);
+  assert.equal(db.prepare("PRAGMA user_version").get()!.user_version, 26);
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_maps'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='project_audit_automatic'").get());
   db.close();

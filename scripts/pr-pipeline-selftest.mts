@@ -3,7 +3,7 @@ import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall, fauxTex
 import { diffSources, type DiffChange, type ReviewRepository } from "@/lib/curator/pr-full-diff";
 import { runPrPipeline } from "@/lib/curator/pr-pipeline";
 import { memoryPipelineStore } from "@/lib/curator/pipeline-store";
-import { ExecutionBudget, ExecutionBudgetError } from "@/lib/llm/execution";
+import { ExecutionBudget } from "@/lib/llm/execution";
 import type { ChatMessage, ChatOptions } from "@/lib/llm/chat";
 
 const changes: DiffChange[] = [], blocks: string[] = [];
@@ -79,14 +79,16 @@ assert.equal(sourceCalls + integrationCalls, completedSourceCalls, "recovery run
 forceUnresolved = true;
 const pending = { id: 7, prNumber: 1, area: "code" as const, severity: "important" as const, title: "Old issue", verify: "must be fixed",
   status: "pending" as const, locations: [{ kind: "file" as const, target: "a.ts", detail: "2" }] };
-const limited = await runPrPipeline({ ...options, store: memoryPipelineStore(), prior: [pending], ask: async (messages, opts) => {
+const withCaveats = await runPrPipeline({ ...options, store: memoryPipelineStore(), prior: [pending], ask: async (messages, opts) => {
   if (messages[0].content.includes("Проверь прежние замечания")) {
     return { provider: "fixture", model: "fixture", usage: { input: 1, output: 1 }, content: JSON.stringify({ verdicts: [{ id: 7, status: "closed", reason: "fixed" }] }) };
   }
   return ask(messages, opts);
 } });
-assert.equal(limited.quality, "limited");
-assert.ok(!limited.result.findings.some(f => f.priorId === 7), "limited review never rewrites pending to open or closed");
+assert.equal(withCaveats.quality, "complete");
+assert.ok(withCaveats.result.findings.some(f => f.priorId === 7 && f.status === "closed"),
+  "model caveats do not suppress a corroborated prior verdict");
+assert.ok((withCaveats.diagnostics.unresolved as string[]).includes("source question remains open"));
 assert.equal(pending.status, "pending");
 forceUnresolved = false;
 conflicting = true;
@@ -130,7 +132,7 @@ fillBounds = true; noFindings = true;
 const singleResult = await runPrPipeline({ ...options, repository: { ...repository, changes: [singleChange], sources: single },
   outputTokens: 8000, store: memoryPipelineStore(), budget: new ExecutionBudget({ maxTokens: 2000000, deadlineAt: Date.now() + 60000 }) });
 assert.ok(integrationCalls > beforeSingleMerge, "a single huge file also adapts descriptions for multipart reduction");
-assert.equal(singleResult.quality, "limited", "long unresolved entries remain explicit");
+assert.equal(singleResult.quality, "complete", "model caveats do not change completion status");
 assert.ok((singleResult.diagnostics.unresolved as string[]).includes("A long unresolved question. ".repeat(12)));
 fillBounds = false; noFindings = false;
 noFindings = true;
@@ -158,6 +160,6 @@ const largeChanges: DiffChange[] = Array.from({ length: 10 }, (_, i) => ({ ...ch
 const large = diffSources(Buffer.from(largeChanges.map(c => `diff --git a/${c.newPath} b/${c.newPath}\n--- a/${c.newPath}\n+++ b/${c.newPath}\n@@ -0,0 +1 @@\n+${"x".repeat(140000)}\n`).join("")), largeChanges, "large");
 const beforeBudgetReject = sourceCalls + integrationCalls;
 await assert.rejects(runPrPipeline({ ...options, primary: { ...options.primary, contextTokens: 128000 }, outputTokens: 8000,
-  repository: { ...repository, sources: large, changes: largeChanges }, store: memoryPipelineStore(), budget: new ExecutionBudget({ maxTokens: 950000, deadlineAt: Date.now() + 60000 }) }), ExecutionBudgetError);
+  repository: { ...repository, sources: large, changes: largeChanges }, store: memoryPipelineStore(), budget: new ExecutionBudget({ maxTokens: 950000, deadlineAt: Date.now() + 60000 }) }), { name: "ExecutionBudgetError", reason: "token_limit" });
 assert.equal(sourceCalls + integrationCalls, beforeBudgetReject, "insufficient complete plan rejected before source calls");
 console.log("ok PR pipeline wiring: multipart full diff, empty local findings preserved in integration, cross-part source verification, changed-line scope and no rebilling completed nodes");

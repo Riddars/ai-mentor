@@ -11,7 +11,7 @@ if (process.argv[2] === "child") {
   const { getDb } = await import("@/lib/db");
   const { recordJobEvent, saveAnalysisDiagnostics, getAnalysisDiagnostics, getJobDiagnostics } = await import("@/lib/curator/diagnostics");
   const db = getDb();
-  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 25);
+  assert.equal(db.prepare("PRAGMA user_version").get()?.user_version, 26);
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='context_pipeline_parts'").get());
   if (process.argv[3] === "fresh") {
     db.exec(`INSERT INTO projects(id,owner,repo) VALUES(1,'test','diagnostics');
@@ -53,7 +53,7 @@ if (process.argv[2] === "child") {
   const backup = process.env.DATABASE_PATH! + ".backup";
   db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
   const restored = new DatabaseSync(backup);
-  assert.equal(restored.prepare("PRAGMA user_version").get()?.user_version, 25);
+  assert.equal(restored.prepare("PRAGMA user_version").get()?.user_version, 26);
   assert.equal(restored.prepare("SELECT COUNT(*) AS n FROM review_diagnostic_events").get()?.n, 5);
   assert.equal(restored.prepare("SELECT diagnostics_json FROM analyses WHERE id=1").get()?.diagnostics_json, JSON.stringify(diagnostics));
   restored.close();
@@ -68,10 +68,11 @@ if (process.argv[2] === "child") {
       if (mode === "v20") {
         const old = new DatabaseSync(path);
         old.exec(`CREATE TABLE projects(id INTEGER PRIMARY KEY);
-          CREATE TABLE pull_requests(id INTEGER PRIMARY KEY);
-          CREATE TABLE analyses(id INTEGER PRIMARY KEY, comment TEXT);
+          CREATE TABLE pull_requests(id INTEGER PRIMARY KEY, state TEXT, number INTEGER, head_sha TEXT);
+          CREATE TABLE analyses(id INTEGER PRIMARY KEY, comment TEXT, pull_request_id INTEGER, head_sha TEXT,
+            trigger TEXT, outcome TEXT, raw_response TEXT, overview_reason TEXT);
           CREATE TABLE review_jobs(id INTEGER PRIMARY KEY,status TEXT,run_after TEXT);
-          INSERT INTO analyses VALUES(1,'legacy draft');
+          INSERT INTO analyses(id,comment) VALUES(1,'legacy draft');
           INSERT INTO review_jobs VALUES(1,'queued','2026-11-20');
           PRAGMA user_version=20;`);
         old.close();

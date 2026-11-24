@@ -1217,7 +1217,7 @@ export function takeOverviewRequest(prId: number): string | null {
     .prepare(
       `SELECT a.id, a.overview_reason AS reason
        FROM analyses a JOIN pull_requests pr ON pr.id = a.pull_request_id
-       WHERE a.pull_request_id = @prId AND a.trigger = 'commit' AND a.outcome = 'ok'
+       WHERE a.pull_request_id = @prId AND a.trigger = 'commit' AND a.outcome IN ('ok', 'partial')
          AND a.head_sha = pr.head_sha
        ORDER BY a.id DESC LIMIT 1`,
     )
@@ -1239,7 +1239,7 @@ export function pendingOverviewRequests(projectId: number): OverviewRequest[] {
       `SELECT pr.number AS prNumber, a.overview_reason AS reason
        FROM pull_requests pr
        JOIN analyses a ON a.id = (SELECT a2.id FROM analyses a2
-                                  WHERE a2.pull_request_id = pr.id AND a2.trigger = 'commit' AND a2.outcome = 'ok'
+                                  WHERE a2.pull_request_id = pr.id AND a2.trigger = 'commit' AND a2.outcome IN ('ok', 'partial')
                                     AND a2.head_sha = pr.head_sha
                                   ORDER BY a2.id DESC LIMIT 1)
        WHERE pr.project_id = @projectId AND COALESCE(pr.state, 'open') = 'open'
