@@ -22,6 +22,20 @@ for (const path of ["generate.py", "readme.TXT", "dvc.yaml", "configs/tsconfig.n
 const base = "a".repeat(40), head = "b".repeat(40);
 const limits = { contextTokens: 128000, outputTokens: 1000 };
 const budget = new ExecutionBudget({ maxTokens: 950000, deadlineAt: Date.now() + 60000 });
+const encodingChanges: DiffChange[] = ["до.py", "attachment.pdf", "после.py"].map(path => ({
+  oldPath: path, newPath: path, status: "M", oldBlob: base, newBlob: head, oldMode: "100644", newMode: "100644",
+}));
+const encodingPatch = Buffer.concat([
+  Buffer.from("diff --git a/до.py b/до.py\n@@ -0,0 +1 @@\n+привет\n"),
+  Buffer.from("diff --git a/attachment.pdf b/attachment.pdf\n@@ -0,0 +1 @@\n+"),
+  Buffer.from([0xff, 0xfe, 0x0a]),
+  Buffer.from("diff --git a/после.py b/после.py\n@@ -0,0 +1 @@\n+пока\n"),
+]);
+const [beforePdf, pdf, afterPdf] = diffSources(encodingPatch, encodingChanges, "encoding-test");
+assert.match(await unitText(sourceUnit(beforePdf)), /\+привет/);
+assert.match(await unitText(sourceUnit(afterPdf)), /\+пока/);
+assert.ok(pdf.omittedReason);
+assert.equal(pdf.hunks.length, 0);
 for (const path of paths) {
   assert.ok(snapshotExclusion(path), path);
   for (const [oldPath, newPath, status] of [[path, path, "A"], [path, path, "D"], [path, path, "M"], [path, "renamed.py", "R100"], ["renamed.py", path, "R100"]]) {

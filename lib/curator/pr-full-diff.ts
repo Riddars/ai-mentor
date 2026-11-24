@@ -129,7 +129,9 @@ function notebookChange(change: DiffChange) {
 }
 
 export function diffSources(rawPatch: Buffer, changes: DiffChange[], revision: string, notebooks = new Map<DiffChange, string>()): DiffSource[] {
-  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(rawPatch);
+  // Latin-1 preserves byte offsets while locating Git's ASCII patch headers.
+  const text = rawPatch.toString("latin1");
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const starts = [...text.matchAll(/^diff --git /gm)].map(match => match.index);
   if ((starts.length && starts[0] !== 0) || starts.length < changes.length) throw new Error("incomplete_snapshot: raw/patch file coverage mismatch");
   let block = 0;
@@ -141,13 +143,13 @@ export function diffSources(rawPatch: Buffer, changes: DiffChange[], revision: s
     const second = text.slice(starts[block + 1] ?? text.length, starts[block + 2] ?? text.length);
     // Git emits a type change as a deletion and addition sharing one raw T record.
     if (change.status === "T" && /^deleted file mode /m.test(first) && /^new file mode /m.test(second) && first.split("\n")[0] === second.split("\n")[0]) count = 2;
-    const original = text.slice(start, starts[block + count] ?? text.length);
+    const original = rawPatch.subarray(start, starts[block + count] ?? rawPatch.length);
     block += count;
     // Check both names: renaming data to a source extension must not expose its old content.
     const omittedReason = changedFileExclusion(change.oldPath, change.newPath) ?? undefined;
     const notebook = notebookChange(change);
     const patch = omittedReason ? JSON.stringify({ change, omittedReason })
-      : notebook ? notebooks.get(change) ?? JSON.stringify({ change, cells: "unavailable" }) : original;
+      : notebook ? notebooks.get(change) ?? JSON.stringify({ change, cells: "unavailable" }) : decoder.decode(original);
     const bytes = Buffer.from(patch);
     const viewHash = hashText(bytes);
     const id = hashText(JSON.stringify([revision, change, viewHash]));
