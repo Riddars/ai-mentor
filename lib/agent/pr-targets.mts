@@ -18,5 +18,7 @@ export function configuredPrTargets() {
     positive("PR_CONTEXT_TOKENS", positive("INITIAL_MAP_CONTEXT_TOKENS", 128000)));
   const fallback = process.env.LLM_FALLBACK_PROVIDER ? build(process.env.LLM_FALLBACK_PROVIDER,
     process.env.LLM_FALLBACK_MODEL ?? "deepseek/deepseek-v4-pro", positive("LLM_FALLBACK_CONTEXT_TOKENS", primary.contextTokens)) : undefined;
-  return { primary, fallback, maxTokens: positive("PR_TOKENS_PER_RUN", 950000), timeoutMs: positive("PR_TIMEOUT_MS", 20 * 60000) };
+  const runLimit = Number(process.env.PR_TOKENS_PER_RUN ?? 950000);
+  if (!Number.isSafeInteger(runLimit) || runLimit < 0) throw new Error("Invalid PR_TOKENS_PER_RUN");
+  return { primary, fallback, maxTokens: runLimit || Number.MAX_SAFE_INTEGER, timeoutMs: positive("PR_TIMEOUT_MS", 20 * 60000) };
 }
