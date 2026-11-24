@@ -1,5 +1,6 @@
 import type { ReviewRepository } from "@/lib/curator/pr-full-diff";
 import { reviewFileExclusion } from "@/lib/curator/snapshot-policy";
+import { notebookCells } from "@/lib/curator/notebook";
 import { measureContext, type ContextLimits } from "@/lib/curator/context-size";
 import { ExecutionBudgetError, type ExecutionBudget } from "@/lib/llm/execution";
 
@@ -51,6 +52,11 @@ export function createWholeFileReader(options: WholeFileReaderOptions) {
         if (file.bytes.includes(0)) throw new Error("binary");
         raw = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(file.bytes);
       } catch { return refuse("binary_or_unsupported_encoding"); }
+      if (/\.ipynb$/i.test(path)) {
+        const cells = notebookCells(raw);
+        if (cells === null) return refuse("invalid_notebook");
+        raw = cells;
+      }
       const result: ReadWholeFileResult = { status: "ok", path, revision, sha: file.revision, blob: file.blob, text: raw };
       if (!measureContext(options.withResult(result), options.limits).fits) return refuse("whole_file_exceeds_remaining_context");
       // Numbering is presentation, not clipping: every original line, including an empty final one.

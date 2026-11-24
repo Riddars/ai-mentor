@@ -65,6 +65,10 @@ try {
   assert.equal((await reader.read("a.ts")).status, "ok");
   assert.equal((await reader.read("a.ts")).status, "already_available");
   assert.equal((await reader.read("giant.json")).status, "denied");
+  const notebookRead = await reader.read("work.ipynb");
+  assert.equal(notebookRead.status, "ok");
+  assert.match(notebookRead.text!, /notebook source/);
+  assert.doesNotMatch(notebookRead.text!, /NOTEBOOK_OUTPUT_MUST_NOT_LEAK/);
   assert.equal((await reader.read(".env")).status, "denied");
   const final = JSON.stringify({ summary: "done", findings: [], changes: "a.ts changes return value", unresolved: [] });
   const faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);
