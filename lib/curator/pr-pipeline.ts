@@ -31,6 +31,7 @@ export interface PrPipelineOptions {
   ask?: (messages: ChatMessage[], options?: ChatOptions) => Promise<ChatResult>;
   onEvent?: (event: Record<string, unknown>) => void;
   outputTokens?: number;
+  useModelOutputLimit?: boolean;
   capabilityKey?: string;
   prior?: PriorFinding[];
   dismissed?: DismissedFinding[];
@@ -106,7 +107,7 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
     "unresolved — не более 20 пунктов. Формулируй вопросы кратко и конкретно.";
   const text = async (units: SourceUnit[]) => (await Promise.all(units.map(async unit => "=== MATERIAL " + JSON.stringify({ sourceId: unit.source.id,
     metadata: unit.source.kind === "diff" ? diffRangeMetadata(unit) : { path: unit.source.path } }) + " ===\n" + await unitText(unit) + "\n=== END MATERIAL ==="))).join("\n");
-  const template = (merging: boolean, selectedLimits = limits) => ({ version: "pr-context-v3.4", limits: selectedLimits,
+  const template = (merging: boolean, selectedLimits = limits) => ({ version: options.useModelOutputLimit ? "pr-context-v3.5" : "pr-context-v3.4", limits: selectedLimits,
     split: merging ? async () => { throw new Error("context_limit: one PR description cannot fit"); } : splitDiffUnit,
     template: async (units: SourceUnit[]): Promise<ChatMessage[]> => [{ role: "system", content: boundedPrompt(merging) },
       { role: "user", content: options.context + "\nВерсии base/merge-base/head: " + revision + "\nНазначенные материалы:\n" + await text(units) }] });
@@ -254,7 +255,7 @@ export async function runPrPipeline(options: PrPipelineOptions): Promise<PrPipel
         const run = await runPrContextAgent({ repository, systemPrompt: request[0].content, userPrompt: request[1].content,
           primary: { ...options.primary, contextTokens: selectedLimits.contextTokens },
           fallback: options.fallback ? { ...options.fallback, contextTokens: Math.min(options.fallback.contextTokens, selectedLimits.contextTokens) } : undefined,
-          budget, outputTokens, futureReserve,
+          budget, outputTokens, futureReserve, useModelOutputLimit: options.useModelOutputLimit,
           checkpoint: checkpoint ? JSON.parse(checkpoint.content) as PrAgentCheckpoint : undefined,
           onCheckpoint: state => store.save("pr-agent:" + key, part.requestHash, { content: JSON.stringify(state), provider: "internal", model: "agent-state", usage: { input: 0, output: 0 } }),
           onEvent: emit });

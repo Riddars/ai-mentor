@@ -23,6 +23,7 @@ export interface PrContextAgentOptions {
   fallback?: PrAgentTarget;
   budget: ExecutionBudget;
   outputTokens?: number;
+  useModelOutputLimit?: boolean;
   futureReserve: number;
   checkpoint?: PrAgentCheckpoint;
   onCheckpoint?(checkpoint: PrAgentCheckpoint): void;
@@ -93,7 +94,11 @@ export async function runPrContextAgent(options: PrContextAgentOptions): Promise
     const measured = measureContext(context, { ...limits, contextTokens: target.contextTokens });
     if (!measured.fits) throw new ContextWindowError(target.contextTokens);
     const reserve = options.futureReserve + (finalising ? measured.required : 2 * measured.required);
-    const admission = options.budget.admit({ inputTokens: measured.inputTokens + measured.allowance, maxOutputTokens: outputTokens, reserveTokens: reserve });
+    const inputTokens = measured.inputTokens + measured.allowance;
+    const maxOutputTokens = options.useModelOutputLimit
+      ? Math.min(target.model.maxTokens, target.contextTokens - inputTokens)
+      : outputTokens;
+    const admission = options.budget.admit({ inputTokens, maxOutputTokens, reserveTokens: reserve });
     if (!admission.allowed) throw new ExecutionBudgetError(admission.reason!);
     const call: LlmCallRecord = { id: randomUUID(), phase: finalising ? "synthesis" : "research", provider: target.provider, model: target.model.id,
       startedAt: Date.now(), status: "started", inputTokens: 0, outputTokens: 0, usageSource: "unknown", reservedTokens: measured.inputTokens + measured.allowance + admission.maxOutputTokens };
