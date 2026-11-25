@@ -34,7 +34,7 @@ faux.setResponses(Array.from({ length: 30 }, () => () => {
   return fauxAssistantMessage(fauxText(JSON.stringify({ summary: "Reviewed", changes: "Changed return value", unresolved: limited ? ["cannot verify fixture"] : [], refresh_overview: refresh ? "Changed public contract" : null,
     findings: candidate ? [{ prior_id: null, status: "open", area: "code", severity: "important", title: "Fixture error", description: "wrong value", evidence: "return 2", impact: "wrong output", recommendation: "restore", verify: "return 1", root_cause: "changed value", source_ids: [repository.sources[0].id], locations: [{ kind: "file", target: "code.ts", detail: "1" }] }] : [] })));
 }));
-const targets = { primary: { provider: "fixture", model: faux.getModel(), stream: models.streamSimple.bind(models), contextTokens: 128000 }, fallback: undefined, maxTokens: 950000, timeoutMs: 60000 };
+const targets = { primary: { provider: "fixture", model: faux.getModel(), stream: models.streamSimple.bind(models), contextTokens: 128000 }, fallback: undefined, useModelOutputLimit: false, maxTokens: 950000, timeoutMs: 60000 };
 globalThis.fetch = async (input, init) => {
   const path = new URL(String(input)).pathname;
   if (path.endsWith("/chat/completions") && httpRejection) return Response.json({ error: { code: httpRejection === 400 ? "context_length_exceeded" : "rate_limit", message: "fixture rejection" } }, { status: httpRejection });
